@@ -368,6 +368,8 @@ fun ChatScreen(
     selectedTab: NexusTab = NexusTab.CHAT,
     onTabSelected: (NexusTab) -> Unit = {},
     onSignOut: () -> Unit = {},
+    // Reports when a full-screen overlay is up, so the home pager can lock swiping.
+    onOverlayChange: (Boolean) -> Unit = {},
 ) {
     // Index of the story currently open in the full-screen viewer (null = closed).
     var openedStory by remember { mutableStateOf<Int?>(null) }
@@ -403,6 +405,11 @@ fun ChatScreen(
         archivedIds = ChatFlags.archived(context)
         pinnedIds = ChatFlags.pinned(context)
     }
+
+    // Tell the host pager whenever something covers the whole screen.
+    val overlayOpen = openedStory != null || openedChat != null ||
+        showAddStatus || showNewGroup || showSettings
+    LaunchedEffect(overlayOpen) { onOverlayChange(overlayOpen) }
 
     // --- Backend: load data + realtime updates (only when configured) --------
     if (ApiConfig.ENABLED) {

@@ -4,14 +4,18 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -19,6 +23,7 @@ import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
 import com.example.syntra.net.SyntraClient
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.example.syntra.ui.theme.AppTheme
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.SyntraTheme
@@ -101,30 +106,55 @@ private fun NexusApp() {
     }
 }
 
+/** Home tabs, in the same order as the bottom bar, so a swipe steps between them. */
+private val tabOrder = listOf(NexusTab.CHAT, NexusTab.SHORTS, NexusTab.ROOMS, NexusTab.CALLS)
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MainTabs(onSignOut: () -> Unit) {
-    var tab by remember { mutableStateOf(NexusTab.CHAT) }
-    when (tab) {
-        NexusTab.SHORTS -> ShortsScreen(
-            modifier = Modifier.fillMaxSize(),
-            selectedTab = tab,
-            onTabSelected = { tab = it },
-        )
-        NexusTab.CALLS -> CallsScreen(
-            modifier = Modifier.fillMaxSize(),
-            selectedTab = tab,
-            onTabSelected = { tab = it },
-        )
-        NexusTab.ROOMS -> RoomsScreen(
-            modifier = Modifier.fillMaxSize(),
-            selectedTab = tab,
-            onTabSelected = { tab = it },
-        )
-        else -> ChatScreen(
-            modifier = Modifier.fillMaxSize(),
-            selectedTab = tab,
-            onTabSelected = { tab = it },
-            onSignOut = onSignOut,
-        )
+    val pager = rememberPagerState(pageCount = { tabOrder.size })
+    val scope = rememberCoroutineScope()
+    // A full-screen overlay (chat detail, story viewer, voice room…) locks the
+    // pager so its own gestures don't accidentally flip to the next tab.
+    var chatOverlay by remember { mutableStateOf(false) }
+    var roomOverlay by remember { mutableStateOf(false) }
+
+    fun goTo(tab: NexusTab) {
+        scope.launch { pager.animateScrollToPage(tabOrder.indexOf(tab)) }
+    }
+
+    HorizontalPager(
+        state = pager,
+        userScrollEnabled = !chatOverlay && !roomOverlay,
+        // Keep all four tabs alive so swiping back doesn't reload/reconnect.
+        beyondViewportPageCount = tabOrder.size,
+        modifier = Modifier.fillMaxSize(),
+    ) { page ->
+        val tab = tabOrder[page]
+        when (tab) {
+            NexusTab.CHAT -> ChatScreen(
+                modifier = Modifier.fillMaxSize(),
+                selectedTab = tab,
+                onTabSelected = { goTo(it) },
+                onSignOut = onSignOut,
+                onOverlayChange = { chatOverlay = it },
+            )
+            NexusTab.SHORTS -> ShortsScreen(
+                modifier = Modifier.fillMaxSize(),
+                selectedTab = tab,
+                onTabSelected = { goTo(it) },
+            )
+            NexusTab.ROOMS -> RoomsScreen(
+                modifier = Modifier.fillMaxSize(),
+                selectedTab = tab,
+                onTabSelected = { goTo(it) },
+                onOverlayChange = { roomOverlay = it },
+            )
+            NexusTab.CALLS -> CallsScreen(
+                modifier = Modifier.fillMaxSize(),
+                selectedTab = tab,
+                onTabSelected = { goTo(it) },
+            )
+        }
     }
 }

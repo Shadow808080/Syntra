@@ -124,6 +124,7 @@ fun RoomsScreen(
     modifier: Modifier = Modifier,
     selectedTab: NexusTab = NexusTab.ROOMS,
     onTabSelected: (NexusTab) -> Unit = {},
+    onOverlayChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -132,6 +133,7 @@ fun RoomsScreen(
     // Room currently joined and shown full-screen (null = browsing the list).
     var openedRoom by remember { mutableStateOf<Room?>(null) }
     var showCreate by remember { mutableStateOf(false) }
+    LaunchedEffect(openedRoom) { onOverlayChange(openedRoom != null) }
     val allRooms = remember { mutableStateListOf<Room>() }
     val roomFaces = remember { mutableStateMapOf<String, List<NetRoomParticipant>>() }
     var loading by remember { mutableStateOf(true) }
