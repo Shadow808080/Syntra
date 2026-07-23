@@ -842,6 +842,7 @@ private fun DetailTopBar(
                 gradient = convo.gradient,
                 initial = convo.name.first().toString(),
                 size = 36.dp,
+                photoUrl = convo.avatarUrl,
             )
         }
         Spacer(Modifier.width(14.dp))

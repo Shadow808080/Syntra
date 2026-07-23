@@ -191,6 +191,8 @@ data class Conversation(
     val counterpartUsername: String? = null,
     // Newest message the peer has read; drives the ✓✓ indicator.
     val counterpartLastReadId: String? = null,
+    // Real profile photo of the counterpart / group, when the server knows one.
+    val avatarUrl: String? = null,
 )
 
 // Stable placeholder gradients, picked from the id hash (align. doc §6).
@@ -295,6 +297,9 @@ private fun NetConversation.toUi() = Conversation(
     counterpartId = counterpartId,
     counterpartUsername = counterpartUsername,
     counterpartLastReadId = counterpartLastReadId,
+    // Only a real URL is usable; a bare media id stays null and falls back to
+    // the letter tile until the photo is resolved (see resolveAvatars).
+    avatarUrl = avatarMediaId?.takeIf { it.startsWith("http") },
 )
 
 /** Null when the group carries no media — an empty ring would be a lie. */
@@ -421,6 +426,9 @@ fun ChatScreen(
 
     // Pull-to-refresh state for the chat list.
     var refreshing by remember { mutableStateOf(false) }
+    // username -> resolved photo URL, so the list endpoint's missing avatars are
+    // only looked up once per session.
+    val avatarCache = remember { mutableStateMapOf<String, String>() }
 
     // Reloads chats + stories from the backend. Shared by first load and pull-to-refresh.
     suspend fun refresh() {
@@ -440,6 +448,30 @@ fun ChatScreen(
             SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
             SyntraClient.presenceQuery(convs.mapNotNull { it.counterpartId })
         }.onFailure { Toast.makeText(context, "Sync gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
+        // The conversation list may carry only a media id (or nothing) for the
+        // photo. Resolve the real URL per person in the background so rows fill
+        // in as they arrive — and so a changed profile photo shows up here.
+        scope.launch {
+            // A refresh must see changed photos, so start from a clean cache; the
+            // map then just avoids refetching the same person twice in one pass.
+            avatarCache.clear()
+            chats.toList().forEach { c ->
+                val username = c.counterpartUsername
+                if (username.isNullOrBlank()) return@forEach
+                val cached = avatarCache[username]
+                val url = cached ?: runCatching { SyntraClient.getUser(username) }
+                    .getOrNull()
+                    ?.avatarMediaId
+                    ?.takeIf { it.startsWith("http") }
+                    ?.also { avatarCache[username] = it }
+                if (url != null) {
+                    val i = chats.indexOfFirst { it.id == c.id }
+                    if (i >= 0 && chats[i].avatarUrl != url) {
+                        chats[i] = chats[i].copy(avatarUrl = url)
+                    }
+                }
+            }
+        }
         // Pull my own name/photo from the server so a change made on another
         // device (there is no realtime profile event) shows up here too.
         runCatching {
@@ -1104,6 +1136,7 @@ private fun ConversationRow(
                 gradient = convo.gradient,
                 initial = convo.name.first().toString(),
                 size = 52.dp,
+                photoUrl = convo.avatarUrl,
             )
             // Tick replaces the presence dot while this row is picked.
             if (selected) {
@@ -1451,6 +1484,11 @@ internal fun GradientAvatar(
     initial: String,
     size: androidx.compose.ui.unit.Dp,
     ring: Boolean = false,
+    /**
+     * Real profile photo. When this is a usable URL it replaces the letter tile,
+     * so changing a profile picture is reflected everywhere an avatar is drawn.
+     */
+    photoUrl: String? = null,
 ) {
     val base = Modifier.size(size)
     val ringed = if (ring) {
@@ -1465,12 +1503,25 @@ internal fun GradientAvatar(
             .background(Brush.verticalGradient(gradient), CircleShape),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = initial.uppercase(),
-            color = Color.White,
-            fontSize = (size.value / 2.6f).sp,
-            fontWeight = FontWeight.SemiBold,
-        )
+        // A bare media id is not something Coil can load — only take real URLs,
+        // otherwise keep the letter tile rather than showing a broken image.
+        if (photoUrl != null && photoUrl.startsWith("http")) {
+            AsyncImage(
+                model = photoUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(size)
+                    .clip(CircleShape),
+            )
+        } else {
+            Text(
+                text = initial.uppercase(),
+                color = Color.White,
+                fontSize = (size.value / 2.6f).sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
     }
 }
 
