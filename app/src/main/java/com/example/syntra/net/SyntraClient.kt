@@ -393,6 +393,12 @@ object SyntraClient {
         )
     }
 
+    /** Mute a conversation for [minutes], or `null` to unmute. `PUT .../mute`. */
+    suspend fun setConversationMute(conversationId: String, minutes: Int?) {
+        val body = JSONObject().put("duration_minutes", minutes ?: JSONObject.NULL)
+        putData("/api/v1/conversations/$conversationId/mute", body)
+    }
+
     /** Blocks a user (by username — the UUID form 404s). Verified → 204. */
     suspend fun blockUser(username: String) {
         postData("/api/v1/users/$username/block", JSONObject())

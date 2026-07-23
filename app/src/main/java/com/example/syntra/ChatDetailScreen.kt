@@ -629,11 +629,15 @@ fun ChatDetailScreen(
 
     if (showProfile) {
         ProfileUserScreen(
-            username = conversation.counterpartUsername,
-            fallbackName = conversation.name,
-            fallbackGradient = conversation.gradient,
+            conversation = conversation,
             onBack = { showProfile = false },
-            onMessage = { showProfile = false }, // already in this chat
+            onCall = {
+                Toast.makeText(context, "Panggilan suara segera hadir.", Toast.LENGTH_SHORT).show()
+            },
+            onVideo = {
+                Toast.makeText(context, "Panggilan video segera hadir.", Toast.LENGTH_SHORT).show()
+            },
+            onSearch = { showProfile = false }, // back to the conversation
         )
     }
 }
