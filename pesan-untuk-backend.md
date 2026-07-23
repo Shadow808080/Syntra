@@ -167,6 +167,18 @@ Media (audio/video) lewat LiveKit persis seperti voice room.
   bisa langsung menyertakan `call_id` + `kind` + `initiator`, app tak perlu
   bulat-balik `GET .../call` dulu (bukan penghalang, hanya optimasi).
 
+## 🟡 10. Event realtime saat profil berubah (`user.updated`)
+
+Ganti foto/nama profil lewat `PATCH /users/me` berhasil dan tersimpan, tapi
+**tidak ada event WebSocket** yang memberi tahu perangkat lain. Akibatnya foto
+baru baru muncul di perangkat lain saat app dibuka ulang / refresh (app sekarang
+menarik `GET /users/me` tiap start & pull-to-refresh untuk itu).
+
+Untuk sinkron **real-time** antar-perangkat milik pengguna yang sama, mohon
+siarkan event mis. `user.updated { user_id, display_name, avatar_url }` ke semua
+sesi user tersebut setiap `PATCH /users/me`. App akan langsung memperbarui cache
+lokal begitu event ini ada.
+
 ## ✅ Shorts/Reels — sudah disambungkan, terima kasih
 
 Endpoint `GET /reels`, `POST /reels {media_id, caption}`,

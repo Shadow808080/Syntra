@@ -48,8 +48,10 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.ModeComment
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -91,7 +93,7 @@ import kotlinx.coroutines.launch
 // Shorts / Reels — a chronological, vertically-swiped video feed (docs/api.md).
 // ---------------------------------------------------------------------------
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ShortsScreen(
     modifier: Modifier = Modifier,
@@ -105,6 +107,7 @@ fun ShortsScreen(
     val scope = rememberCoroutineScope()
     val reels = remember { mutableStateListOf<NetReel>() }
     var loading by remember { mutableStateOf(true) }
+    var refreshing by remember { mutableStateOf(false) }
     var posting by remember { mutableStateOf(false) }
     var pendingVideo by remember { mutableStateOf<Uri?>(null) }
     var commentsFor by remember { mutableStateOf<NetReel?>(null) }
@@ -159,23 +162,36 @@ fun ShortsScreen(
                         SyntraClient.fireAndForget { SyntraClient.viewReel(r.id) }
                     }
                 }
-                VerticalPager(
-                    state = pager,
+                // Swipe down on the first reel to reload the feed.
+                PullToRefreshBox(
+                    isRefreshing = refreshing,
+                    onRefresh = {
+                        scope.launch {
+                            refreshing = true
+                            reload()
+                            refreshing = false
+                        }
+                    },
                     modifier = Modifier.fillMaxSize(),
-                    beyondViewportPageCount = 1,
-                ) { page ->
-                    val reel = reels[page]
-                    ReelPage(
-                        reel = reel,
-                        // Play only the reel in view *and* only while the tab is shown.
-                        active = visible && page == pager.currentPage,
-                        onLike = { toggleLike(reel) },
-                        onSave = { toggleSave(reel) },
-                        onComment = { commentsFor = reel },
-                        onShare = {
-                            Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show()
-                        },
-                    )
+                ) {
+                    VerticalPager(
+                        state = pager,
+                        modifier = Modifier.fillMaxSize(),
+                        beyondViewportPageCount = 1,
+                    ) { page ->
+                        val reel = reels[page]
+                        ReelPage(
+                            reel = reel,
+                            // Play only the reel in view *and* only while the tab is shown.
+                            active = visible && page == pager.currentPage,
+                            onLike = { toggleLike(reel) },
+                            onSave = { toggleSave(reel) },
+                            onComment = { commentsFor = reel },
+                            onShare = {
+                                Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show()
+                            },
+                        )
+                    }
                 }
             }
         }

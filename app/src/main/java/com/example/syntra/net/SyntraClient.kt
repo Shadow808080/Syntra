@@ -341,6 +341,24 @@ object SyntraClient {
         )
     }
 
+    /**
+     * My own profile from `GET /users/me`. The server resolves the photo to a ready
+     * `avatar_url` (stored here in [NetUser.avatarMediaId]); syncing this on startup
+     * is how a photo changed on another device shows up on this one.
+     */
+    suspend fun getMyProfile(): NetUser = withContext(Dispatchers.IO) {
+        val data = getData("/api/v1/users/me") as JSONObject
+        NetUser(
+            id = data.optString("id", ""),
+            username = data.optString("username", ""),
+            displayName = data.optString("display_name", ""),
+            avatarMediaId = data.optString("avatar_url", "").ifBlank { data.optString("avatar_media_id", "") },
+            followerCount = data.optInt("follower_count", 0),
+            followingCount = data.optInt("following_count", 0),
+            isSelf = true,
+        )
+    }
+
     // -----------------------------------------------------------------------
     // Reels / Shorts (Fase 2)
     // -----------------------------------------------------------------------

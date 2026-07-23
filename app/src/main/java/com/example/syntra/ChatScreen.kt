@@ -442,6 +442,15 @@ fun ChatScreen(
             SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
             SyntraClient.presenceQuery(convs.mapNotNull { it.counterpartId })
         }.onFailure { Toast.makeText(context, "Sync gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
+        // Pull my own name/photo from the server so a change made on another
+        // device (there is no realtime profile event) shows up here too.
+        runCatching {
+            val me = SyntraClient.getMyProfile()
+            if (me.displayName.isNotBlank()) ProfileStore.setDisplayName(context, me.displayName)
+            me.avatarMediaId?.takeIf { it.isNotBlank() }?.let { url ->
+                ProfileStore.setAvatar(context, url, ProfileStore.avatarMediaId(context).orEmpty())
+            }
+        }
     }
 
     // --- Backend: load data + realtime updates (only when configured) --------
