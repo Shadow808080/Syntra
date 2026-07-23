@@ -531,7 +531,7 @@ fun ChatDetailScreen(
             onDeleteForEveryone = {
                 pendingMessage = null
                 scope.launch {
-                    runCatching { SyntraClient.deleteMessage(conversation.id, msg.id) }
+                    runCatching { SyntraClient.deleteMessage(msg.id) }
                         .onSuccess { messages.remove(msg) }
                         .onFailure {
                             val why = if ((it as? ApiException)?.code == "not_found") {

@@ -7,6 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -123,37 +124,36 @@ private fun MainTabs(onSignOut: () -> Unit) {
         scope.launch { pager.animateScrollToPage(tabOrder.indexOf(tab)) }
     }
 
-    HorizontalPager(
-        state = pager,
-        userScrollEnabled = !chatOverlay && !roomOverlay,
-        // Keep all four tabs alive so swiping back doesn't reload/reconnect.
-        beyondViewportPageCount = tabOrder.size,
-        modifier = Modifier.fillMaxSize(),
-    ) { page ->
-        val tab = tabOrder[page]
-        when (tab) {
-            NexusTab.CHAT -> ChatScreen(
-                modifier = Modifier.fillMaxSize(),
-                selectedTab = tab,
-                onTabSelected = { goTo(it) },
-                onSignOut = onSignOut,
-                onOverlayChange = { chatOverlay = it },
-            )
-            NexusTab.SHORTS -> ShortsScreen(
-                modifier = Modifier.fillMaxSize(),
-                selectedTab = tab,
-                onTabSelected = { goTo(it) },
-            )
-            NexusTab.ROOMS -> RoomsScreen(
-                modifier = Modifier.fillMaxSize(),
-                selectedTab = tab,
-                onTabSelected = { goTo(it) },
-                onOverlayChange = { roomOverlay = it },
-            )
-            NexusTab.CALLS -> CallsScreen(
-                modifier = Modifier.fillMaxSize(),
-                selectedTab = tab,
-                onTabSelected = { goTo(it) },
+    // One fixed bottom bar below the pager — it never slides with the pages, only
+    // its highlight follows. It hides when a full-screen overlay is up so chat
+    // detail / story viewer / voice room can cover the whole screen.
+    val overlay = chatOverlay || roomOverlay
+    Column(modifier = Modifier.fillMaxSize()) {
+        HorizontalPager(
+            state = pager,
+            userScrollEnabled = !overlay,
+            // Keep all four tabs alive so swiping back doesn't reload/reconnect.
+            beyondViewportPageCount = tabOrder.size,
+            modifier = Modifier.weight(1f),
+        ) { page ->
+            when (tabOrder[page]) {
+                NexusTab.CHAT -> ChatScreen(
+                    modifier = Modifier.fillMaxSize(),
+                    onSignOut = onSignOut,
+                    onOverlayChange = { chatOverlay = it },
+                )
+                NexusTab.SHORTS -> ShortsScreen(modifier = Modifier.fillMaxSize())
+                NexusTab.ROOMS -> RoomsScreen(
+                    modifier = Modifier.fillMaxSize(),
+                    onOverlayChange = { roomOverlay = it },
+                )
+                NexusTab.CALLS -> CallsScreen(modifier = Modifier.fillMaxSize())
+            }
+        }
+        if (!overlay) {
+            NexusBottomBar(
+                selected = tabOrder[pager.currentPage],
+                onSelect = { goTo(it) },
             )
         }
     }

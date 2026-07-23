@@ -110,7 +110,6 @@ fun ShortsScreen(
                     modifier = Modifier.padding(end = 16.dp, bottom = 20.dp),
                 )
             }
-            NexusBottomBar(selected = selectedTab, onSelect = onTabSelected)
         }
     }
 }

@@ -710,15 +710,13 @@ fun ChatScreen(
                     }
                 }
             }
-            NexusBottomBar(selected = selectedTab, onSelect = onTabSelected)
         }
 
         // Floating button: add a new story from the gallery.
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                // Clear of the bottom bar so it never sits on top of the Calls tab.
-                .padding(end = 20.dp, bottom = 140.dp)
+                .padding(end = 20.dp, bottom = 24.dp)
                 .size(56.dp)
                 .background(
                     brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),

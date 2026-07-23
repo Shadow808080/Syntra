@@ -134,6 +134,28 @@ data class NetStoryViewer(
     val viewedAt: String = "",
 )
 
+data class NetReel(
+    val id: String,
+    val mediaUrl: String,
+    val caption: String = "",
+    val creatorUsername: String = "",
+    val creatorName: String = "",
+    val creatorAvatarUrl: String? = null,
+    val likeCount: Int = 0,
+    val commentCount: Int = 0,
+    val viewCount: Int = 0,
+    val isLiked: Boolean = false,
+    val isSaved: Boolean = false,
+)
+
+data class NetReelComment(
+    val id: String,
+    val username: String = "",
+    val avatarUrl: String? = null,
+    val body: String = "",
+    val createdAt: String = "",
+)
+
 data class NetStoryGroup(
     val authorId: String,
     val username: String,

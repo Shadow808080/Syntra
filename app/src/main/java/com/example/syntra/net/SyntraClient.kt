@@ -188,6 +188,12 @@ object SyntraClient {
         http.newCall(req).execute().use { it.dataElement() }
     }
 
+    private suspend fun putData(path: String, json: JSONObject): Any = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url(rest(path)).auth()
+            .put(json.toString().toRequestBody(JSON)).build()
+        http.newCall(req).execute().use { it.dataElement() }
+    }
+
     private suspend fun delete(path: String) = withContext(Dispatchers.IO) {
         http.newCall(Request.Builder().url(rest(path)).auth().delete().build()).execute()
             .use { it.dataElement() }
@@ -213,11 +219,10 @@ object SyntraClient {
     }
 
     /**
-     * "Delete for everyone". Not in the route table yet (docs list "ubah/hapus pesan"
-     * under what is missing), so this currently returns not_found — the UI says so.
+     * "Delete for everyone" — sender only, marks the message is_deleted and (per the
+     * backend note) broadcasts so the peer updates live. Path is `/messages/{id}`.
      */
-    suspend fun deleteMessage(conversationId: String, messageId: String) =
-        delete("/api/v1/conversations/$conversationId/messages/$messageId")
+    suspend fun deleteMessage(messageId: String) = delete("/api/v1/messages/$messageId")
 
     suspend fun createDirect(userId: String): String {
         val payload = JSONObject().put("type", "direct").put("user_id", userId)
@@ -315,6 +320,65 @@ object SyntraClient {
             // The response carries a ready URL under avatar_url.
             avatarMediaId = data.optString("avatar_url", "").ifBlank { data.optString("avatar_media_id", "") },
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Reels / Shorts (Fase 2)
+    // -----------------------------------------------------------------------
+
+    private fun JSONObject.toReel() = NetReel(
+        id = getString("id"),
+        mediaUrl = optString("media_url", ""),
+        caption = optString("caption", ""),
+        creatorUsername = optJSONObject("creator")?.optString("username") ?: "",
+        creatorName = optJSONObject("creator")?.optString("display_name") ?: "",
+        creatorAvatarUrl = optJSONObject("creator")?.let { c ->
+            c.optString("avatar_url", "").ifBlank { null }
+        },
+        likeCount = optInt("like_count", 0),
+        commentCount = optInt("comment_count", 0),
+        viewCount = optInt("view_count", 0),
+        isLiked = optBoolean("is_liked", false),
+        isSaved = optBoolean("is_saved", false),
+    )
+
+    suspend fun getReels(): List<NetReel> =
+        (getData("/api/v1/reels") as JSONArray).mapObjects { it.toReel() }
+
+    suspend fun postReel(mediaId: String, caption: String): String {
+        val data = postData("/api/v1/reels", JSONObject().put("media_id", mediaId).put("caption", caption)) as JSONObject
+        return data.optString("id", "")
+    }
+
+    /** Both like and save are toggles: PUT to add, DELETE to remove. */
+    suspend fun likeReel(reelId: String, like: Boolean) {
+        if (like) putData("/api/v1/reels/$reelId/like", JSONObject())
+        else delete("/api/v1/reels/$reelId/like")
+    }
+
+    suspend fun saveReel(reelId: String, save: Boolean) {
+        if (save) putData("/api/v1/reels/$reelId/save", JSONObject())
+        else delete("/api/v1/reels/$reelId/save")
+    }
+
+    /** Safe to call each time a reel is shown; the server dedupes per viewer. */
+    suspend fun viewReel(reelId: String) {
+        runCatching { postData("/api/v1/reels/$reelId/view", JSONObject()) }
+    }
+
+    suspend fun getReelComments(reelId: String): List<NetReelComment> =
+        (getData("/api/v1/reels/$reelId/comments") as JSONArray).mapObjects {
+            NetReelComment(
+                id = it.getString("id"),
+                username = it.optJSONObject("creator")?.optString("username") ?: "",
+                avatarUrl = it.optJSONObject("creator")?.optString("avatar_url", "")?.ifBlank { null },
+                body = it.optString("body", ""),
+                createdAt = it.optString("created_at", ""),
+            )
+        }
+
+    suspend fun postReelComment(reelId: String, body: String) {
+        postData("/api/v1/reels/$reelId/comments", JSONObject().put("body", body))
     }
 
     /** People I follow — the pool to pick group members from. */

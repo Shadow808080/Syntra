@@ -315,8 +315,6 @@ fun CallsScreen(
                     }
                 }
             }
-
-            NexusBottomBar(selected = selectedTab, onSelect = onTabSelected)
         }
     }
 }
