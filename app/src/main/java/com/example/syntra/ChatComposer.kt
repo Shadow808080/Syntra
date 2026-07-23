@@ -25,6 +25,10 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -271,21 +276,47 @@ fun RecordingBar(seconds: Int, onCancel: () -> Unit) {
 @Composable
 fun AttachmentSheet(onCamera: () -> Unit, onGallery: () -> Unit, onDismiss: () -> Unit) {
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(NexusSurface, RoundedCornerShape(22.dp))
-                .padding(vertical = 26.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+                .background(NexusSurface, RoundedCornerShape(24.dp))
+                .padding(top = 20.dp, bottom = 24.dp),
         ) {
-            AttachOption("Kamera", "📷", NexusAccent, onCamera)
-            AttachOption("Galeri", "🖼️", Color(0xFF9733EE), onGallery)
+            Text(
+                text = "Kirim media",
+                color = NexusTextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 22.dp, bottom = 18.dp),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                AttachOption(
+                    label = "Kamera",
+                    icon = Icons.Filled.PhotoCamera,
+                    gradient = listOf(Color(0xFF3B68F5), Color(0xFF6E8BFF)),
+                    onClick = onCamera,
+                )
+                AttachOption(
+                    label = "Galeri",
+                    icon = Icons.Filled.Image,
+                    gradient = listOf(Color(0xFF9733EE), Color(0xFFDA22FF)),
+                    onClick = onGallery,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun AttachOption(label: String, emoji: String, tint: Color, onClick: () -> Unit) {
+private fun AttachOption(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    gradient: List<Color>,
+    onClick: () -> Unit,
+) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.clickable(
@@ -296,13 +327,13 @@ private fun AttachOption(label: String, emoji: String, tint: Color, onClick: () 
     ) {
         Box(
             modifier = Modifier
-                .size(60.dp)
-                .background(tint.copy(alpha = 0.18f), CircleShape),
+                .size(64.dp)
+                .background(Brush.linearGradient(gradient), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Text(emoji, fontSize = 26.sp)
+            Icon(icon, label, tint = Color.White, modifier = Modifier.size(28.dp))
         }
-        Spacer(Modifier.height(8.dp))
-        Text(label, color = NexusTextPrimary, fontSize = 13.sp)
+        Spacer(Modifier.height(10.dp))
+        Text(label, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }
