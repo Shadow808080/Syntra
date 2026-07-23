@@ -182,6 +182,7 @@ fun ChatDetailScreen(
     var showReport by remember(conversation) { mutableStateOf(false) }
     var confirmBlock by remember(conversation) { mutableStateOf(false) }
     var showChatTheme by remember(conversation) { mutableStateOf(false) }
+    var showProfile by remember(conversation) { mutableStateOf(false) }
     var chatTheme by remember(conversation) { mutableStateOf(ChatThemeStore.get(context, conversation.id)) }
     val listState = rememberLazyListState()
 
@@ -430,6 +431,7 @@ fun ChatDetailScreen(
             peerTyping = peerTyping,
             onBack = onBack,
             onLongPressAvatar = { confirmClear = true },
+            onOpenProfile = { showProfile = true },
             onMenuAction = { action ->
                 when (action) {
                     "Laporkan" -> showReport = true
@@ -624,6 +626,16 @@ fun ChatDetailScreen(
             },
         )
     }
+
+    if (showProfile) {
+        ProfileUserScreen(
+            username = conversation.counterpartUsername,
+            fallbackName = conversation.name,
+            fallbackGradient = conversation.gradient,
+            onBack = { showProfile = false },
+            onMessage = { showProfile = false }, // already in this chat
+        )
+    }
 }
 
 /** Long-press a bubble. "For everyone" only makes sense for messages I sent. */
@@ -738,6 +750,7 @@ private fun DetailTopBar(
     peerTyping: Boolean = false,
     onBack: () -> Unit = {},
     onLongPressAvatar: () -> Unit = {},
+    onOpenProfile: () -> Unit = {},
     onMenuAction: (String) -> Unit = {},
 ) {
     val status = when {
@@ -767,7 +780,8 @@ private fun DetailTopBar(
             modifier = Modifier.combinedClickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
-                onClick = {},
+                // Tap the photo → open the profile; long-press → clear chat.
+                onClick = onOpenProfile,
                 onLongClick = onLongPressAvatar,
             ),
         ) {
@@ -783,6 +797,11 @@ private fun DetailTopBar(
         Column(
             modifier = Modifier
                 .weight(1f)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onOpenProfile,
+                )
                 .padding(end = 6.dp),
         ) {
             Text(
