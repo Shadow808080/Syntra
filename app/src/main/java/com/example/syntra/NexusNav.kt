@@ -42,9 +42,15 @@ enum class NexusTab { CHAT, SHORTS, ROOMS, CALLS }
 
 /**
  * Padding every top bar uses, so the app title lands on the same spot no matter
- * which tab you are on.
+ * which tab you are on. Top is deliberately larger than bottom: it lifts the row
+ * clear of the status bar without opening a gap above the content below it.
  */
-val SyntraHeaderPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)
+val SyntraHeaderPadding = PaddingValues(
+    start = 20.dp,
+    end = 20.dp,
+    top = 26.dp,
+    bottom = 14.dp,
+)
 
 /** The app title, identical on every screen. */
 @Composable
