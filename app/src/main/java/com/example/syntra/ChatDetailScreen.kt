@@ -179,6 +179,20 @@ fun ChatDetailScreen(
     var peerOnline by remember(conversation) {
         mutableStateOf(conversation.presence == Presence.ONLINE)
     }
+    // Profile photo for the header. Seeded from the list row, then confirmed
+    // against the server so it is right even when the list hadn't resolved it yet
+    // — and so a photo the peer just changed shows up on entering the chat.
+    var peerAvatar by remember(conversation) { mutableStateOf(conversation.avatarUrl) }
+
+    LaunchedEffect(conversation.id) {
+        if (!ApiConfig.ENABLED) return@LaunchedEffect
+        val username = conversation.counterpartUsername
+        if (username.isNullOrBlank()) return@LaunchedEffect
+        runCatching { SyntraClient.getUser(username) }.getOrNull()
+            ?.avatarMediaId
+            ?.takeIf { it.startsWith("http") }
+            ?.let { peerAvatar = it }
+    }
     var counterpartLastReadId by remember(conversation) {
         mutableStateOf(conversation.counterpartLastReadId)
     }
@@ -466,6 +480,7 @@ fun ChatDetailScreen(
             convo = conversation,
             peerTyping = peerTyping,
             peerOnline = peerOnline,
+            peerAvatar = peerAvatar,
             onBack = onBack,
             onLongPressAvatar = { confirmClear = true },
             onOpenProfile = { showProfile = true },
@@ -799,6 +814,7 @@ private fun DetailTopBar(
     convo: Conversation,
     peerTyping: Boolean = false,
     peerOnline: Boolean = false,
+    peerAvatar: String? = null,
     onBack: () -> Unit = {},
     onLongPressAvatar: () -> Unit = {},
     onOpenProfile: () -> Unit = {},
@@ -842,7 +858,7 @@ private fun DetailTopBar(
                 gradient = convo.gradient,
                 initial = convo.name.first().toString(),
                 size = 36.dp,
-                photoUrl = convo.avatarUrl,
+                photoUrl = peerAvatar ?: convo.avatarUrl,
             )
         }
         Spacer(Modifier.width(14.dp))
