@@ -247,6 +247,15 @@ object SyntraClient {
      */
     suspend fun deleteStory(storyId: String) = delete("/api/v1/stories/$storyId")
 
+    /**
+     * Deletes a media asset from storage.
+     *
+     * Not in the route table yet (`DELETE /media/{id}` → 404). Used to clean up the
+     * previous profile photo when the avatar changes; wired now so it starts working
+     * the instant the backend adds it.
+     */
+    suspend fun deleteMedia(mediaId: String) = delete("/api/v1/media/$mediaId")
+
     /** My own stories with their view counts (`GET /stories/me`). */
     suspend fun getMyStories(): List<NetMyStory> =
         (getData("/api/v1/stories/me") as JSONArray).mapObjects {

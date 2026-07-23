@@ -4,6 +4,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -38,6 +41,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PersonOff
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -50,16 +54,19 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.AppTheme
@@ -182,9 +189,60 @@ private fun PrimaryAction(text: String, enabled: Boolean = true, onClick: () -> 
 @Composable
 fun ProfileSettingsScreen(onClose: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val email = SessionStore.signedInEmail(context).orEmpty()
     var displayName by remember { mutableStateOf(ProfileStore.displayName(context, email)) }
+    var avatarUrl by remember { mutableStateOf(ProfileStore.avatarUrl(context)) }
     var saved by remember { mutableStateOf(false) }
+    var uploading by remember { mutableStateOf(false) }
+    var showPicker by remember { mutableStateOf(false) }
+
+    /** Uploads the new photo, then deletes the old one from storage. */
+    fun changeAvatar(bytes: ByteArray) {
+        if (!ApiConfig.ENABLED) {
+            Toast.makeText(context, "Backend belum dikonfigurasi.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        uploading = true
+        val previousId = ProfileStore.avatarMediaId(context)
+        scope.launch {
+            runCatching {
+                SyntraClient.uploadMediaFull("image", "jpg", "image/jpeg", bytes, 512, 512)
+            }.onSuccess { (mediaId, url) ->
+                ProfileStore.setAvatar(context, url, mediaId)
+                avatarUrl = url
+                // Remove the replaced photo from storage. No-op until the backend
+                // ships DELETE /media/{id}; harmless (and silent) if it 404s.
+                if (!previousId.isNullOrBlank() && previousId != mediaId) {
+                    runCatching { SyntraClient.deleteMedia(previousId) }
+                }
+                Toast.makeText(context, "Foto profil diperbarui.", Toast.LENGTH_SHORT).show()
+            }.onFailure {
+                Toast.makeText(context, "Gagal mengunggah foto: ${it.message}", Toast.LENGTH_LONG).show()
+            }
+            uploading = false
+        }
+    }
+
+    val camera = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicturePreview(),
+    ) { bitmap ->
+        if (bitmap != null) {
+            val out = java.io.ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+            changeAvatar(out.toByteArray())
+        }
+    }
+    val gallery = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) scope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+            }
+            if (bytes != null) changeAvatar(bytes)
+        }
+    }
 
     SettingsSubScreen("Profil", onClose) {
         Column(modifier = Modifier.verticalScroll(rememberScrollState()).imePadding()) {
@@ -192,21 +250,67 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(96.dp)
-                        .background(
-                            Brush.linearGradient(listOf(Color(0xFF7C4DFF), Color(0xFF3B68F5))),
-                            CircleShape,
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = displayName.firstOrNull()?.uppercase() ?: "S",
-                        color = Color.White,
-                        fontSize = 40.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
+                Box(contentAlignment = Alignment.Center) {
+                    Box(
+                        modifier = Modifier
+                            .size(104.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.linearGradient(listOf(Color(0xFF7C4DFF), Color(0xFF3B68F5))),
+                            )
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { showPicker = true },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        val url = avatarUrl
+                        if (url != null) {
+                            AsyncImage(
+                                model = url,
+                                contentDescription = "Foto profil",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Text(
+                                text = displayName.firstOrNull()?.uppercase() ?: "S",
+                                color = Color.White,
+                                fontSize = 42.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        if (uploading) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.45f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CircularProgressIndicator(color = Color.White, strokeWidth = 2.5.dp)
+                            }
+                        }
+                    }
+                    // Camera badge, bottom-right.
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .size(34.dp)
+                            .background(NexusAccent, CircleShape)
+                            .border(3.dp, NexusBackground, CircleShape)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { showPicker = true },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.PhotoCamera,
+                            contentDescription = "Ganti foto",
+                            tint = Color.White,
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
                 }
             }
             Card {
@@ -245,26 +349,59 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
                 }
             }
             Note(
-                "Nama ini tersimpan di perangkat. Server belum menyediakan endpoint " +
-                    "untuk memperbarui profil, jadi orang lain masih melihat nama lamamu.",
+                "Foto & nama tersimpan di perangkat ini. Server belum punya endpoint " +
+                    "profil, jadi perubahan belum terlihat oleh pengguna lain.",
             )
         }
     }
+
+    if (showPicker) {
+        AttachmentSheet(
+            onCamera = { showPicker = false; camera.launch(null) },
+            onGallery = {
+                showPicker = false
+                gallery.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            },
+            onDismiss = { showPicker = false },
+        )
+    }
 }
 
-/** Local profile overrides, until the backend offers a profile endpoint. */
+/**
+ * Local profile overrides, until the backend offers a profile endpoint.
+ *
+ * The avatar is stored here because there is no `PATCH /users/me` to attach it to
+ * the account. That also means the old photo can't be removed from storage from the
+ * app (no `DELETE /media/{id}` either) — we keep the previous media id so it can be
+ * cleaned up the moment the backend adds that endpoint.
+ */
 object ProfileStore {
     private const val PREFS = "syntra_settings"
     private const val KEY_NAME = "display_name"
+    private const val KEY_AVATAR_URL = "avatar_url"
+    private const val KEY_AVATAR_MEDIA = "avatar_media_id"
+
+    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     fun displayName(context: Context, fallbackEmail: String): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_NAME, null)
+        prefs(context).getString(KEY_NAME, null)
             ?: fallbackEmail.substringBefore('@').replaceFirstChar { it.uppercase() }
 
     fun setDisplayName(context: Context, value: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_NAME, value).apply()
+        prefs(context).edit().putString(KEY_NAME, value).apply()
+    }
+
+    fun avatarUrl(context: Context): String? = prefs(context).getString(KEY_AVATAR_URL, null)
+
+    fun avatarMediaId(context: Context): String? = prefs(context).getString(KEY_AVATAR_MEDIA, null)
+
+    fun setAvatar(context: Context, url: String, mediaId: String) {
+        prefs(context).edit()
+            .putString(KEY_AVATAR_URL, url)
+            .putString(KEY_AVATAR_MEDIA, mediaId)
+            .apply()
     }
 }
 

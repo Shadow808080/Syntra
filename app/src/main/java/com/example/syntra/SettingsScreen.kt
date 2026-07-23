@@ -52,15 +52,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.AppTheme
@@ -173,7 +176,13 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
         }
 
         LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
-            item { ProfileCard(username = username, email = email) }
+            item {
+                ProfileCard(
+                    username = username,
+                    email = email,
+                    avatarUrl = ProfileStore.avatarUrl(context),
+                )
+            }
 
             item { SectionHeader("Akun") }
             item {
@@ -369,7 +378,7 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun ProfileCard(username: String, email: String) {
+private fun ProfileCard(username: String, email: String, avatarUrl: String?) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -382,18 +391,27 @@ private fun ProfileCard(username: String, email: String) {
         Box(
             modifier = Modifier
                 .size(58.dp)
+                .clip(CircleShape)
                 .background(
                     Brush.linearGradient(listOf(Color(0xFF7C4DFF), Color(0xFF3B68F5))),
-                    CircleShape,
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = username.first().uppercase(),
-                color = Color.White,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-            )
+            if (avatarUrl != null) {
+                AsyncImage(
+                    model = avatarUrl,
+                    contentDescription = "Foto profil",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    text = username.first().uppercase(),
+                    color = Color.White,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {

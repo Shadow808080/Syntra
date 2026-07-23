@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.EmojiEmotions
+import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -73,11 +74,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -172,6 +177,8 @@ fun ChatDetailScreen(
     val listState = rememberLazyListState()
 
     // Composer extras: emoji panel, attachments, voice notes.
+    val keyboard = LocalSoftwareKeyboardController.current
+    val fieldFocus = remember { FocusRequester() }
     var showEmoji by remember { mutableStateOf(false) }
     var showAttach by remember { mutableStateOf(false) }
     var uploading by remember { mutableStateOf(false) }
@@ -424,7 +431,18 @@ fun ChatDetailScreen(
         MessageInputBar(
             value = input,
             emojiOpen = showEmoji,
-            onToggleEmoji = { showEmoji = !showEmoji },
+            focusRequester = fieldFocus,
+            onToggleEmoji = {
+                showEmoji = !showEmoji
+                if (showEmoji) {
+                    // Opening emoji: drop the soft keyboard so both don't fight.
+                    keyboard?.hide()
+                } else {
+                    // Back to keyboard: refocus the field and raise it.
+                    fieldFocus.requestFocus()
+                    keyboard?.show()
+                }
+            },
             onAttach = { showAttach = true },
             onStartRecording = { startRecording() },
             onStopRecording = { stopRecording() },
@@ -899,6 +917,7 @@ private fun DeliveryTicks(state: DeliveryState, base: Color) {
 private fun MessageInputBar(
     value: String,
     emojiOpen: Boolean,
+    focusRequester: FocusRequester,
     onToggleEmoji: () -> Unit,
     onAttach: () -> Unit,
     onStartRecording: () -> Unit,
@@ -924,8 +943,9 @@ private fun MessageInputBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = Icons.Outlined.EmojiEmotions,
-                contentDescription = "Emoji",
+                // Toggles to a keyboard glyph while the emoji panel is up.
+                imageVector = if (emojiOpen) Icons.Outlined.Keyboard else Icons.Outlined.EmojiEmotions,
+                contentDescription = if (emojiOpen) "Keyboard" else "Emoji",
                 tint = if (emojiOpen) NexusAccentSoft else NexusTextSecondary,
                 modifier = Modifier
                     .size(22.dp)
@@ -949,7 +969,13 @@ private fun MessageInputBar(
                     onValueChange = onValueChange,
                     textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
                     cursorBrush = SolidColor(NexusAccentSoft),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .onFocusEvent {
+                            // Tapping the field to type should retract the emoji panel.
+                            if (it.isFocused && emojiOpen) onToggleEmoji()
+                        },
                 )
             }
             Spacer(Modifier.width(10.dp))

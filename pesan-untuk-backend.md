@@ -73,7 +73,30 @@ host-nya terlanjur hilang tanpa `leave` (mis. sisa pengujian). Sebuah
 `DELETE /api/v1/rooms/{id}` (host only) berguna untuk membersihkannya, dan agar UI
 bisa menyediakan tombol "Akhiri & hapus".
 
-## 🟡 5. `POST /rooms/{id}/invite` — kontрак body
+## 🔴 5. Ganti foto profil — butuh 2 endpoint
+
+Fitur ganti foto profil sudah dibuat di app (Settings → Profil, avatar bisa
+diketuk → kamera/galeri → unggah). Tapi **dua endpoint hilang**, jadi hasilnya
+hanya tersimpan di perangkat:
+
+```
+PATCH /api/v1/users/me   (atau PUT)   → endpoint tidak ditemukan
+DELETE /api/v1/media/{id}             → endpoint tidak ditemukan
+```
+
+Yang dibutuhkan:
+
+1. **`PATCH /api/v1/users/me`** menerima `{ "avatar_media_id": "...", "display_name": "..." }`
+   supaya avatar/nama tersimpan di akun dan `GET /users/{username}` mengembalikannya
+   (mengembalikan `avatar_url`). Tanpa ini, foto profil tidak pernah terlihat oleh
+   pengguna lain.
+2. **`DELETE /api/v1/media/{id}`** (pemilik saja) supaya foto lama bisa dihapus dari
+   storage saat diganti. Pengguna secara eksplisit meminta agar foto lama dibersihkan.
+   App sudah menyimpan `media_id` foto sebelumnya dan **sudah memanggil
+   `deleteMedia(oldId)`** setiap avatar diganti — sekarang no-op karena 404, langsung
+   berfungsi begitu endpoint-nya ada.
+
+## 🟡 6. `POST /rooms/{id}/invite` — kontrak body
 
 Route ada (balas `400`, bukan `404`), tapi bentuk body-nya belum terdokumentasi di
 `api.md`. Mohon dilengkapi (mis. `{ "user_id": "..." }` atau `{ "username": "..." }`)
