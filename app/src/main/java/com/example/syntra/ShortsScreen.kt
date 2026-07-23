@@ -96,6 +96,9 @@ fun ShortsScreen(
     modifier: Modifier = Modifier,
     selectedTab: NexusTab = NexusTab.SHORTS,
     onTabSelected: (NexusTab) -> Unit = {},
+    // False when the Shorts tab is off-screen (swiped away / call on top); the
+    // current reel must pause so its audio doesn't keep playing in the background.
+    visible: Boolean = true,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -163,7 +166,8 @@ fun ShortsScreen(
                     val reel = reels[page]
                     ReelPage(
                         reel = reel,
-                        active = page == pager.currentPage,
+                        // Play only the reel in view *and* only while the tab is shown.
+                        active = visible && page == pager.currentPage,
                         onLike = { toggleLike(reel) },
                         onSave = { toggleSave(reel) },
                         onComment = { commentsFor = reel },

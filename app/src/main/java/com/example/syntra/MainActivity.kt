@@ -176,7 +176,12 @@ private fun MainTabs(onSignOut: () -> Unit) {
                         onSignOut = onSignOut,
                         onOverlayChange = { chatOverlay = it },
                     )
-                    NexusTab.SHORTS -> ShortsScreen(modifier = Modifier.fillMaxSize())
+                    NexusTab.SHORTS -> ShortsScreen(
+                    modifier = Modifier.fillMaxSize(),
+                    // Kept alive off-screen by the pager, so it must stop its video
+                    // (and audio) whenever it isn't the tab actually being shown.
+                    visible = tabOrder[pager.currentPage] == NexusTab.SHORTS && incoming == null,
+                )
                     NexusTab.ROOMS -> RoomsScreen(
                         modifier = Modifier.fillMaxSize(),
                         onOverlayChange = { roomOverlay = it },
