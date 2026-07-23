@@ -45,6 +45,8 @@ data class NetMessage(
     val createdAt: String = "",
     val editedAt: String? = null,
     val isDeleted: Boolean = false,
+    /** Ready-to-use media URLs resolved by the server (`attachments`). */
+    val attachments: List<String> = emptyList(),
 )
 
 data class NetPresence(

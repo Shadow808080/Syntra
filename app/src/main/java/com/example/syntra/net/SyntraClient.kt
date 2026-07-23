@@ -239,8 +239,21 @@ object SyntraClient {
             .mapObjects { it.toMessage() }
     }
 
-    suspend fun sendMessageRest(conversationId: String, body: String): NetMessage {
-        val payload = JSONObject().put("type", "text").put("body", body).put("reply_to_id", JSONObject.NULL)
+    /**
+     * Sends a message. Attach media by passing confirmed media ids (max 10) —
+     * the server resolves them into `attachments` URLs and flips `type` to
+     * "media" on its own, so a photo must never be pasted into [body] as a URL.
+     */
+    suspend fun sendMessageRest(
+        conversationId: String,
+        body: String,
+        mediaIds: List<String> = emptyList(),
+    ): NetMessage {
+        val payload = JSONObject()
+            .put("type", if (mediaIds.isEmpty()) "text" else "media")
+            .put("body", body)
+            .put("reply_to_id", JSONObject.NULL)
+        if (mediaIds.isNotEmpty()) payload.put("media_ids", JSONArray(mediaIds))
         return (postData("/api/v1/conversations/$conversationId/messages", payload) as JSONObject).toMessage()
     }
 
@@ -903,6 +916,14 @@ private fun JSONObject.toMessage() = NetMessage(
     createdAt = optString("created_at", ""),
     editedAt = strOrNull("edited_at"),
     isDeleted = optBoolean("is_deleted", false),
+    // `attachments` is a list of ready URLs; older shapes nested them in objects.
+    attachments = optJSONArray("attachments")?.let { arr ->
+        (0 until arr.length()).mapNotNull { i ->
+            arr.optString(i, "").ifBlank {
+                arr.optJSONObject(i)?.optString("url", "").orEmpty()
+            }.takeIf { it.isNotBlank() }
+        }
+    } ?: emptyList(),
 )
 
 private fun JSONObject.toRoom() = NetRoom(

@@ -61,6 +61,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.QrCodeScanner
@@ -1930,6 +1931,27 @@ private fun StoryViewer(
                     .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // Thumbnail of the exact segment being replied to, so it is clear
+                // which photo/video the reply refers to. A video shows its poster
+                // frame with a small play badge.
+                Box(
+                    modifier = Modifier
+                        .size(width = 34.dp, height = 46.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.White.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    StoryPhoto(photo = current.image, modifier = Modifier.fillMaxSize())
+                    if (current.image.isVideoStory()) {
+                        Icon(
+                            imageVector = Icons.Filled.PlayArrow,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
                 Box(
                     modifier = Modifier
                         .weight(1f)

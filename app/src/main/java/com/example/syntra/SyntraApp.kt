@@ -3,6 +3,7 @@ package com.example.syntra
 import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import coil.request.CachePolicy
@@ -20,6 +21,9 @@ class SyntraApp : Application(), ImageLoaderFactory {
 
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
+            // Defining our own loader replaces the default one, so the video
+            // decoder has to be registered here or video posters stop rendering.
+            .components { add(VideoFrameDecoder.Factory()) }
             // A quarter of the heap for decoded bitmaps: avatars and chat photos
             // are shown over and over, so keeping them decoded is the big win.
             .memoryCache {

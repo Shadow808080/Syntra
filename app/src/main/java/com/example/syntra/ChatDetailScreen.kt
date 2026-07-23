@@ -123,18 +123,34 @@ private data class Message(
     val text: String,
     val fromMe: Boolean,
     val time: String,
+    /**
+     * Media the server attached to this message. Kept apart from [text] so a
+     * photo is never shown as a raw URL in the bubble.
+     */
+    val media: String? = null,
 )
 
 /** Marks a message that only exists on this device until the server confirms it. */
 private const val LOCAL_ID_PREFIX = "local-"
 
 /** Backend message -> bubble. `fromMe` is derived client-side (alignment doc §6). */
-private fun NetMessage.toUi() = Message(
-    id = id,
-    text = if (isDeleted) "Pesan ini dihapus" else body,
-    fromMe = senderId == SyntraClient.myUserId,
-    time = formatClock(createdAt),
-)
+private fun NetMessage.toUi(): Message {
+    val attachment = attachments.firstOrNull()
+    // Older messages were sent with the media URL as the body; keep rendering
+    // those as media instead of printing the link as text.
+    val legacyUrl = body.takeIf { it.isMediaUrl() }
+    return Message(
+        id = id,
+        text = when {
+            isDeleted -> "Pesan ini dihapus"
+            legacyUrl != null -> ""
+            else -> body
+        },
+        fromMe = senderId == SyntraClient.myUserId,
+        time = formatClock(createdAt),
+        media = if (isDeleted) null else attachment ?: legacyUrl,
+    )
+}
 
 /** Render a RFC3339 UTC timestamp as local HH:mm. */
 private fun formatClock(iso: String): String {
@@ -385,18 +401,33 @@ fun ChatDetailScreen(
             Toast.makeText(context, "Backend belum dikonfigurasi.", Toast.LENGTH_SHORT).show()
             return
         }
+        // Reject oversized media before spending the upload (docs/api.md limits).
+        val maxBytes = when (kind) {
+            "image" -> 10L * 1024 * 1024
+            "video" -> 100L * 1024 * 1024
+            "audio" -> 20L * 1024 * 1024
+            else -> 16L * 1024 * 1024
+        }
+        if (bytes.size > maxBytes) {
+            Toast.makeText(
+                context,
+                "Berkas terlalu besar (maks ${maxBytes / (1024 * 1024)} MB).",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
         uploading = true
         scope.launch {
             runCatching {
-                SyntraClient.uploadMediaFull(kind, ext, mime, bytes, durationMs = durationMs)
-            }.onSuccess { (_, url) ->
-                if (url.isBlank()) {
-                    Toast.makeText(context, "Server tidak mengembalikan URL media.", Toast.LENGTH_LONG).show()
-                } else {
-                    val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
-                    messages.add(Message(ref, url, fromMe = true, time = "now"))
-                    SyntraClient.messageSend(conversation.id, url, ref)
-                }
+                val (mediaId, url) = SyntraClient.uploadMediaFull(kind, ext, mime, bytes, durationMs = durationMs)
+                // Optimistic bubble shows the uploaded file straight away…
+                val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
+                messages.add(Message(ref, "", fromMe = true, time = "now", media = url.ifBlank { null }))
+                // …while the message itself carries the media *id*, so the body
+                // stays empty instead of leaking a URL into the conversation.
+                val sent = SyntraClient.sendMessageRest(conversation.id, "", listOf(mediaId))
+                val i = messages.indexOfFirst { it.id == ref }
+                if (i >= 0) messages[i] = sent.toUi()
             }.onFailure {
                 Toast.makeText(context, "Gagal mengirim: ${it.message}", Toast.LENGTH_LONG).show()
             }
@@ -988,12 +1019,12 @@ private fun MessageBubble(
                 )
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            // A message body that is just an uploaded media URL is rendered as the
-            // media itself; the backend has no media message type to rely on.
+            // Attachments come back as ready URLs; a caption may sit under them.
+            val media = msg.media
             when {
-                msg.text.isMediaUrl() && msg.text.isAudioUrl() -> AudioBubble(msg.text, textColor)
-                msg.text.isMediaUrl() -> AsyncImage(
-                    model = msg.text,
+                media != null && media.isAudioUrl() -> AudioBubble(media, textColor)
+                media != null -> AsyncImage(
+                    model = media,
                     contentDescription = "Foto",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
@@ -1006,6 +1037,10 @@ private fun MessageBubble(
                     fontSize = 15.sp,
                     lineHeight = 20.sp,
                 )
+            }
+            if (media != null && msg.text.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(text = msg.text, color = textColor, fontSize = 15.sp, lineHeight = 20.sp)
             }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
