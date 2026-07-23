@@ -28,7 +28,8 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -929,8 +930,13 @@ private fun MessageInputBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(NexusBackground)
-            .windowInsetsPadding(WindowInsets.navigationBars)
-            .imePadding()
+            // Insets are mutually exclusive: opening emoji hides the keyboard, so we
+            // only ever need one. When the emoji panel is up it owns the nav-bar gap;
+            // otherwise one combined ime∪navbar inset avoids the double-lift bug.
+            .then(
+                if (emojiOpen) Modifier
+                else Modifier.windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+            )
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
