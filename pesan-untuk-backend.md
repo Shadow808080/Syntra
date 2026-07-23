@@ -122,7 +122,24 @@ berfungsi dari mana saja.
 Tambahan kecil: agar konsisten dengan `/reports` (yang menerima UUID),
 `POST /users/{id}/block` sebaiknya **juga menerima UUID**, bukan hanya username.
 
-## 🟡 7. `POST /rooms/{id}/invite` — kontrak body
+## 🟡 7. Story: jangan hitung pemilik sebagai penonton
+
+Pemilik yang menonton story-nya sendiri sebaiknya **tidak menaikkan `view_count`**
+maupun muncul di `GET /stories/{id}/viewers`. App sudah berhenti memanggil
+`POST /stories/{id}/view` untuk story sendiri, dan menyaring diri sendiri dari
+daftar penonton — tapi kalau server pernah menghitungnya, angkanya tetap salah.
+Mohon kecualikan `author_id` dari perhitungan & daftar penonton di sisi server.
+
+## 🟡 8. Balas story (story reply)
+
+Belum ada endpoint (`POST /stories/{id}/reply` → 404). App sudah membuat fitur
+"balas story" dengan cara mengirim **pesan direct** ke `author_id`
+(`POST /conversations {type:direct}` → `POST .../messages`). Berfungsi, tapi
+balasannya tidak terhubung ke story tertentu. Kalau nanti ada
+`POST /stories/{id}/reply` (yang menautkan balasan ke story + memicu notifikasi
+`story_reply`), app akan beralih ke sana.
+
+## 🟡 9. `POST /rooms/{id}/invite` — kontrak body
 
 Route ada (balas `400`, bukan `404`), tapi bentuk body-nya belum terdokumentasi di
 `api.md`. Mohon dilengkapi (mis. `{ "user_id": "..." }` atau `{ "username": "..." }`)

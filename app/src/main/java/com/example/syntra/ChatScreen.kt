@@ -39,6 +39,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -52,6 +55,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -709,7 +713,8 @@ fun ChatScreen(
                                 it[segment] = item.copy(viewed = true)
                             },
                         )
-                        if (ApiConfig.ENABLED) scope.launch {
+                        // Never register a view on my own story — I'm not a viewer.
+                        if (ApiConfig.ENABLED && !person.isMine) scope.launch {
                             runCatching { SyntraClient.viewStory(item.id) }
                         }
                     }
@@ -1406,6 +1411,10 @@ private fun StoryViewer(
     // storyId -> how many people watched it (GET /stories/me).
     val viewCounts = remember { mutableStateMapOf<String, Int>() }
     var viewers by remember { mutableStateOf<List<NetStoryViewer>?>(null) }
+    // Reply to someone else's story = a direct message to its author.
+    var replyText by remember { mutableStateOf("") }
+    var replySending by remember { mutableStateOf(false) }
+    val storyContext = LocalContext.current
 
     // Vertical drag offset (negative = dragging up) used for the scale-to-dismiss transition.
     val scope = rememberCoroutineScope()
@@ -1474,7 +1483,8 @@ private fun StoryViewer(
             var elapsed = 0L
             while (elapsed < STORY_DURATION_MS) {
                 delay(STORY_TICK_MS)
-                if (paused) continue
+                // Read state directly so pause / active typing freeze it live.
+                if (paused || replyText.isNotBlank()) continue
                 elapsed += STORY_TICK_MS
                 progress.snapTo((elapsed.toFloat() / STORY_DURATION_MS).coerceAtMost(1f))
             }
@@ -1492,7 +1502,10 @@ private fun StoryViewer(
 
     LaunchedEffect(showViewers, current.id) {
         if (showViewers && ApiConfig.ENABLED) {
-            viewers = runCatching { SyntraClient.getStoryViewers(current.id) }.getOrNull()
+            // Drop myself from the list — the owner isn't a viewer of their own story.
+            viewers = runCatching { SyntraClient.getStoryViewers(current.id) }
+                .getOrNull()
+                ?.filter { it.userId != SyntraClient.myUserId }
         }
     }
 
@@ -1729,6 +1742,80 @@ private fun StoryViewer(
             }
         }
         } // end scaled content Box
+
+        // Reply bar — only on someone else's story; sends a direct message.
+        if (!person.isMine) {
+            val authorId = person.id
+            fun sendReply() {
+                val text = replyText.trim()
+                if (text.isEmpty() || replySending || !ApiConfig.ENABLED) return
+                replySending = true
+                scope.launch {
+                    runCatching {
+                        val convId = SyntraClient.createDirect(authorId)
+                        SyntraClient.sendMessageRest(convId, text)
+                    }.onSuccess {
+                        replyText = ""
+                        Toast.makeText(storyContext, "Balasan terkirim ke ${person.name}.", Toast.LENGTH_SHORT).show()
+                    }.onFailure {
+                        Toast.makeText(storyContext, "Gagal mengirim: ${it.message}", Toast.LENGTH_SHORT).show()
+                    }
+                    replySending = false
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(26.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(26.dp))
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                ) {
+                    if (replyText.isEmpty()) {
+                        Text(
+                            text = "Balas ${person.name}…",
+                            color = Color.White.copy(alpha = 0.75f),
+                            fontSize = 14.sp,
+                        )
+                    }
+                    BasicTextField(
+                        value = replyText,
+                        onValueChange = { replyText = it },
+                        singleLine = true,
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (replyText.isNotBlank()) {
+                    Spacer(Modifier.width(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .background(NexusAccent, CircleShape)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { sendReply() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Kirim balasan",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+        }
 
         if (showViewers) {
             StoryViewersDialog(
