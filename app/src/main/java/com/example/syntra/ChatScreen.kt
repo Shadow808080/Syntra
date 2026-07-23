@@ -69,10 +69,12 @@ import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
@@ -369,6 +371,7 @@ private suspend fun uploadStory(context: Context, media: StoryImage) {
 // Screen
 // ---------------------------------------------------------------------------
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     modifier: Modifier = Modifier,
@@ -418,6 +421,29 @@ fun ChatScreen(
         showAddStatus || showNewGroup || showSettings
     LaunchedEffect(overlayOpen) { onOverlayChange(overlayOpen) }
 
+    // Pull-to-refresh state for the chat list.
+    var refreshing by remember { mutableStateOf(false) }
+
+    // Reloads chats + stories from the backend. Shared by first load and pull-to-refresh.
+    suspend fun refresh() {
+        if (!ApiConfig.ENABLED) return
+        runCatching {
+            val convs = SyntraClient.getConversations()
+            chats.clear(); chats.addAll(convs.map { it.toUi() })
+            val groups = SyntraClient.getStories()
+            stories.clear()
+            seenStories.clear()
+            groups.forEach { g ->
+                g.toUi()?.let { person ->
+                    stories.add(person)
+                    if (g.allViewed) seenStories.add(person)
+                }
+            }
+            SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
+            SyntraClient.presenceQuery(convs.mapNotNull { it.counterpartId })
+        }.onFailure { Toast.makeText(context, "Sync gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
+    }
+
     // --- Backend: load data + realtime updates (only when configured) --------
     if (ApiConfig.ENABLED) {
         LaunchedEffect(Unit) {
@@ -426,21 +452,8 @@ fun ChatScreen(
                 // would silently replace the signed-in user with the dev account.
                 if (!SyntraClient.hasSession) SyntraClient.login()
                 SyntraClient.connect()
-                val convs = SyntraClient.getConversations()
-                chats.clear(); chats.addAll(convs.map { it.toUi() })
-                val groups = SyntraClient.getStories()
-                stories.clear()
-                seenStories.clear()
-                groups.forEach { g ->
-                    g.toUi()?.let { person ->
-                        stories.add(person)
-                        // Rings the server already considers watched start out grey.
-                        if (g.allViewed) seenStories.add(person)
-                    }
-                }
-                SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
-                SyntraClient.presenceQuery(convs.mapNotNull { it.counterpartId })
-            }.onFailure { Toast.makeText(context, "Sync gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
+            }
+            refresh()
         }
         DisposableEffect(Unit) {
             val listener = object : SocketListener {
@@ -645,8 +658,19 @@ fun ChatScreen(
                     }
                 },
             )
-            LazyColumn(
+            PullToRefreshBox(
+                isRefreshing = refreshing,
+                onRefresh = {
+                    scope.launch {
+                        refreshing = true
+                        refresh()
+                        refreshing = false
+                    }
+                },
                 modifier = Modifier.weight(1f),
+            ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 if (!searching) {
@@ -709,6 +733,7 @@ fun ChatScreen(
                         )
                     }
                 }
+            }
             }
         }
 

@@ -284,7 +284,7 @@ fun ProfileUserScreen(
                     "Belum ada media yang dibagikan.",
                     color = NexusTextSecondary,
                     fontSize = 13.sp,
-                    modifier = Modifier.padding(horizontal = 20.dp, bottom = 12.dp),
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp),
                 )
             } else {
                 LazyRow(

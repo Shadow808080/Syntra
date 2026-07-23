@@ -183,7 +183,18 @@ fun ChatDetailScreen(
     var confirmBlock by remember(conversation) { mutableStateOf(false) }
     var showChatTheme by remember(conversation) { mutableStateOf(false) }
     var showProfile by remember(conversation) { mutableStateOf(false) }
+    // When non-null, a full-screen call (true = video) is on top of the chat.
+    var activeCallVideo by remember(conversation) { mutableStateOf<Boolean?>(null) }
     var chatTheme by remember(conversation) { mutableStateOf(ChatThemeStore.get(context, conversation.id)) }
+
+    fun startCall(video: Boolean) {
+        if (!ApiConfig.ENABLED) {
+            Toast.makeText(context, "Server belum aktif.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        showProfile = false
+        activeCallVideo = video
+    }
     val listState = rememberLazyListState()
 
     // Composer extras: emoji panel, attachments, voice notes.
@@ -432,6 +443,8 @@ fun ChatDetailScreen(
             onBack = onBack,
             onLongPressAvatar = { confirmClear = true },
             onOpenProfile = { showProfile = true },
+            onVoiceCall = { startCall(video = false) },
+            onVideoCall = { startCall(video = true) },
             onMenuAction = { action ->
                 when (action) {
                     "Laporkan" -> showReport = true
@@ -631,13 +644,20 @@ fun ChatDetailScreen(
         ProfileUserScreen(
             conversation = conversation,
             onBack = { showProfile = false },
-            onCall = {
-                Toast.makeText(context, "Panggilan suara segera hadir.", Toast.LENGTH_SHORT).show()
-            },
-            onVideo = {
-                Toast.makeText(context, "Panggilan video segera hadir.", Toast.LENGTH_SHORT).show()
-            },
+            onCall = { startCall(video = false) },
+            onVideo = { startCall(video = true) },
             onSearch = { showProfile = false }, // back to the conversation
+        )
+    }
+
+    // Full-screen call overlay (voice or video), on top of everything else.
+    activeCallVideo?.let { video ->
+        CallScreen(
+            peerName = conversation.name,
+            conversationId = conversation.id,
+            video = video,
+            peerId = conversation.counterpartId.orEmpty(),
+            onClose = { activeCallVideo = null },
         )
     }
 }
@@ -755,6 +775,8 @@ private fun DetailTopBar(
     onBack: () -> Unit = {},
     onLongPressAvatar: () -> Unit = {},
     onOpenProfile: () -> Unit = {},
+    onVoiceCall: () -> Unit = {},
+    onVideoCall: () -> Unit = {},
     onMenuAction: (String) -> Unit = {},
 ) {
     val status = when {
@@ -824,10 +846,10 @@ private fun DetailTopBar(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        IconButtonBox {
+        IconButtonBox(onClick = onVideoCall) {
             Icon(Icons.Filled.Videocam, "Video call", tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
         }
-        IconButtonBox {
+        IconButtonBox(onClick = onVoiceCall) {
             Icon(Icons.Filled.Call, "Call", tint = NexusTextPrimary, modifier = Modifier.size(20.dp))
         }
         Box {

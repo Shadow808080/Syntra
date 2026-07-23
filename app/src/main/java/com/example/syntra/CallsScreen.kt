@@ -40,7 +40,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -146,10 +148,13 @@ fun CallsScreen(
     onTabSelected: (NexusTab) -> Unit = {},
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val history = remember { mutableStateListOf<CallEntry>() }
     // People you could call, taken from the real conversation list.
     val contacts = remember { mutableStateListOf<Pair<String, String>>() }
     var filter by remember { mutableStateOf(0) } // 0 = semua, 1 = tak terjawab
+    // Non-null while a full-screen call is up: (name, conversationId, peerId, video).
+    var activeCall by remember { mutableStateOf<CallTarget?>(null) }
 
     LaunchedEffect(Unit) {
         history.addAll(CallLog.all(context))
@@ -165,27 +170,19 @@ fun CallsScreen(
     }
 
     fun placeCall(name: String, peerId: String, video: Boolean) {
-        // No signalling backend yet: record the attempt honestly instead of
-        // pretending a call connected.
-        CallLog.add(
-            context,
-            CallEntry(
-                id = "c-${System.currentTimeMillis()}",
-                peerName = name,
-                peerId = peerId,
-                video = video,
-                direction = CallDirection.OUTGOING,
-                at = System.currentTimeMillis(),
-                durationSec = 0,
-            ),
-        )
-        history.clear()
-        history.addAll(CallLog.all(context))
-        Toast.makeText(
-            context,
-            "Panggilan belum bisa tersambung — server belum menyediakannya.",
-            Toast.LENGTH_LONG,
-        ).show()
+        if (!ApiConfig.ENABLED || peerId.isBlank()) {
+            Toast.makeText(context, "Tidak bisa memulai panggilan.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Resolve (or create) the direct conversation, then open the call screen.
+        scope.launch {
+            val convId = runCatching { SyntraClient.createDirect(peerId) }.getOrNull()
+            if (convId == null) {
+                Toast.makeText(context, "Gagal memulai panggilan.", Toast.LENGTH_SHORT).show()
+            } else {
+                activeCall = CallTarget(name, convId, peerId, video)
+            }
+        }
     }
 
     val shown = if (filter == 1) history.filter { it.direction == CallDirection.MISSED } else history
@@ -316,8 +313,32 @@ fun CallsScreen(
                 }
             }
         }
+
+        // Full-screen call overlay.
+        activeCall?.let { target ->
+            CallScreen(
+                peerName = target.name,
+                conversationId = target.conversationId,
+                video = target.video,
+                peerId = target.peerId,
+                onClose = {
+                    activeCall = null
+                    // The call screen logged the attempt; refresh the list.
+                    history.clear()
+                    history.addAll(CallLog.all(context))
+                },
+            )
+        }
     }
 }
+
+/** A call the user is placing from this screen. */
+private data class CallTarget(
+    val name: String,
+    val conversationId: String,
+    val peerId: String,
+    val video: Boolean,
+)
 
 // ---------------------------------------------------------------------------
 // Pieces

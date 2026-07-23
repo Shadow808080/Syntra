@@ -149,13 +149,39 @@ supaya app bisa menyambungkan fitur undang ke room `invite_only`.
 
 ---
 
+## ✅ Panggilan (audio & video) — sudah disambungkan, terima kasih
+
+Terverifikasi dari `docs/api.md` §Calls dan sudah dipakai app:
+`POST /calls {conversation_id, kind}` → `sfu_url`/`sfu_token`, lalu
+`.../answer`, `.../decline`, `.../leave`, dan `GET /conversations/{id}/call`.
+Event WS `call.incoming` / `call.answered` / `call.ended` dipakai untuk
+memunculkan layar dering, mempromosikan ke "berlangsung", dan menutup panggilan.
+Media (audio/video) lewat LiveKit persis seperti voice room.
+
+- Untuk **layar panggilan masuk** app memanggil `GET /conversations/{id}/call`
+  guna tahu `kind` + `initiator_id`, lalu mengambil nama lawan bicara dari
+  `GET /conversations`. Karena itu **poin 6 (counterpart_id/username di
+  `/conversations`) makin penting** — tanpa itu nama pemanggil pada layar dering
+  bisa kosong untuk chat yang belum pernah dibuka.
+- Catatan kecil: `call.incoming` hanya membawa `conversation_id`; kalau payload
+  bisa langsung menyertakan `call_id` + `kind` + `initiator`, app tak perlu
+  bulat-balik `GET .../call` dulu (bukan penghalang, hanya optimasi).
+
+## ✅ Shorts/Reels — sudah disambungkan, terima kasih
+
+Endpoint `GET /reels`, `POST /reels {media_id, caption}`,
+`PUT/DELETE /reels/{id}/like`, `.../save`, `POST /reels/{id}/view`,
+`GET/POST /reels/{id}/comments` semuanya dipakai di feed vertikal baru
+(swipe atas-bawah, video auto-loop, like/simpan/komentar, unggah via
+`media/upload-url` kind `video`). Tombol posting kini benar-benar menerbitkan reel.
+
+---
+
 ## Belum disambungkan di app (bukan permintaan — sekadar catatan)
 
 - **Notifikasi in-app** (`GET /notifications`, `/unread-count`, `POST /read`,
   event `notification.new`) sudah berfungsi di server. Rencana: sambungkan ke ikon
   lonceng. Belum dikerjakan.
-- **Shorts/Reels** — belum ada endpoint (`/reels|/shorts|/videos` → 404); tombol
-  posting di app menampilkan pesan bahwa server belum siap.
 - **Pesan bermedia** — `POST .../messages` menolak `media_id`
   (`unknown field`). Sementara app mengirim URL media sebagai body teks lalu
   merendernya sebagai foto/suara. Kalau nanti pesan mendukung `media_id` +

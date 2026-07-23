@@ -2,7 +2,10 @@ package com.example.syntra.net
 
 import android.os.Handler
 import android.os.Looper
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -37,6 +40,13 @@ interface SocketListener {
     fun onRoomRoleChanged(roomId: String, userId: String, role: String, needsRejoin: Boolean) {}
     /** Host left: tear the room down. */
     fun onRoomEnded(roomId: String) {}
+
+    /** A call started in one of my conversations — show the incoming/ongoing UI. */
+    fun onCallIncoming(conversationId: String) {}
+    /** The call I'm ringing was picked up. */
+    fun onCallAnswered(callId: String) {}
+    /** The call ended; [reason] is "declined" or "left". */
+    fun onCallEnded(reason: String) {}
 }
 
 /**
@@ -65,6 +75,15 @@ object SyntraClient {
 
     /** Latest refresh token, so the caller can persist it across restarts. */
     val currentRefreshToken: String? get() = refreshToken
+
+    // Best-effort background scope for calls that must not block the UI and whose
+    // result we don't need (e.g. leaving a call as the screen closes).
+    private val bg = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** Runs [block] on a background scope, swallowing failures. */
+    fun fireAndForget(block: suspend () -> Unit) {
+        bg.launch { runCatching { block() } }
+    }
 
     // -----------------------------------------------------------------------
     // Auth
@@ -379,6 +398,56 @@ object SyntraClient {
 
     suspend fun postReelComment(reelId: String, body: String) {
         postData("/api/v1/reels/$reelId/comments", JSONObject().put("body", body))
+    }
+
+    // -----------------------------------------------------------------------
+    // Calls (audio & video) — docs/api.md §Calls
+    //
+    // The backend only carries call *state* and mints the LiveKit token; the
+    // audio/video streams flow through the SFU (sfu_url/sfu_token), handled by
+    // CallEngine. Incoming/answered/ended arrive as WebSocket events.
+    // -----------------------------------------------------------------------
+
+    private fun JSONObject.toCall(fallbackId: String = "") = NetCall(
+        callId = optString("call_id", fallbackId),
+        sfuRoomId = optString("sfu_room_id", ""),
+        sfuToken = optString("sfu_token", ""),
+        sfuUrl = optString("sfu_url", ""),
+        isNew = optBoolean("is_new", false),
+    )
+
+    /** Starts a call (or joins the conversation's ongoing one). [kind] = "audio"|"video". */
+    suspend fun startCall(conversationId: String, kind: String): NetCall {
+        val payload = JSONObject().put("conversation_id", conversationId).put("kind", kind)
+        return (postData("/api/v1/calls", payload) as JSONObject).toCall()
+    }
+
+    /** Answers an incoming call and returns the credentials to connect. */
+    suspend fun answerCall(callId: String, conversationId: String): NetCall =
+        (postData("/api/v1/calls/$callId/answer?conversation_id=$conversationId", JSONObject()) as JSONObject)
+            .toCall(callId)
+
+    /** Rejects an incoming call (direct chats only). */
+    suspend fun declineCall(callId: String, conversationId: String) {
+        runCatching { postData("/api/v1/calls/$callId/decline?conversation_id=$conversationId", JSONObject()) }
+    }
+
+    /** Leaves an active call. */
+    suspend fun leaveCall(callId: String, conversationId: String) {
+        runCatching { postData("/api/v1/calls/$callId/leave?conversation_id=$conversationId", JSONObject()) }
+    }
+
+    /** Active call in a conversation, or null when none is ongoing. */
+    suspend fun getActiveCall(conversationId: String): NetActiveCall? {
+        val data = runCatching { getData("/api/v1/conversations/$conversationId/call") }.getOrNull()
+        val obj = data as? JSONObject ?: return null
+        return NetActiveCall(
+            id = obj.optString("id", ""),
+            kind = obj.optString("kind", "audio"),
+            status = obj.optString("status", ""),
+            initiatorId = obj.optString("initiator_id", ""),
+            startedAt = obj.optString("started_at", ""),
+        )
     }
 
     /** People I follow — the pool to pick group members from. */
@@ -705,6 +774,15 @@ object SyntraClient {
                 }
                 "room.ended" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onRoomEnded(d.optString("room_id")) }
+                }
+                "call.incoming" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onCallIncoming(d.optString("conversation_id")) }
+                }
+                "call.answered" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onCallAnswered(d.optString("call_id")) }
+                }
+                "call.ended" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onCallEnded(d.optString("reason")) }
                 }
                 "room.message" -> (data as? JSONObject)?.let { d ->
                     val m = NetRoomMessage(

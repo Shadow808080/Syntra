@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -119,42 +120,98 @@ private fun MainTabs(onSignOut: () -> Unit) {
     // pager so its own gestures don't accidentally flip to the next tab.
     var chatOverlay by remember { mutableStateOf(false) }
     var roomOverlay by remember { mutableStateOf(false) }
+    // A call ringing on this device (I'm the receiver), null when idle.
+    var incoming by remember { mutableStateOf<IncomingCall?>(null) }
 
     fun goTo(tab: NexusTab) {
         scope.launch { pager.animateScrollToPage(tabOrder.indexOf(tab)) }
+    }
+
+    // Listen for incoming calls anywhere in the app and raise the ringing screen.
+    DisposableEffect(Unit) {
+        if (!ApiConfig.ENABLED) return@DisposableEffect onDispose {}
+        val listener = object : com.example.syntra.net.SocketListener {
+            override fun onCallIncoming(conversationId: String) {
+                scope.launch {
+                    val call = SyntraClient.getActiveCall(conversationId) ?: return@launch
+                    // I started this call — don't ring my own device.
+                    if (call.initiatorId == SyntraClient.myUserId) return@launch
+                    val conv = runCatching { SyntraClient.getConversations() }
+                        .getOrNull()?.firstOrNull { it.id == conversationId }
+                    incoming = IncomingCall(
+                        conversationId = conversationId,
+                        callId = call.id,
+                        video = call.kind == "video",
+                        peerName = conv?.title.orEmpty().ifBlank { "Panggilan masuk" },
+                        peerId = conv?.counterpartId.orEmpty(),
+                    )
+                }
+            }
+
+            override fun onCallEnded(reason: String) {
+                // Caller hung up before I answered — drop the ringing screen.
+                incoming = null
+            }
+        }
+        SyntraClient.addListener(listener)
+        onDispose { SyntraClient.removeListener(listener) }
     }
 
     // One fixed bottom bar below the pager — it never slides with the pages, only
     // its highlight follows. It hides when a full-screen overlay is up so chat
     // detail / story viewer / voice room can cover the whole screen.
     val overlay = chatOverlay || roomOverlay
-    Column(modifier = Modifier.fillMaxSize()) {
-        HorizontalPager(
-            state = pager,
-            userScrollEnabled = !overlay,
-            // Keep all four tabs alive so swiping back doesn't reload/reconnect.
-            beyondViewportPageCount = tabOrder.size,
-            modifier = Modifier.weight(1f),
-        ) { page ->
-            when (tabOrder[page]) {
-                NexusTab.CHAT -> ChatScreen(
-                    modifier = Modifier.fillMaxSize(),
-                    onSignOut = onSignOut,
-                    onOverlayChange = { chatOverlay = it },
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            HorizontalPager(
+                state = pager,
+                userScrollEnabled = !overlay,
+                // Keep all four tabs alive so swiping back doesn't reload/reconnect.
+                beyondViewportPageCount = tabOrder.size,
+                modifier = Modifier.weight(1f),
+            ) { page ->
+                when (tabOrder[page]) {
+                    NexusTab.CHAT -> ChatScreen(
+                        modifier = Modifier.fillMaxSize(),
+                        onSignOut = onSignOut,
+                        onOverlayChange = { chatOverlay = it },
+                    )
+                    NexusTab.SHORTS -> ShortsScreen(modifier = Modifier.fillMaxSize())
+                    NexusTab.ROOMS -> RoomsScreen(
+                        modifier = Modifier.fillMaxSize(),
+                        onOverlayChange = { roomOverlay = it },
+                    )
+                    NexusTab.CALLS -> CallsScreen(modifier = Modifier.fillMaxSize())
+                }
+            }
+            if (!overlay) {
+                NexusBottomBar(
+                    selected = tabOrder[pager.currentPage],
+                    onSelect = { goTo(it) },
                 )
-                NexusTab.SHORTS -> ShortsScreen(modifier = Modifier.fillMaxSize())
-                NexusTab.ROOMS -> RoomsScreen(
-                    modifier = Modifier.fillMaxSize(),
-                    onOverlayChange = { roomOverlay = it },
-                )
-                NexusTab.CALLS -> CallsScreen(modifier = Modifier.fillMaxSize())
             }
         }
-        if (!overlay) {
-            NexusBottomBar(
-                selected = tabOrder[pager.currentPage],
-                onSelect = { goTo(it) },
+
+        // Incoming-call ringing screen, above everything.
+        incoming?.let { call ->
+            CallScreen(
+                peerName = call.peerName,
+                conversationId = call.conversationId,
+                video = call.video,
+                incoming = true,
+                incomingCallId = call.callId,
+                peerId = call.peerId,
+                onClose = { incoming = null },
             )
         }
     }
 }
+
+/** A call ringing on this device that the user can answer or decline. */
+private data class IncomingCall(
+    val conversationId: String,
+    val callId: String,
+    val video: Boolean,
+    val peerName: String,
+    val peerId: String,
+)

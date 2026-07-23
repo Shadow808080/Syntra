@@ -156,6 +156,28 @@ data class NetReelComment(
     val createdAt: String = "",
 )
 
+// Calls (audio & video) — docs/api.md §Calls. Audio/video ride LiveKit; the
+// backend only mints the sfu_token, exactly like voice rooms.
+
+/** Credentials handed back by POST /calls and .../answer. */
+data class NetCall(
+    val callId: String,
+    val sfuRoomId: String,
+    val sfuToken: String,
+    val sfuUrl: String,
+    /** true when this call was just created (I'm the initiator). */
+    val isNew: Boolean = false,
+)
+
+/** Active-call status of a conversation, from GET /conversations/{id}/call. */
+data class NetActiveCall(
+    val id: String,
+    val kind: String,          // "audio" | "video"
+    val status: String,        // "ongoing" | ...
+    val initiatorId: String,
+    val startedAt: String = "",
+)
+
 data class NetStoryGroup(
     val authorId: String,
     val username: String,

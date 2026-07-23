@@ -5,10 +5,14 @@
     <!-- Talk to the Syntra backend (REST + WebSocket) and Supabase. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Voice rooms: LiveKit needs the mic plus audio/network state. -->
+    <!-- Voice rooms + calls: LiveKit needs the mic plus audio/network state. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Video calls need the camera. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!-- Read the device gallery to show it in the "Tambah status" grid. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
