@@ -270,7 +270,7 @@ fun RoomsScreen(
                 onCreate = { title, topic ->
                     showCreate = false
                     scope.launch {
-                        runCatching { SyntraClient.createRoom(title, topic) }
+                        runCatching { SyntraClient.createRoom(title, topic).first }
                             .onSuccess { id ->
                                 // Show it immediately at the top instead of waiting for a
                                 // refresh, then walk the host straight into their own room.

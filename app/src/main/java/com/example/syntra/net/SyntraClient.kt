@@ -320,10 +320,29 @@ object SyntraClient {
         )
     }
 
-    suspend fun createRoom(title: String, topic: String, visibility: String = "public"): String {
+    /**
+     * Creates a room. The response already carries a `join` block with the SFU
+     * credentials, so the host does not need a second call to start talking.
+     */
+    suspend fun createRoom(
+        title: String,
+        topic: String,
+        visibility: String = "public",
+    ): Pair<String, NetRoomJoin?> {
         val payload = JSONObject().put("title", title).put("topic", topic).put("visibility", visibility)
         val data = postData("/api/v1/rooms", payload) as JSONObject
-        return data.optString("id", data.optString("room_id", ""))
+        val id = data.optString("id", data.optString("room_id", ""))
+        val join = data.optJSONObject("join")?.let { j ->
+            NetRoomJoin(
+                roomId = j.optString("room_id", id),
+                role = j.optString("role", "host"),
+                canPublish = j.optBoolean("can_publish", true),
+                sfuRoomId = j.optString("sfu_room_id", ""),
+                sfuToken = j.optString("sfu_token", ""),
+                sfuUrl = j.optString("sfu_url", ""),
+            )
+        }
+        return id to join
     }
 
     /**
@@ -605,7 +624,7 @@ private fun JSONObject.toConversation() = NetConversation(
     id = getString("id"),
     type = optString("type", "direct"),
     title = optString("title", ""),
-    avatarMediaId = strOrNull("avatar_media_id"),
+    avatarMediaId = strOrNull("avatar_url") ?: strOrNull("avatar_media_id"),
     counterpartId = strOrNull("counterpart_id"),
     unreadCount = optInt("unread_count", 0),
     lastPreview = optString("last_message_preview", ""),
@@ -633,7 +652,7 @@ private fun JSONObject.toRoom() = NetRoom(
     hostId = optString("host_id", ""),
     hostUsername = optString("host_username", ""),
     hostName = optString("host_name", ""),
-    hostAvatarMediaId = strOrNull("host_avatar_media_id"),
+    hostAvatarMediaId = strOrNull("host_avatar_url") ?: strOrNull("host_avatar_media_id"),
     title = optString("title", ""),
     topic = optString("topic", ""),
     visibility = optString("visibility", "public"),
@@ -647,7 +666,7 @@ private fun JSONObject.toParticipant() = NetRoomParticipant(
     userId = getString("user_id"),
     username = optString("username", ""),
     displayName = optString("display_name", ""),
-    avatarMediaId = strOrNull("avatar_media_id"),
+    avatarMediaId = strOrNull("avatar_url") ?: strOrNull("avatar_media_id"),
     role = optString("role", "listener"),
     isMuted = optBoolean("is_muted", true),
     hasRaisedHand = optBoolean("has_raised_hand", false),
@@ -658,7 +677,8 @@ private fun JSONObject.toUser() = NetUser(
     id = getString("id"),
     username = optString("username", ""),
     displayName = optString("display_name", ""),
-    avatarMediaId = strOrNull("avatar_media_id"),
+    // Backend now sends a ready-to-use URL; the old id is kept as a fallback.
+    avatarMediaId = strOrNull("avatar_url") ?: strOrNull("avatar_media_id"),
     followerCount = optInt("follower_count", 0),
     followingCount = optInt("following_count", 0),
     followStatus = optString("follow_status", ""),
@@ -680,7 +700,7 @@ private fun JSONObject.toStoryGroup() = NetStoryGroup(
     authorId = getString("author_id"),
     username = optString("username", ""),
     displayName = optString("display_name", ""),
-    avatarMediaId = strOrNull("avatar_media_id"),
+    avatarMediaId = strOrNull("avatar_url") ?: strOrNull("avatar_media_id"),
     isCurrentUser = optBoolean("is_current_user", false),
     allViewed = optBoolean("all_viewed", false),
     unviewedCount = optInt("unviewed_count", 0),
