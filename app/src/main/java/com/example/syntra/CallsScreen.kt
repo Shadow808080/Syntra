@@ -146,6 +146,8 @@ fun CallsScreen(
     modifier: Modifier = Modifier,
     selectedTab: NexusTab = NexusTab.CALLS,
     onTabSelected: (NexusTab) -> Unit = {},
+    /** True while this tab is on screen; used to re-read the log live. */
+    visible: Boolean = true,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -155,6 +157,18 @@ fun CallsScreen(
     var filter by remember { mutableStateOf(0) } // 0 = semua, 1 = tak terjawab
     // Non-null while a full-screen call is up: (name, conversationId, peerId, video).
     var activeCall by remember { mutableStateOf<CallTarget?>(null) }
+
+    // A call placed or received anywhere in the app appends to the log; re-read it
+    // whenever this tab comes back so the history is always current.
+    LaunchedEffect(visible) {
+        if (visible) {
+            val fresh = CallLog.all(context)
+            if (fresh.map { it.id } != history.map { it.id }) {
+                history.clear()
+                history.addAll(fresh)
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         history.addAll(CallLog.all(context))

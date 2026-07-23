@@ -41,6 +41,13 @@ interface SocketListener {
     /** Host left: tear the room down. */
     fun onRoomEnded(roomId: String) {}
 
+    /** A group's title/avatar/members changed — re-read that conversation. */
+    fun onConversationUpdated(conversationId: String) {}
+    /** My request to join an invite-only room was approved/rejected. */
+    fun onRoomJoinDecided(roomId: String, approved: Boolean) {}
+    /** A new in-app notification arrived. */
+    fun onNotification(kind: String) {}
+
     /** A call started in one of my conversations — show the incoming/ongoing UI. */
     fun onCallIncoming(conversationId: String) {}
     /** The call I'm ringing was picked up. */
@@ -363,21 +370,35 @@ object SyntraClient {
     // Reels / Shorts (Fase 2)
     // -----------------------------------------------------------------------
 
-    private fun JSONObject.toReel() = NetReel(
-        id = getString("id"),
-        mediaUrl = optString("media_url", ""),
-        caption = optString("caption", ""),
-        creatorUsername = optJSONObject("creator")?.optString("username") ?: "",
-        creatorName = optJSONObject("creator")?.optString("display_name") ?: "",
-        creatorAvatarUrl = optJSONObject("creator")?.let { c ->
-            c.optString("avatar_url", "").ifBlank { null }
-        },
-        likeCount = optInt("like_count", 0),
-        commentCount = optInt("comment_count", 0),
-        viewCount = optInt("view_count", 0),
-        isLiked = optBoolean("is_liked", false),
-        isSaved = optBoolean("is_saved", false),
-    )
+    /**
+     * Author data is flat (`author_id`/`author_username`/`author_name`) and the
+     * viewer's own state is `liked`/`saved`. The nested-`creator` spellings are kept
+     * as fallbacks so an older server shape still parses.
+     */
+    private fun JSONObject.toReel(): NetReel {
+        val creator = optJSONObject("creator")
+        return NetReel(
+            id = getString("id"),
+            mediaUrl = optString("media_url", ""),
+            caption = optString("caption", ""),
+            authorId = optString("author_id", "").ifBlank { creator?.optString("id").orEmpty() },
+            creatorUsername = optString("author_username", "")
+                .ifBlank { creator?.optString("username").orEmpty() },
+            creatorName = optString("author_name", "")
+                .ifBlank { creator?.optString("display_name").orEmpty() },
+            creatorAvatarUrl = optString("author_avatar_url", "")
+                .ifBlank { creator?.optString("avatar_url").orEmpty() }
+                .ifBlank { null },
+            likeCount = optInt("like_count", 0),
+            commentCount = optInt("comment_count", 0),
+            viewCount = optInt("view_count", 0),
+            isLiked = optBoolean("liked", optBoolean("is_liked", false)),
+            isSaved = optBoolean("saved", optBoolean("is_saved", false)),
+        )
+    }
+
+    /** Deletes my own reel (soft delete). Owner only — others get 403. */
+    suspend fun deleteReel(reelId: String) = delete("/api/v1/reels/$reelId")
 
     suspend fun getReels(): List<NetReel> =
         (getData("/api/v1/reels") as JSONArray).mapObjects { it.toReel() }
@@ -405,10 +426,14 @@ object SyntraClient {
 
     suspend fun getReelComments(reelId: String): List<NetReelComment> =
         (getData("/api/v1/reels/$reelId/comments") as JSONArray).mapObjects {
+            val creator = it.optJSONObject("creator")
             NetReelComment(
                 id = it.getString("id"),
-                username = it.optJSONObject("creator")?.optString("username") ?: "",
-                avatarUrl = it.optJSONObject("creator")?.optString("avatar_url", "")?.ifBlank { null },
+                username = it.optString("author_username", "")
+                    .ifBlank { creator?.optString("username").orEmpty() },
+                avatarUrl = it.optString("author_avatar_url", "")
+                    .ifBlank { creator?.optString("avatar_url").orEmpty() }
+                    .ifBlank { null },
                 body = it.optString("body", ""),
                 createdAt = it.optString("created_at", ""),
             )
@@ -793,6 +818,16 @@ object SyntraClient {
                 "room.ended" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onRoomEnded(d.optString("room_id")) }
                 }
+                "conversation.updated" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onConversationUpdated(d.optString("conversation_id", d.optString("id"))) }
+                }
+                "room.join_decided" -> (data as? JSONObject)?.let { d ->
+                    val approved = d.optBoolean("approved", d.optString("status") == "approved")
+                    dispatch { it.onRoomJoinDecided(d.optString("room_id"), approved) }
+                }
+                "notification.new" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onNotification(d.optString("type")) }
+                }
                 "call.incoming" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onCallIncoming(d.optString("conversation_id")) }
                 }
@@ -848,6 +883,7 @@ private fun JSONObject.toConversation() = NetConversation(
     title = optString("title", ""),
     avatarMediaId = strOrNull("avatar_url") ?: strOrNull("avatar_media_id"),
     counterpartId = strOrNull("counterpart_id"),
+    counterpartUsername = strOrNull("counterpart_username"),
     unreadCount = optInt("unread_count", 0),
     lastPreview = optString("last_message_preview", ""),
     lastType = optString("last_message_type", "text"),

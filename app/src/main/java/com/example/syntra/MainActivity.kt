@@ -185,8 +185,12 @@ private fun MainTabs(onSignOut: () -> Unit) {
                     NexusTab.ROOMS -> RoomsScreen(
                         modifier = Modifier.fillMaxSize(),
                         onOverlayChange = { roomOverlay = it },
+                        visible = tabOrder[pager.currentPage] == NexusTab.ROOMS,
                     )
-                    NexusTab.CALLS -> CallsScreen(modifier = Modifier.fillMaxSize())
+                    NexusTab.CALLS -> CallsScreen(
+                        modifier = Modifier.fillMaxSize(),
+                        visible = tabOrder[pager.currentPage] == NexusTab.CALLS,
+                    )
                 }
             }
             if (!overlay) {

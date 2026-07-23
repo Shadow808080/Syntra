@@ -296,6 +296,7 @@ private fun NetConversation.toUi() = Conversation(
     presence = Presence.NONE, // updated live via presence.update
     sent = lastSenderId != null && lastSenderId == SyntraClient.myUserId,
     counterpartId = counterpartId,
+    counterpartUsername = counterpartUsername,
     counterpartLastReadId = counterpartLastReadId,
 )
 
@@ -468,23 +469,52 @@ fun ChatScreen(
             val listener = object : SocketListener {
                 override fun onMessageNew(message: NetMessage) {
                     val idx = chats.indexOfFirst { it.id == message.conversationId }
-                    if (idx >= 0) {
-                        val c = chats[idx]
-                        val mine = message.senderId == SyntraClient.myUserId
-                        chats.removeAt(idx)
-                        chats.add(
-                            0,
-                            c.copy(
-                                message = message.body.ifBlank { previewFallback(message.type) },
-                                time = formatClock(message.createdAt),
-                                // No badge for my own messages or the chat I'm reading.
-                                unread = when {
-                                    mine || openedChat?.id == c.id -> 0
-                                    else -> c.unread + 1
-                                },
-                                sent = mine,
-                            ),
-                        )
+                    if (idx < 0) {
+                        // First message of a conversation this device has never seen:
+                        // pull it in so the new chat appears without a refresh.
+                        scope.launch {
+                            runCatching { SyntraClient.getConversations() }.onSuccess { convs ->
+                                val fresh = convs.firstOrNull { it.id == message.conversationId }
+                                if (fresh != null && chats.none { it.id == fresh.id }) {
+                                    chats.add(0, fresh.toUi())
+                                    SyntraClient.subscribe(listOf("conversation:${fresh.id}"))
+                                    fresh.counterpartId?.let { SyntraClient.presenceQuery(listOf(it)) }
+                                }
+                            }
+                        }
+                        return
+                    }
+                    val c = chats[idx]
+                    val mine = message.senderId == SyntraClient.myUserId
+                    chats.removeAt(idx)
+                    chats.add(
+                        0,
+                        c.copy(
+                            message = message.body.ifBlank { previewFallback(message.type) },
+                            time = formatClock(message.createdAt),
+                            // No badge for my own messages or the chat I'm reading.
+                            unread = when {
+                                mine || openedChat?.id == c.id -> 0
+                                else -> c.unread + 1
+                            },
+                            sent = mine,
+                        ),
+                    )
+                }
+
+                override fun onConversationUpdated(conversationId: String) {
+                    // Group title/avatar/members changed — re-read just that row.
+                    scope.launch {
+                        runCatching { SyntraClient.getConversations() }.onSuccess { convs ->
+                            val fresh = convs.firstOrNull { it.id == conversationId } ?: return@onSuccess
+                            val i = chats.indexOfFirst { it.id == conversationId }
+                            if (i >= 0) {
+                                // Keep the live presence we already track locally.
+                                chats[i] = fresh.toUi().copy(presence = chats[i].presence)
+                            } else {
+                                chats.add(0, fresh.toUi())
+                            }
+                        }
                     }
                 }
 

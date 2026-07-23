@@ -97,6 +97,7 @@ import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
 import com.example.syntra.net.NetMessage
+import com.example.syntra.net.NetPresence
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.NexusAccent
@@ -173,6 +174,11 @@ fun ChatDetailScreen(
     }
     var input by remember { mutableStateOf("") }
     var peerTyping by remember { mutableStateOf(false) }
+    // Live online state for the header; seeded from the list, then kept current
+    // by presence.update so it changes without leaving the chat.
+    var peerOnline by remember(conversation) {
+        mutableStateOf(conversation.presence == Presence.ONLINE)
+    }
     var counterpartLastReadId by remember(conversation) {
         mutableStateOf(conversation.counterpartLastReadId)
     }
@@ -293,6 +299,25 @@ fun ChatDetailScreen(
                     if (conversationId != conversation.id) return
                     if (counterpartLastReadId == null || messageId > counterpartLastReadId!!) {
                         counterpartLastReadId = messageId
+                    }
+                }
+
+                override fun onPresence(presence: NetPresence) {
+                    // Online/offline in the header updates itself.
+                    if (presence.userId == conversation.counterpartId) {
+                        peerOnline = presence.online
+                    }
+                }
+
+                override fun onConversationUpdated(conversationId: String) {
+                    // Group renamed / avatar changed while I'm reading it: reload the
+                    // messages so anything that changed with it is current too.
+                    if (conversationId != conversation.id) return
+                    scope.launch {
+                        runCatching { SyntraClient.getMessages(conversation.id) }.onSuccess { list ->
+                            messages.clear()
+                            messages.addAll(list.reversed().map { it.toUi() })
+                        }
                     }
                 }
 
@@ -440,6 +465,7 @@ fun ChatDetailScreen(
         DetailTopBar(
             convo = conversation,
             peerTyping = peerTyping,
+            peerOnline = peerOnline,
             onBack = onBack,
             onLongPressAvatar = { confirmClear = true },
             onOpenProfile = { showProfile = true },
@@ -772,6 +798,7 @@ private fun ClearChatDialog(name: String, onDismiss: () -> Unit, onConfirm: () -
 private fun DetailTopBar(
     convo: Conversation,
     peerTyping: Boolean = false,
+    peerOnline: Boolean = false,
     onBack: () -> Unit = {},
     onLongPressAvatar: () -> Unit = {},
     onOpenProfile: () -> Unit = {},
@@ -781,7 +808,7 @@ private fun DetailTopBar(
 ) {
     val status = when {
         peerTyping -> "typing…"
-        convo.presence == Presence.ONLINE -> "online"
+        peerOnline || convo.presence == Presence.ONLINE -> "online"
         convo.presence == Presence.TYPING -> "typing…"
         else -> "last seen recently"
     }

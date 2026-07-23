@@ -35,6 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -63,7 +64,9 @@ import android.widget.Toast
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.NetRoom
 import com.example.syntra.net.NetRoomParticipant
+import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
@@ -125,6 +128,8 @@ fun RoomsScreen(
     selectedTab: NexusTab = NexusTab.ROOMS,
     onTabSelected: (NexusTab) -> Unit = {},
     onOverlayChange: (Boolean) -> Unit = {},
+    /** False while this tab is off-screen, so it stops syncing in the background. */
+    visible: Boolean = true,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -167,6 +172,26 @@ fun RoomsScreen(
         loading = false
     }
 
+    /** Refreshes the list in place, without the spinner — used for live updates. */
+    suspend fun syncQuietly() {
+        runCatching { SyntraClient.getRooms() }.onSuccess { result ->
+            val fresh = result.rooms.map { it.toUi() }
+            // Only touch the list when something actually changed, so the UI
+            // doesn't churn every tick.
+            if (fresh.map { it.id } != allRooms.map { it.id } ||
+                fresh.map { it.participantCount } != allRooms.map { it.participantCount }
+            ) {
+                allRooms.clear()
+                allRooms.addAll(fresh)
+            }
+            sfuReady = result.sfuReady
+            result.rooms.forEach { r ->
+                runCatching { SyntraClient.getRoomParticipants(r.id) }
+                    .onSuccess { roomFaces[r.id] = it }
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         if (!ApiConfig.ENABLED) {
             loading = false
@@ -174,6 +199,45 @@ fun RoomsScreen(
         } else {
             reload()
         }
+    }
+
+    // Live list. The server pushes room.ended/participants (handled below), but has
+    // no "room created" event — so while this tab is on screen we re-sync quietly
+    // to make new rooms appear on their own, without the user pulling to refresh.
+    LaunchedEffect(visible, openedRoom) {
+        if (!ApiConfig.ENABLED || !visible || openedRoom != null) return@LaunchedEffect
+        while (true) {
+            delay(8000)
+            syncQuietly()
+        }
+    }
+
+    DisposableEffect(Unit) {
+        if (!ApiConfig.ENABLED) return@DisposableEffect onDispose {}
+        val listener = object : SocketListener {
+            override fun onRoomEnded(roomId: String) {
+                // Host closed it: drop the card immediately.
+                allRooms.removeAll { it.id == roomId }
+                roomFaces.remove(roomId)
+            }
+
+            override fun onRoomParticipants(roomId: String, participants: List<NetRoomParticipant>) {
+                roomFaces[roomId] = participants
+                val i = allRooms.indexOfFirst { it.id == roomId }
+                if (i >= 0) {
+                    allRooms[i] = allRooms[i].copy(
+                        participantCount = participants.size,
+                        speakerCount = participants.count { p -> p.role != "listener" },
+                    )
+                }
+            }
+
+            override fun onReconnect() {
+                scope.launch { syncQuietly() }
+            }
+        }
+        SyntraClient.addListener(listener)
+        onDispose { SyntraClient.removeListener(listener) }
     }
 
     val visibleRooms = if (selectedFilter == 0) {

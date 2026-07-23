@@ -167,6 +167,25 @@ Media (audio/video) lewat LiveKit persis seperti voice room.
   bisa langsung menyertakan `call_id` + `kind` + `initiator`, app tak perlu
   bulat-balik `GET .../call` dulu (bukan penghalang, hanya optimasi).
 
+## 🔴 11. Event realtime yang masih kurang (semua halaman harus live)
+
+Target kami: **semua halaman langsung ikut berubah tanpa refresh**. Event yang ada
+(`message.new`, `message.read`, `typing`, `presence.update`, `room.*`, `call.*`,
+`conversation.updated`, `notification.new`) sudah dipakai semua. Yang belum ada
+dan memaksa app menebak/menyinkronkan sendiri:
+
+1. **`message.deleted`** — hapus pesan sudah ada (`DELETE /messages/{id}`), tapi
+   tidak ada siaran WS. Akibatnya perangkat lawan bicara baru tahu pesan dihapus
+   setelah membuka ulang chat. Mohon siarkan `{ conversation_id, message_id }`.
+2. **`message.reaction`** — reaksi (`PUT /messages/{id}/reaction`) juga tanpa
+   event, jadi reaksi tidak muncul realtime.
+3. **`reel.new` / `reel.deleted`** — feed Reels tidak punya event sama sekali;
+   app terpaksa memuat ulang tiap kali tab Shorts dibuka.
+4. **`room.created`** — daftar voice room tidak tahu ada room baru; app sekarang
+   menyinkronkan diam-diam tiap 8 detik selama tab Rooms terbuka. Dengan event ini
+   polling itu bisa kami hapus.
+5. **`story.new`** — story baru tidak muncul sampai daftar chat di-refresh.
+
 ## 🟡 10. Event realtime saat profil berubah (`user.updated`)
 
 Ganti foto/nama profil lewat `PATCH /users/me` berhasil dan tersimpan, tapi

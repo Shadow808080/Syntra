@@ -1,9 +1,11 @@
 package com.example.syntra
 
-import android.net.Uri
+import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
+import android.net.Uri
+import android.view.Surface
+import android.view.TextureView
 import android.widget.Toast
-import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,6 +16,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,6 +43,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
@@ -53,6 +57,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -63,11 +68,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -111,6 +119,8 @@ fun ShortsScreen(
     var posting by remember { mutableStateOf(false) }
     var pendingVideo by remember { mutableStateOf<Uri?>(null) }
     var commentsFor by remember { mutableStateOf<NetReel?>(null) }
+    // Reel the owner asked to delete, pending confirmation.
+    var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
 
     suspend fun reload() {
         if (!ApiConfig.ENABLED) { loading = false; return }
@@ -121,6 +131,12 @@ fun ShortsScreen(
     }
 
     LaunchedEffect(Unit) { reload() }
+
+    // The server has no reel events, so the feed refreshes itself whenever this
+    // tab comes back on screen — new reels show up without pulling to refresh.
+    LaunchedEffect(visible) {
+        if (visible && !loading) reload()
+    }
 
     val pickVideo = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
@@ -184,6 +200,14 @@ fun ShortsScreen(
                             reel = reel,
                             // Play only the reel in view *and* only while the tab is shown.
                             active = visible && page == pager.currentPage,
+                            // Delete is offered only on my own reels (server: 403 otherwise).
+                            onDelete = if (reel.authorId.isNotBlank() &&
+                                reel.authorId == SyntraClient.myUserId
+                            ) {
+                                { pendingDelete = reel }
+                            } else {
+                                null
+                            },
                             onLike = { toggleLike(reel) },
                             onSave = { toggleSave(reel) },
                             onComment = { commentsFor = reel },
@@ -248,6 +272,75 @@ fun ShortsScreen(
     commentsFor?.let { reel ->
         ReelCommentsSheet(reel = reel, onDismiss = { commentsFor = null })
     }
+
+    pendingDelete?.let { reel ->
+        DeleteReelDialog(
+            onDismiss = { pendingDelete = null },
+            onConfirm = {
+                pendingDelete = null
+                scope.launch {
+                    runCatching { SyntraClient.deleteReel(reel.id) }
+                        .onSuccess {
+                            reels.removeAll { it.id == reel.id }
+                            Toast.makeText(context, "Reel dihapus.", Toast.LENGTH_SHORT).show()
+                        }
+                        .onFailure {
+                            Toast.makeText(context, "Gagal menghapus: ${it.message}", Toast.LENGTH_LONG).show()
+                        }
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun DeleteReelDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .padding(22.dp),
+        ) {
+            Text("Hapus reel ini?", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Reel akan dihapus dari feed dan tidak bisa dikembalikan.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+            )
+            Spacer(Modifier.height(22.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Batal",
+                    color = NexusTextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onDismiss,
+                        )
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onConfirm,
+                        )
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                ) {
+                    Text("Hapus", color = Color(0xFFFF5D5D), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +355,8 @@ private fun ReelPage(
     onSave: () -> Unit,
     onComment: () -> Unit,
     onShare: () -> Unit,
+    /** Non-null only when the signed-in user owns this reel. */
+    onDelete: (() -> Unit)? = null,
 ) {
     // Tap-to-pause, per reel. Reset when the reel scrolls off so coming back plays.
     var paused by remember { mutableStateOf(false) }
@@ -329,48 +424,100 @@ private fun ReelPage(
                 onSave = onSave,
                 onComment = onComment,
                 onShare = onShare,
+                onDelete = onDelete,
                 modifier = Modifier.padding(end = 14.dp, bottom = 22.dp),
             )
         }
     }
 }
 
-/** Loops the reel's video while [playing]; pauses otherwise (off-screen or tapped). */
+/**
+ * Loops the reel's video while [playing]; pauses otherwise (off-screen or tapped).
+ *
+ * Uses a [TextureView] rather than `VideoView`: a VideoView is backed by a
+ * SurfaceView, which owns its own window layer and on many devices draws *on top
+ * of* everything — including the neighbouring tab while the pager is mid-swipe.
+ * A TextureView composites like an ordinary view, so it stays inside its page.
+ */
 @Composable
 private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifier) {
     if (url.isBlank()) {
         Box(modifier.background(Color.Black))
         return
     }
-    var view by remember { mutableStateOf<VideoView?>(null) }
-    var ready by remember { mutableStateOf(false) }
+    val player = remember(url) { MediaPlayer() }
+    var ready by remember(url) { mutableStateOf(false) }
+    var failed by remember(url) { mutableStateOf(false) }
+    // Intrinsic video size, used to centre-crop instead of stretching.
+    var videoW by remember(url) { mutableStateOf(0) }
+    var videoH by remember(url) { mutableStateOf(0) }
 
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+    DisposableEffect(url) {
+        onDispose { runCatching { player.release() } }
+    }
+
+    BoxWithConstraints(modifier = modifier.clipToBounds(), contentAlignment = Alignment.Center) {
+        // Fill the page without distorting: scale the stretched surface back to
+        // the video's real aspect ratio, cropping the overflow.
+        val boxW = maxWidth.value
+        val boxH = maxHeight.value
+        val scaleX: Float
+        val scaleY: Float
+        if (videoW > 0 && videoH > 0 && boxW > 0f && boxH > 0f) {
+            val cover = maxOf(boxW / videoW, boxH / videoH)
+            scaleX = videoW * cover / boxW
+            scaleY = videoH * cover / boxH
+        } else {
+            scaleX = 1f
+            scaleY = 1f
+        }
+
         AndroidView(
             factory = { ctx ->
-                VideoView(ctx).apply {
-                    setOnPreparedListener { mp: MediaPlayer ->
-                        mp.isLooping = true
-                        ready = true
-                        if (playing) start()
+                TextureView(ctx).apply {
+                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                            runCatching {
+                                player.setSurface(Surface(st))
+                                player.setDataSource(url)
+                                player.isLooping = true
+                                player.setOnVideoSizeChangedListener { _, vw, vh ->
+                                    videoW = vw
+                                    videoH = vh
+                                }
+                                player.setOnPreparedListener { ready = true }
+                                player.setOnErrorListener { _, _, _ -> failed = true; true }
+                                player.prepareAsync()
+                            }.onFailure { failed = true }
+                        }
+
+                        override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) = Unit
+                        override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean = true
+                        override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
                     }
-                    setVideoURI(Uri.parse(url))
-                    view = this
                 }
             },
-            modifier = Modifier.fillMaxSize(),
-            onRelease = { it.stopPlayback() },
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    this.scaleX = scaleX
+                    this.scaleY = scaleY
+                },
         )
+
         if (!ready) {
-            CircularProgressIndicator(color = Color.White.copy(alpha = 0.7f), strokeWidth = 2.dp)
+            if (failed) {
+                Text("Video gagal dimuat", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+            } else {
+                CircularProgressIndicator(color = Color.White.copy(alpha = 0.7f), strokeWidth = 2.dp)
+            }
         }
     }
 
     // Play/pause follows the current page and the tap-to-pause toggle.
     LaunchedEffect(playing, ready) {
-        val v = view ?: return@LaunchedEffect
         if (!ready) return@LaunchedEffect
-        runCatching { if (playing) v.start() else v.pause() }
+        runCatching { if (playing) player.start() else player.pause() }
     }
 }
 
@@ -421,6 +568,7 @@ private fun ReelActions(
     onSave: () -> Unit,
     onComment: () -> Unit,
     onShare: () -> Unit,
+    onDelete: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -452,6 +600,15 @@ private fun ReelActions(
             label = "Bagikan",
             onClick = onShare,
         )
+        // Owner-only: remove my own reel.
+        if (onDelete != null) {
+            ReelActionButton(
+                icon = Icons.Filled.Delete,
+                tint = Color(0xFFFF5D5D),
+                label = "Hapus",
+                onClick = onDelete,
+            )
+        }
     }
 }
 
@@ -639,7 +796,9 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit) {
                 modifier = Modifier.padding(horizontal = 20.dp),
             )
             Spacer(Modifier.height(12.dp))
-            Box(modifier = Modifier.fillMaxWidth().height(320.dp)) {
+            // Height follows the screen so the sheet fits small phones too.
+            val sheetHeight = (LocalConfiguration.current.screenHeightDp * 0.42f).dp
+            Box(modifier = Modifier.fillMaxWidth().height(sheetHeight)) {
                 when {
                     loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)

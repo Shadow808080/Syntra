@@ -20,6 +20,8 @@ data class NetConversation(
     val title: String,
     val avatarMediaId: String? = null,
     val counterpartId: String? = null,
+    /** Username of the other participant in a direct chat — needed to block/report. */
+    val counterpartUsername: String? = null,
     val unreadCount: Int = 0,
     val lastPreview: String = "",
     val lastType: String = "text",
@@ -138,6 +140,8 @@ data class NetReel(
     val id: String,
     val mediaUrl: String,
     val caption: String = "",
+    /** Author fields are flat in the response: `author_id` / `author_username` / `author_name`. */
+    val authorId: String = "",
     val creatorUsername: String = "",
     val creatorName: String = "",
     val creatorAvatarUrl: String? = null,
