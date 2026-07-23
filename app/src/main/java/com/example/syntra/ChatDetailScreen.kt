@@ -437,14 +437,11 @@ fun ChatDetailScreen(
         recorder.cancel()
     }
 
-    val camera = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicturePreview(),
-    ) { bitmap ->
-        if (bitmap != null) {
-            val out = java.io.ByteArrayOutputStream()
-            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, out)
-            sendMedia("image", "jpg", "image/jpeg", out.toByteArray())
-        }
+    // Goes through the permission gate; capturing without CAMERA granted crashes.
+    val camera = rememberCameraCapture { bitmap ->
+        val out = java.io.ByteArrayOutputStream()
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, out)
+        sendMedia("image", "jpg", "image/jpeg", out.toByteArray())
     }
 
     val gallery = rememberLauncherForActivityResult(
@@ -565,7 +562,7 @@ fun ChatDetailScreen(
 
     if (showAttach) {
         AttachmentSheet(
-            onCamera = { showAttach = false; camera.launch(null) },
+            onCamera = { showAttach = false; camera.launch() },
             onGallery = {
                 showAttach = false
                 gallery.launch(

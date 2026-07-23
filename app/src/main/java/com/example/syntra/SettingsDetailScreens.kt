@@ -229,14 +229,11 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
         }
     }
 
-    val camera = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicturePreview(),
-    ) { bitmap ->
-        if (bitmap != null) {
-            val out = java.io.ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
-            changeAvatar(out.toByteArray())
-        }
+    // Goes through the permission gate; capturing without CAMERA granted crashes.
+    val camera = rememberCameraCapture { bitmap ->
+        val out = java.io.ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+        changeAvatar(out.toByteArray())
     }
     val gallery = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
@@ -384,7 +381,7 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
 
     if (showPicker) {
         AttachmentSheet(
-            onCamera = { showPicker = false; camera.launch(null) },
+            onCamera = { showPicker = false; camera.launch() },
             onGallery = {
                 showPicker = false
                 gallery.launch(

@@ -175,9 +175,8 @@ fun AddStatusScreen(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri -> if (uri != null) onSelectUri(uri) }
 
-    val cameraLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicturePreview(),
-    ) { bitmap -> if (bitmap != null) onCaptureBitmap(bitmap) }
+    // Asks for the camera permission first — capturing without it crashes.
+    val cameraLauncher = rememberCameraCapture { bitmap -> onCaptureBitmap(bitmap) }
 
     LaunchedEffect(Unit) {
         if (!hasPermission) permissionLauncher.launch(galleryPermissions())
@@ -298,7 +297,7 @@ fun AddStatusScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    item { CameraTile(onClick = { cameraLauncher.launch(null) }) }
+                    item { CameraTile(onClick = { cameraLauncher.launch() }) }
                     items(media) { gItem ->
                         GalleryTile(gItem, imageLoader) { onSelectUri(gItem.uri) }
                     }

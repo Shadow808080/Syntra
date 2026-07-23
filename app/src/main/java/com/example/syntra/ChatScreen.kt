@@ -451,10 +451,10 @@ fun ChatScreen(
         // The conversation list may carry only a media id (or nothing) for the
         // photo. Resolve the real URL per person in the background so rows fill
         // in as they arrive — and so a changed profile photo shows up here.
+        // Cache-first: only people we have never resolved cost a request, so a
+        // reconnect or a new message doesn't re-query every contact. Pull-to-refresh
+        // clears the cache when the user explicitly asks for fresh data.
         scope.launch {
-            // A refresh must see changed photos, so start from a clean cache; the
-            // map then just avoids refetching the same person twice in one pass.
-            avatarCache.clear()
             chats.toList().forEach { c ->
                 val username = c.counterpartUsername
                 if (username.isNullOrBlank()) return@forEach
@@ -583,7 +583,17 @@ fun ChatScreen(
         // Local (optimistic) story; id is a client id until the backend acks it.
         val storyId = newLocalId()
         val item = StoryItem(storyId, media, viewed = true)
-        stories.add(0, ActivePerson(storyId, "Your story", listOf(item), isMine = true))
+        // My stories are one circle with a ring segment per post — appending must
+        // add a segment, not a second "Your story" bubble next to the first.
+        val mineIdx = stories.indexOfFirst { it.isMine }
+        if (mineIdx >= 0) {
+            val mine = stories[mineIdx]
+            val grown = mine.copy(items = mine.items + item)
+            stories.removeAt(mineIdx)
+            stories.add(0, grown)
+        } else {
+            stories.add(0, ActivePerson(storyId, "Story kamu", listOf(item), isMine = true))
+        }
         showAddStatus = false
         if (ApiConfig.ENABLED) scope.launch {
             runCatching { uploadStory(context, media) }
@@ -723,6 +733,9 @@ fun ChatScreen(
                 onRefresh = {
                     scope.launch {
                         refreshing = true
+                        // Explicit refresh: re-resolve photos so a changed avatar
+                        // is picked up (normal syncs reuse the cache).
+                        avatarCache.clear()
                         refresh()
                         refreshing = false
                     }

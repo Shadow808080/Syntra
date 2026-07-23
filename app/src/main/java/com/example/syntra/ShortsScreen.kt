@@ -193,7 +193,10 @@ fun ShortsScreen(
                     VerticalPager(
                         state = pager,
                         modifier = Modifier.fillMaxSize(),
-                        beyondViewportPageCount = 1,
+                        // Keeping neighbours composed meant three MediaPlayers
+                        // buffering video at once, which is what made the feed
+                        // feel heavy. Only the reel on screen holds a player.
+                        beyondViewportPageCount = 0,
                     ) { page ->
                         val reel = reels[page]
                         ReelPage(
