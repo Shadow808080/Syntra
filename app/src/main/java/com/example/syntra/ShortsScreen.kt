@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.ModeComment
@@ -246,8 +247,41 @@ private fun ReelPage(
     onComment: () -> Unit,
     onShare: () -> Unit,
 ) {
+    // Tap-to-pause, per reel. Reset when the reel scrolls off so coming back plays.
+    var paused by remember { mutableStateOf(false) }
+    LaunchedEffect(active) { if (!active) paused = false }
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        ReelVideo(url = reel.mediaUrl, active = active, modifier = Modifier.fillMaxSize())
+        ReelVideo(url = reel.mediaUrl, playing = active && !paused, modifier = Modifier.fillMaxSize())
+
+        // Full-screen tap layer toggles pause. Sits above the video but below the
+        // caption/action row (drawn later), so those buttons still receive taps.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { paused = !paused },
+        )
+
+        // Paused indicator.
+        if (paused && active) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(72.dp)
+                    .background(Color.Black.copy(alpha = 0.45f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = "Putar",
+                    tint = Color.White,
+                    modifier = Modifier.size(40.dp),
+                )
+            }
+        }
 
         // Bottom gradient so caption/rail stay legible over bright video.
         Box(
@@ -285,9 +319,9 @@ private fun ReelPage(
     }
 }
 
-/** Loops the reel's video while its page is the active one; pauses otherwise. */
+/** Loops the reel's video while [playing]; pauses otherwise (off-screen or tapped). */
 @Composable
-private fun ReelVideo(url: String, active: Boolean, modifier: Modifier = Modifier) {
+private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifier) {
     if (url.isBlank()) {
         Box(modifier.background(Color.Black))
         return
@@ -302,7 +336,7 @@ private fun ReelVideo(url: String, active: Boolean, modifier: Modifier = Modifie
                     setOnPreparedListener { mp: MediaPlayer ->
                         mp.isLooping = true
                         ready = true
-                        if (active) start()
+                        if (playing) start()
                     }
                     setVideoURI(Uri.parse(url))
                     view = this
@@ -316,11 +350,11 @@ private fun ReelVideo(url: String, active: Boolean, modifier: Modifier = Modifie
         }
     }
 
-    // Play/pause follows which page is showing.
-    LaunchedEffect(active, ready) {
+    // Play/pause follows the current page and the tap-to-pause toggle.
+    LaunchedEffect(playing, ready) {
         val v = view ?: return@LaunchedEffect
         if (!ready) return@LaunchedEffect
-        runCatching { if (active) v.start() else v.pause() }
+        runCatching { if (playing) v.start() else v.pause() }
     }
 }
 
