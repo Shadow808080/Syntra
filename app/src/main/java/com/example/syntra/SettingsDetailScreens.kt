@@ -1,0 +1,664 @@
+package com.example.syntra
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PersonOff
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.syntra.net.ApiConfig
+import com.example.syntra.net.SyntraClient
+import com.example.syntra.ui.theme.AppTheme
+import com.example.syntra.ui.theme.NexusAccent
+import com.example.syntra.ui.theme.NexusAccentSoft
+import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusStroke
+import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusTextPrimary
+import com.example.syntra.ui.theme.NexusTextSecondary
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.qrcode.QRCodeWriter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+// ---------------------------------------------------------------------------
+// Shared chrome
+// ---------------------------------------------------------------------------
+
+@Composable
+fun SettingsSubScreen(
+    title: String,
+    onClose: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    BackHandler(onBack = onClose)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(NexusBackground),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onClose,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack, "Kembali",
+                    tint = NexusTextPrimary, modifier = Modifier.size(22.dp),
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+            Text(title, color = NexusTextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+        }
+        content()
+    }
+}
+
+@Composable
+private fun Card(content: @Composable () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .background(NexusSurface, RoundedCornerShape(18.dp))
+            .border(1.dp, NexusStroke, RoundedCornerShape(18.dp))
+            .padding(16.dp),
+    ) { content() }
+}
+
+@Composable
+private fun Note(text: String) {
+    Text(
+        text = text,
+        color = NexusTextSecondary.copy(alpha = 0.85f),
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
+        modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+    )
+}
+
+@Composable
+private fun PrimaryAction(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(50.dp)
+            .background(
+                brush = if (enabled) {
+                    Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent))
+                } else {
+                    Brush.horizontalGradient(listOf(Color(0xFF2A2A32), Color(0xFF2A2A32)))
+                },
+                shape = RoundedCornerShape(25.dp),
+            )
+            .clickable(
+                enabled = enabled,
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            color = if (enabled) Color.White else NexusTextSecondary,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Profil
+// ---------------------------------------------------------------------------
+
+@Composable
+fun ProfileSettingsScreen(onClose: () -> Unit) {
+    val context = LocalContext.current
+    val email = SessionStore.signedInEmail(context).orEmpty()
+    var displayName by remember { mutableStateOf(ProfileStore.displayName(context, email)) }
+    var saved by remember { mutableStateOf(false) }
+
+    SettingsSubScreen("Profil", onClose) {
+        Column(modifier = Modifier.verticalScroll(rememberScrollState()).imePadding()) {
+            Box(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(96.dp)
+                        .background(
+                            Brush.linearGradient(listOf(Color(0xFF7C4DFF), Color(0xFF3B68F5))),
+                            CircleShape,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = displayName.firstOrNull()?.uppercase() ?: "S",
+                        color = Color.White,
+                        fontSize = 40.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            Card {
+                Text("Nama tampilan", color = NexusTextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+                        .border(1.dp, NexusStroke, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 14.dp, vertical = 13.dp),
+                ) {
+                    if (displayName.isEmpty()) {
+                        Text("Nama kamu", color = NexusTextSecondary, fontSize = 15.sp)
+                    }
+                    BasicTextField(
+                        value = displayName,
+                        onValueChange = { displayName = it; saved = false },
+                        singleLine = true,
+                        textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
+                        cursorBrush = SolidColor(NexusAccentSoft),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Text("Email", color = NexusTextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Text(email.ifBlank { "—" }, color = NexusTextPrimary, fontSize = 15.sp)
+            }
+            Spacer(Modifier.height(10.dp))
+            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                PrimaryAction(if (saved) "Tersimpan" else "Simpan", enabled = displayName.isNotBlank()) {
+                    ProfileStore.setDisplayName(context, displayName.trim())
+                    saved = true
+                    Toast.makeText(context, "Nama tampilan disimpan.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            Note(
+                "Nama ini tersimpan di perangkat. Server belum menyediakan endpoint " +
+                    "untuk memperbarui profil, jadi orang lain masih melihat nama lamamu.",
+            )
+        }
+    }
+}
+
+/** Local profile overrides, until the backend offers a profile endpoint. */
+object ProfileStore {
+    private const val PREFS = "syntra_settings"
+    private const val KEY_NAME = "display_name"
+
+    fun displayName(context: Context, fallbackEmail: String): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_NAME, null)
+            ?: fallbackEmail.substringBefore('@').replaceFirstChar { it.uppercase() }
+
+    fun setDisplayName(context: Context, value: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_NAME, value).apply()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kode QR
+// ---------------------------------------------------------------------------
+
+/** Encodes [content] as a QR bitmap. Runs off the main thread. */
+private suspend fun qrBitmap(content: String, size: Int, fg: Int, bg: Int): Bitmap? =
+    withContext(Dispatchers.Default) {
+        runCatching {
+            val matrix = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, size, size)
+            val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            for (x in 0 until size) {
+                for (y in 0 until size) {
+                    bmp.setPixel(x, y, if (matrix[x, y]) fg else bg)
+                }
+            }
+            bmp
+        }.getOrNull()
+    }
+
+@Composable
+fun QrCodeScreen(onClose: () -> Unit) {
+    val context = LocalContext.current
+    val email = SessionStore.signedInEmail(context).orEmpty()
+    val username = email.substringBefore('@').ifBlank { "pengguna" }
+    val link = "syntra://u/$username"
+
+    var bitmap by remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(link) {
+        bitmap = qrBitmap(link, 640, 0xFF000000.toInt(), 0xFFFFFFFF.toInt())
+    }
+
+    SettingsSubScreen("Kode QR saya", onClose) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(280.dp)
+                    .background(Color.White, RoundedCornerShape(24.dp))
+                    .padding(20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                val bmp = bitmap
+                if (bmp == null) {
+                    CircularProgressIndicator(color = NexusAccent, strokeWidth = 3.dp)
+                } else {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = "Kode QR $username",
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+            Spacer(Modifier.height(22.dp))
+            Text(
+                text = "@$username",
+                color = NexusTextPrimary,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Minta orang lain memindai ini lewat ikon scan di layar Chat " +
+                    "untuk langsung memulai percakapan denganmu.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(18.dp))
+            Text(link, color = NexusAccentSoft, fontSize = 12.sp)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keamanan
+// ---------------------------------------------------------------------------
+
+@Composable
+fun SecurityScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val email = SessionStore.signedInEmail(context).orEmpty()
+
+    SettingsSubScreen("Keamanan", onClose) {
+        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+            Card {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Lock, null, tint = NexusAccentSoft, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text("Sesi ini", color = NexusTextPrimary, fontSize = 15.sp)
+                        Text(
+                            text = email.ifBlank { "—" },
+                            color = NexusTextSecondary,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Token akses berlaku 1 jam dan diperbarui otomatis selama kamu " +
+                        "tetap masuk.",
+                    color = NexusTextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                PrimaryAction("Keluar dari perangkat ini") {
+                    scope.launch {
+                        if (ApiConfig.ENABLED) runCatching { SyntraClient.logoutRemote() }
+                        SessionStore.signOut(context)
+                        onSignedOut()
+                    }
+                }
+            }
+            Note(
+                "Ganti kata sandi dan daftar sesi aktif belum tersedia — server belum " +
+                    "punya endpoint-nya. Keluar akun mencabut token di perangkat ini.",
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kontak diblokir
+// ---------------------------------------------------------------------------
+
+@Composable
+fun BlockedContactsScreen(onClose: () -> Unit) {
+    val context = LocalContext.current
+    val blocked = remember { mutableStateOf(BlockStore.all(context).toList()) }
+
+    SettingsSubScreen("Kontak diblokir", onClose) {
+        if (blocked.value.isEmpty()) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth().padding(top = 60.dp, start = 32.dp, end = 32.dp),
+            ) {
+                Icon(
+                    Icons.Filled.PersonOff, null,
+                    tint = NexusTextSecondary, modifier = Modifier.size(44.dp),
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "Belum ada kontak yang diblokir.",
+                    color = NexusTextPrimary,
+                    fontSize = 15.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Pemblokiran diterapkan di perangkat ini: chat mereka " +
+                        "disembunyikan. Server belum punya endpoint blokir, jadi mereka " +
+                        "masih bisa mengirim pesan.",
+                    color = NexusTextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        } else {
+            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                items(blocked.value) { username ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        GradientAvatar(
+                            listOf(Color(0xFF485563), Color(0xFF29323C)),
+                            username.first().toString(),
+                            42.dp,
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Text(
+                            text = "@$username",
+                            color = NexusTextPrimary,
+                            fontSize = 15.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "Buka blokir",
+                            color = NexusAccentSoft,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) {
+                                BlockStore.unblock(context, username)
+                                blocked.value = BlockStore.all(context).toList()
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Device-local block list. */
+object BlockStore {
+    private const val PREFS = "syntra_settings"
+    private const val KEY = "blocked_usernames"
+
+    fun all(context: Context): Set<String> =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getStringSet(KEY, emptySet()) ?: emptySet()
+
+    fun block(context: Context, username: String) = save(context, all(context) + username)
+
+    fun unblock(context: Context, username: String) = save(context, all(context) - username)
+
+    private fun save(context: Context, value: Set<String>) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putStringSet(KEY, value).apply()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tema
+// ---------------------------------------------------------------------------
+
+@Composable
+fun ThemeScreen(onClose: () -> Unit) {
+    val context = LocalContext.current
+    SettingsSubScreen("Tema", onClose) {
+        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+            items(AppTheme.Choice.entries.toList()) { choice ->
+                val palette = AppTheme.paletteOf(choice)
+                val selected = AppTheme.current == choice
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .background(NexusSurface, RoundedCornerShape(18.dp))
+                        .border(
+                            width = if (selected) 2.dp else 1.dp,
+                            color = if (selected) NexusAccent else NexusStroke,
+                            shape = RoundedCornerShape(18.dp),
+                        )
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { AppTheme.select(context, choice) }
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Live preview of the palette
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .background(palette.background, RoundedCornerShape(14.dp))
+                            .border(1.dp, palette.stroke, RoundedCornerShape(14.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(width = 26.dp, height = 6.dp)
+                                    .background(palette.accent, RoundedCornerShape(3.dp)),
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(width = 18.dp, height = 6.dp)
+                                    .background(palette.textSecondary, RoundedCornerShape(3.dp)),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            choice.label,
+                            color = NexusTextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(choice.description, color = NexusTextSecondary, fontSize = 12.sp)
+                    }
+                    if (selected) {
+                        Box(
+                            modifier = Modifier.size(24.dp).background(NexusAccent, CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Filled.Check, null,
+                                tint = Color.White, modifier = Modifier.size(15.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Penyimpanan
+// ---------------------------------------------------------------------------
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_073_741_824 -> "%.1f GB".format(bytes / 1_073_741_824.0)
+    bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1024 -> "%.0f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
+
+private fun dirSize(dir: java.io.File?): Long {
+    if (dir == null || !dir.exists()) return 0
+    return dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+}
+
+@Composable
+fun StorageScreen(onClose: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var cacheSize by remember { mutableStateOf<Long?>(null) }
+    var clearing by remember { mutableStateOf(false) }
+
+    suspend fun measure() {
+        cacheSize = withContext(Dispatchers.IO) {
+            dirSize(context.cacheDir) + dirSize(context.externalCacheDir)
+        }
+    }
+
+    LaunchedEffect(Unit) { measure() }
+
+    SettingsSubScreen("Penyimpanan", onClose) {
+        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+            Card {
+                Text("Cache media", color = NexusTextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = cacheSize?.let { formatBytes(it) } ?: "Menghitung…",
+                    color = NexusTextPrimary,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Foto dan video story yang diunduh agar tidak perlu diambil " +
+                        "ulang. Aman dihapus kapan saja.",
+                    color = NexusTextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                PrimaryAction(
+                    text = if (clearing) "Membersihkan…" else "Bersihkan cache",
+                    enabled = !clearing && (cacheSize ?: 0) > 0,
+                ) {
+                    clearing = true
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            runCatching { context.cacheDir?.deleteRecursively() }
+                            runCatching { context.externalCacheDir?.deleteRecursively() }
+                        }
+                        measure()
+                        clearing = false
+                        Toast.makeText(context, "Cache dibersihkan.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.DeleteSweep, null,
+                    tint = NexusTextSecondary, modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = "Pesan dan story tetap tersimpan di server — membersihkan " +
+                        "cache tidak menghapusnya.",
+                    color = NexusTextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+            }
+        }
+    }
+}

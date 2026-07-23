@@ -1,0 +1,1978 @@
+package com.example.syntra
+
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
+import android.net.Uri
+import android.widget.Toast
+import android.widget.VideoView
+import androidx.activity.compose.BackHandler
+import androidx.annotation.DrawableRes
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import com.example.syntra.ui.theme.NexusAccent
+import com.example.syntra.ui.theme.NexusAccentSoft
+import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusOnline
+import com.example.syntra.ui.theme.NexusRing
+import com.example.syntra.ui.theme.NexusTextPrimary
+import coil.compose.AsyncImage
+import com.example.syntra.net.ApiConfig
+import com.example.syntra.net.NetConversation
+import com.example.syntra.net.NetMessage
+import com.example.syntra.net.NetPresence
+import com.example.syntra.net.NetStoryGroup
+import com.example.syntra.net.NetStoryViewer
+import com.example.syntra.net.SocketListener
+import com.example.syntra.net.SyntraClient
+import com.example.syntra.ui.theme.NexusTextSecondary
+import com.example.syntra.ui.theme.SyntraTheme
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+// ---------------------------------------------------------------------------
+// Data
+// ---------------------------------------------------------------------------
+
+// A story can be a bundled drawable, a picked photo/video, or a remote URL from the backend.
+private sealed interface StoryImage {
+    data class Res(@DrawableRes val id: Int) : StoryImage
+    data class Bitmap(val image: ImageBitmap) : StoryImage
+    data class Video(val uri: Uri, val thumbnail: ImageBitmap) : StoryImage
+    data class Url(val url: String, val isVideo: Boolean) : StoryImage
+}
+
+// Every entity carries a stable `id`. When wired to the backend this is the
+// server id; for the optimistic messages/stories created locally it is a
+// client id that gets swapped for the authoritative one on ack (ref -> ack).
+// See docs/app-backend-alignment.md §6.
+/** One segment of someone's story: its own media, its own viewed flag. */
+private data class StoryItem(
+    val id: String,
+    val image: StoryImage,
+    val viewed: Boolean = false,
+    /** RFC3339 UTC; stories expire 24h after this. */
+    val createdAt: String = "",
+)
+
+private data class ActivePerson(
+    val id: String,
+    val name: String,
+    val items: List<StoryItem>,
+    /** Only my own stories can be deleted. */
+    val isMine: Boolean = false,
+) {
+    /** Cover shown on the row: first unseen segment, else the first one. */
+    val photo: StoryImage get() = (items.firstOrNull { !it.viewed } ?: items.first()).image
+    val posts: Int get() = items.size
+}
+
+enum class Presence { NONE, ONLINE, TYPING }
+
+data class Conversation(
+    val id: String,
+    val name: String,
+    val message: String,
+    val time: String,
+    // Gradient is a local decoration used only when there is no real avatar.
+    // Derived from the id hash so a conversation always gets the same colours.
+    val gradient: List<Color> = gradientFor(id),
+    val unread: Int = 0,
+    val presence: Presence = Presence.NONE,
+    val sent: Boolean = false,
+    // Other participant in a direct chat; used for presence queries.
+    val counterpartId: String? = null,
+    // Newest message the peer has read; drives the ✓✓ indicator.
+    val counterpartLastReadId: String? = null,
+)
+
+// Stable placeholder gradients, picked from the id hash (align. doc §6).
+private val gradientPalettes = listOf(
+    listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5)),
+    listOf(Color(0xFF11998E), Color(0xFF38EF7D)),
+    listOf(Color(0xFFEE5A6F), Color(0xFFF29263)),
+    listOf(Color(0xFF485563), Color(0xFF29323C)),
+    listOf(Color(0xFFDA22FF), Color(0xFF9733EE)),
+    listOf(Color(0xFF2196F3), Color(0xFF3B68F5)),
+)
+
+private fun gradientFor(id: String): List<Color> =
+    gradientPalettes[(id.hashCode() and Int.MAX_VALUE) % gradientPalettes.size]
+
+private fun newLocalId(): String = "local-${System.currentTimeMillis()}"
+
+// No sample stories: the story row is whatever GET /stories returns, nothing else.
+
+/** Decode a picked gallery image into an [ImageBitmap] for use as a story. */
+private fun loadStoryBitmap(context: Context, uri: Uri): ImageBitmap? =
+    runCatching {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream)?.asImageBitmap()
+        }
+    }.getOrNull()
+
+/** Grab the first frame of a video to use as its story thumbnail. */
+private fun extractVideoThumbnail(context: Context, uri: Uri): ImageBitmap? =
+    runCatching {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+            retriever.getFrameAtTime(0)?.asImageBitmap()
+        } finally {
+            retriever.release()
+        }
+    }.getOrNull()
+
+// Faint outline shown on a story avatar once its history has been watched.
+private val StorySeenRing = Color(0xFF3A3A44)
+
+/** Build a [StoryImage] from a picked photo or video URI. */
+private fun loadStoryMedia(context: Context, uri: Uri): StoryImage? {
+    val mime = context.contentResolver.getType(uri).orEmpty()
+    return if (mime.startsWith("video")) {
+        extractVideoThumbnail(context, uri)?.let { StoryImage.Video(uri, it) }
+    } else {
+        loadStoryBitmap(context, uri)?.let { StoryImage.Bitmap(it) }
+    }
+}
+
+private val conversations = listOf(
+    Conversation(
+        id = "c_lena",
+        name = "Lena Chen",
+        message = "The system deployment...",
+        time = "12:45 PM",
+        unread = 3,
+        presence = Presence.ONLINE,
+    ),
+    Conversation(
+        id = "c_eng_sync",
+        name = "Engineering Sync",
+        message = "Marcus: Pull request #452...",
+        time = "Yesterday",
+        sent = true,
+    ),
+    Conversation(
+        id = "c_marcus",
+        name = "Marcus Wright",
+        message = "Typing...",
+        time = "10:12 AM",
+        presence = Presence.TYPING,
+    ),
+    Conversation(
+        id = "c_sarah",
+        name = "Sarah Jenkins",
+        message = "Check the new dashboard m...",
+        time = "Mon",
+    ),
+    Conversation(
+        id = "c_jasmine",
+        name = "Jasmine Vo",
+        message = "The client was very impres...",
+        time = "Jan 12",
+    ),
+)
+
+// ---------------------------------------------------------------------------
+// Backend mapping (net models -> UI models)
+// ---------------------------------------------------------------------------
+
+private fun NetConversation.toUi() = Conversation(
+    id = id,
+    name = title.ifBlank { "(tanpa nama)" },
+    message = lastPreview.ifBlank { previewFallback(lastType) },
+    time = formatClock(lastAt),
+    unread = unreadCount,
+    presence = Presence.NONE, // updated live via presence.update
+    sent = lastSenderId != null && lastSenderId == SyntraClient.myUserId,
+    counterpartId = counterpartId,
+    counterpartLastReadId = counterpartLastReadId,
+)
+
+/** Null when the group carries no media — an empty ring would be a lie. */
+private fun NetStoryGroup.toUi(): ActivePerson? {
+    if (stories.isEmpty()) return null
+    return ActivePerson(
+        id = authorId,
+        name = if (isCurrentUser) "Story kamu" else displayName.ifBlank { username },
+        isMine = isCurrentUser,
+        items = stories.map {
+            StoryItem(
+                id = it.id,
+                image = StoryImage.Url(it.mediaUrl, it.mediaKind == "video"),
+                viewed = it.viewed,
+                createdAt = it.createdAt,
+            )
+        },
+    )
+}
+
+private fun previewFallback(type: String): String = when (type) {
+    "image" -> "📷 Foto"
+    "video" -> "🎥 Video"
+    "audio", "voice_note" -> "🎙️ Pesan suara"
+    else -> ""
+}
+
+/** "Baru saja" / "12 menit lalu" / "3 jam lalu" — stories never live past 24h. */
+private fun relativeTime(iso: String): String {
+    if (iso.isBlank()) return ""
+    return runCatching {
+        val then = java.time.Instant.parse(iso)
+        val minutes = java.time.Duration.between(then, java.time.Instant.now()).toMinutes()
+        when {
+            minutes < 1 -> "Baru saja"
+            minutes < 60 -> "$minutes menit lalu"
+            else -> "${minutes / 60} jam lalu"
+        }
+    }.getOrDefault("")
+}
+
+private fun formatClock(iso: String?): String {
+    if (iso.isNullOrBlank()) return ""
+    return runCatching {
+        val local = java.time.Instant.parse(iso).atZone(java.time.ZoneId.systemDefault())
+        java.time.format.DateTimeFormatter.ofPattern("HH:mm").format(local)
+    }.getOrDefault("")
+}
+
+/** Uploads a locally created story to the backend (media 3-step + POST /stories). */
+private suspend fun uploadStory(context: Context, media: StoryImage) {
+    when (media) {
+        is StoryImage.Bitmap -> {
+            val bmp = media.image.asAndroidBitmap()
+            val out = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+            val id = SyntraClient.uploadMedia(
+                "image", "jpg", "image/jpeg", out.toByteArray(), bmp.width, bmp.height,
+            )
+            SyntraClient.createStory(id)
+        }
+        is StoryImage.Video -> {
+            val bytes = context.contentResolver.openInputStream(media.uri)?.use { it.readBytes() } ?: return
+            val id = SyntraClient.uploadMedia("video", "mp4", "video/mp4", bytes)
+            SyntraClient.createStory(id)
+        }
+        else -> Unit
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Screen
+// ---------------------------------------------------------------------------
+
+@Composable
+fun ChatScreen(
+    modifier: Modifier = Modifier,
+    selectedTab: NexusTab = NexusTab.CHAT,
+    onTabSelected: (NexusTab) -> Unit = {},
+    onSignOut: () -> Unit = {},
+) {
+    // Index of the story currently open in the full-screen viewer (null = closed).
+    var openedStory by remember { mutableStateOf<Int?>(null) }
+    // Conversation currently open in the detail screen (null = on the list).
+    var openedChat by remember { mutableStateOf<Conversation?>(null) }
+    // Live data only. Sample chats are used solely when there is no backend to talk to;
+    // the story row is never seeded — it shows exactly what GET /stories returns.
+    val chats = remember {
+        mutableStateListOf<Conversation>().also { if (!ApiConfig.ENABLED) it.addAll(conversations) }
+    }
+    val stories = remember { mutableStateListOf<ActivePerson>() }
+    // Stories whose history has been fully watched (ring turns grey / disappears).
+    val seenStories = remember { mutableStateListOf<ActivePerson>() }
+    // Search state.
+    var searching by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    // Whether the "Tambah status" sheet is open.
+    var showAddStatus by remember { mutableStateOf(false) }
+    // Conversation the user long-pressed and may want to remove.
+    var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
+    // Multi-select: long-press ticks a chat and swaps the overflow menu for actions.
+    val selection = remember { mutableStateListOf<String>() }
+    var archivedIds by remember { mutableStateOf(emptySet<String>()) }
+    var pinnedIds by remember { mutableStateOf(emptySet<String>()) }
+    var showArchived by remember { mutableStateOf(false) }
+    var showNewGroup by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        archivedIds = ChatFlags.archived(context)
+        pinnedIds = ChatFlags.pinned(context)
+    }
+
+    // --- Backend: load data + realtime updates (only when configured) --------
+    if (ApiConfig.ENABLED) {
+        LaunchedEffect(Unit) {
+            runCatching {
+                // AuthScreen already established the session; logging in again here
+                // would silently replace the signed-in user with the dev account.
+                if (!SyntraClient.hasSession) SyntraClient.login()
+                SyntraClient.connect()
+                val convs = SyntraClient.getConversations()
+                chats.clear(); chats.addAll(convs.map { it.toUi() })
+                val groups = SyntraClient.getStories()
+                stories.clear()
+                seenStories.clear()
+                groups.forEach { g ->
+                    g.toUi()?.let { person ->
+                        stories.add(person)
+                        // Rings the server already considers watched start out grey.
+                        if (g.allViewed) seenStories.add(person)
+                    }
+                }
+                SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
+                SyntraClient.presenceQuery(convs.mapNotNull { it.counterpartId })
+            }.onFailure { Toast.makeText(context, "Sync gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
+        }
+        DisposableEffect(Unit) {
+            val listener = object : SocketListener {
+                override fun onMessageNew(message: NetMessage) {
+                    val idx = chats.indexOfFirst { it.id == message.conversationId }
+                    if (idx >= 0) {
+                        val c = chats[idx]
+                        chats.removeAt(idx)
+                        chats.add(
+                            0,
+                            c.copy(
+                                message = message.body.ifBlank { previewFallback(message.type) },
+                                time = formatClock(message.createdAt),
+                                unread = if (openedChat?.id == c.id) 0 else c.unread + 1,
+                                sent = message.senderId == SyntraClient.myUserId,
+                            ),
+                        )
+                    }
+                }
+
+                override fun onPresence(presence: NetPresence) {
+                    val idx = chats.indexOfFirst { it.counterpartId == presence.userId }
+                    if (idx >= 0) {
+                        chats[idx] = chats[idx].copy(
+                            presence = if (presence.online) Presence.ONLINE else Presence.NONE,
+                        )
+                    }
+                }
+
+                override fun onReconnect() {
+                    scope.launch {
+                        runCatching {
+                            val convs = SyntraClient.getConversations()
+                            chats.clear(); chats.addAll(convs.map { it.toUi() })
+                            SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
+                        }
+                    }
+                }
+            }
+            SyntraClient.addListener(listener)
+            onDispose { SyntraClient.removeListener(listener) }
+        }
+    }
+
+    fun addStory(media: StoryImage) {
+        // Local (optimistic) story; id is a client id until the backend acks it.
+        val storyId = newLocalId()
+        val item = StoryItem(storyId, media, viewed = true)
+        stories.add(0, ActivePerson(storyId, "Your story", listOf(item), isMine = true))
+        showAddStatus = false
+        if (ApiConfig.ENABLED) scope.launch {
+            runCatching { uploadStory(context, media) }
+                .onFailure { Toast.makeText(context, "Upload story gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
+        }
+    }
+
+    val filtered = if (query.isBlank()) {
+        chats
+    } else {
+        chats.filter {
+            it.name.contains(query, ignoreCase = true) ||
+                it.message.contains(query, ignoreCase = true)
+        }
+    }
+
+    // Local view flags: blocked chats disappear, archived hide behind a toggle,
+    // pinned float to the top.
+    val blockedNames = BlockStore.all(context)
+    val notBlocked = filtered.filterNot { it.name in blockedNames }
+    val archivedCount = notBlocked.count { it.id in archivedIds }
+    val visible = notBlocked
+        .filter { showArchived || it.id !in archivedIds }
+        .sortedByDescending { it.id in pinnedIds }
+
+    fun openDirectWith(username: String) {
+        scope.launch {
+            runCatching {
+                val user = SyntraClient.getUser(username)
+                val convId = SyntraClient.createDirect(user.id)
+                openedChat = Conversation(
+                    id = convId,
+                    name = user.displayName.ifBlank { user.username },
+                    message = "",
+                    time = "",
+                    counterpartId = user.id,
+                )
+            }.onFailure { Toast.makeText(context, "Buka chat gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
+        }
+    }
+
+    fun startScan() {
+        GmsBarcodeScanning.getClient(context).startScan()
+            .addOnSuccessListener { barcode ->
+                val value = barcode.rawValue ?: "(empty)"
+                if (ApiConfig.ENABLED) {
+                    // QR carries syntra://u/<username>
+                    openDirectWith(value.substringAfterLast('/').ifBlank { value })
+                } else {
+                    Toast.makeText(context, "Scanned: $value", Toast.LENGTH_LONG).show()
+                }
+            }
+            .addOnCanceledListener { /* user dismissed the scanner */ }
+            .addOnFailureListener { e ->
+                Toast.makeText(context, "Scan failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+    }
+
+    // Device back peels off one layer at a time: selection, then search.
+    BackHandler(enabled = selection.isNotEmpty()) { selection.clear() }
+    BackHandler(enabled = searching && selection.isEmpty()) {
+        searching = false
+        query = ""
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(NexusBackground),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            NexusHeader(
+                searching = searching,
+                query = query,
+                selectedCount = selection.size,
+                onClearSelection = { selection.clear() },
+                onQueryChange = { query = it },
+                onStartSearch = { searching = true },
+                onStopSearch = {
+                    searching = false
+                    query = ""
+                },
+                onScan = { startScan() },
+                onMenuItem = { label ->
+                    val picked = chats.filter { it.id in selection }
+                    when (label) {
+                        "New group" -> showNewGroup = true
+                        "Settings" -> showSettings = true
+                        "Arsipkan" -> {
+                            val toArchive = picked.none { it.id in archivedIds }
+                            ChatFlags.setArchived(context, selection.toList(), toArchive)
+                            archivedIds = ChatFlags.archived(context)
+                            selection.clear()
+                        }
+                        "Sematkan" -> {
+                            val toPin = picked.none { it.id in pinnedIds }
+                            ChatFlags.setPinned(context, selection.toList(), toPin)
+                            pinnedIds = ChatFlags.pinned(context)
+                            selection.clear()
+                        }
+                        "Hapus percakapan" -> {
+                            pendingDelete = picked.firstOrNull()
+                        }
+                        "Blokir" -> {
+                            picked.forEach { BlockStore.block(context, it.name) }
+                            selection.clear()
+                            Toast.makeText(
+                                context,
+                                "Diblokir di perangkat ini. Server belum punya fitur blokir.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                        else -> Toast.makeText(context, label, Toast.LENGTH_SHORT).show()
+                    }
+                },
+            )
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(bottom = 24.dp),
+            ) {
+                if (!searching) {
+                    item {
+                        ActiveRow(
+                            people = stories,
+                            seen = seenStories,
+                            onStoryClick = { openedStory = it },
+                        )
+                    }
+                    item { Spacer(Modifier.height(4.dp)) }
+                }
+                itemsIndexed(visible) { index, convo ->
+                    ConversationRow(
+                        convo = convo,
+                        selected = convo.id in selection,
+                        pinned = convo.id in pinnedIds,
+                        onClick = {
+                            // While selecting, a tap toggles instead of opening.
+                            if (selection.isEmpty()) openedChat = convo
+                            else if (!selection.remove(convo.id)) selection.add(convo.id)
+                        },
+                        onLongClick = { if (!selection.remove(convo.id)) selection.add(convo.id) },
+                    )
+                    if (index != visible.lastIndex) {
+                        Spacer(Modifier.height(10.dp))
+                    }
+                }
+                if (archivedCount > 0 && !searching) {
+                    item {
+                        Text(
+                            text = if (showArchived) "Sembunyikan arsip" else "Diarsipkan ($archivedCount)",
+                            color = NexusAccentSoft,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) { showArchived = !showArchived }
+                                .padding(vertical = 18.dp),
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+                if (searching && visible.isEmpty()) {
+                    item {
+                        Text(
+                            text = "No conversations found",
+                            color = NexusTextSecondary,
+                            fontSize = 14.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 40.dp),
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+            }
+            NexusBottomBar(selected = selectedTab, onSelect = onTabSelected)
+        }
+
+        // Floating button: add a new story from the gallery.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                // Clear of the bottom bar so it never sits on top of the Calls tab.
+                .padding(end = 20.dp, bottom = 140.dp)
+                .size(56.dp)
+                .background(
+                    brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
+                    shape = RoundedCornerShape(18.dp),
+                )
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { showAddStatus = true },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Add,
+                contentDescription = "Add story",
+                tint = Color.White,
+                modifier = Modifier.size(26.dp),
+            )
+        }
+
+        // Full-screen story viewer (WhatsApp-status style)
+        openedStory?.let { index ->
+            StoryViewer(
+                people = stories,
+                startIndex = index,
+                onClose = { openedStory = null },
+                onSeen = { i ->
+                    stories.getOrNull(i)?.let { p -> if (p !in seenStories) seenStories.add(p) }
+                },
+                onViewed = { personIndex, segment ->
+                    // Mark exactly the segment being watched; the call is idempotent.
+                    val person = stories.getOrNull(personIndex) ?: return@StoryViewer
+                    val item = person.items.getOrNull(segment) ?: return@StoryViewer
+                    if (!item.viewed) {
+                        stories[personIndex] = person.copy(
+                            items = person.items.toMutableList().also {
+                                it[segment] = item.copy(viewed = true)
+                            },
+                        )
+                        if (ApiConfig.ENABLED) scope.launch {
+                            runCatching { SyntraClient.viewStory(item.id) }
+                        }
+                    }
+                },
+                onDeleteStory = { personIndex, segment ->
+                    val person = stories.getOrNull(personIndex) ?: return@StoryViewer
+                    val item = person.items.getOrNull(segment) ?: return@StoryViewer
+                    scope.launch {
+                        runCatching { if (ApiConfig.ENABLED) SyntraClient.deleteStory(item.id) }
+                            .onSuccess {
+                                val left = person.items.filterNot { it.id == item.id }
+                                if (left.isEmpty()) {
+                                    stories.removeAt(personIndex)
+                                    openedStory = null
+                                } else {
+                                    stories[personIndex] = person.copy(items = left)
+                                }
+                            }
+                            .onFailure {
+                                Toast.makeText(
+                                    context,
+                                    "Hapus story gagal: ${it.message}",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                    }
+                },
+            )
+        }
+
+        // Full-screen conversation detail
+        openedChat?.let { convo ->
+            ChatDetailScreen(
+                conversation = convo,
+                onBack = { openedChat = null },
+            )
+        }
+
+        pendingDelete?.let { convo ->
+            DeleteConversationDialog(
+                convo = convo,
+                onDismiss = { pendingDelete = null },
+                onConfirm = {
+                    pendingDelete = null
+                    // Local only: the backend has no delete/leave endpoint for
+                    // conversations yet, so say plainly what this does.
+                    if (selection.isEmpty()) {
+                        chats.remove(convo)
+                    } else {
+                        chats.removeAll { it.id in selection }
+                        selection.clear()
+                    }
+                    Toast.makeText(
+                        context,
+                        "Percakapan disembunyikan di perangkat ini. Pesan baru akan memunculkannya lagi.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                },
+            )
+        }
+
+        if (showNewGroup) {
+            NewGroupScreen(
+                onClose = { showNewGroup = false },
+                onCreated = { id, name ->
+                    showNewGroup = false
+                    val convo = Conversation(id = id, name = name, message = "", time = "")
+                    chats.add(0, convo)
+                    openedChat = convo
+                },
+            )
+        }
+
+        if (showSettings) {
+            SettingsScreen(
+                onClose = { showSettings = false },
+                onSignedOut = {
+                    showSettings = false
+                    onSignOut()
+                },
+            )
+        }
+
+        // "Tambah status" sheet (gallery grid + actions)
+        if (showAddStatus) {
+            AddStatusScreen(
+                onClose = { showAddStatus = false },
+                onSelectUri = { uri -> loadStoryMedia(context, uri)?.let { addStory(it) } },
+                onCaptureBitmap = { bmp -> addStory(StoryImage.Bitmap(bmp.asImageBitmap())) },
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Header
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun NexusHeader(
+    searching: Boolean,
+    query: String,
+    selectedCount: Int,
+    onClearSelection: () -> Unit,
+    onQueryChange: (String) -> Unit,
+    onStartSearch: () -> Unit,
+    onStopSearch: () -> Unit,
+    onScan: () -> Unit,
+    onMenuItem: (String) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(SyntraHeaderPadding),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (selectedCount > 0) {
+            // Selection mode: the overflow menu becomes chat actions.
+            HeaderIcon(Icons.Filled.Close, "Batal pilih", onClick = onClearSelection)
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = "$selectedCount dipilih",
+                color = NexusTextPrimary,
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.weight(1f))
+            Box {
+                var menuOpen by remember { mutableStateOf(false) }
+                HeaderIcon(Icons.Filled.MoreVert, "Aksi chat") { menuOpen = true }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    listOf("Arsipkan", "Sematkan", "Hapus percakapan", "Blokir").forEach { label ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = label,
+                                    color = if (label == "Hapus percakapan" || label == "Blokir") {
+                                        Color(0xFFFF5D5D)
+                                    } else {
+                                        NexusTextPrimary
+                                    },
+                                )
+                            },
+                            onClick = {
+                                menuOpen = false
+                                onMenuItem(label)
+                            },
+                        )
+                    }
+                }
+            }
+        } else if (searching) {
+            HeaderIcon(Icons.AutoMirrored.Filled.ArrowBack, "Close search", onClick = onStopSearch)
+            Spacer(Modifier.width(8.dp))
+            val focusRequester = remember { FocusRequester() }
+            LaunchedEffect(Unit) { focusRequester.requestFocus() }
+            Box(modifier = Modifier.weight(1f)) {
+                if (query.isEmpty()) {
+                    Text("Search conversations…", color = NexusTextSecondary, fontSize = 16.sp)
+                }
+                BasicTextField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    singleLine = true,
+                    textStyle = TextStyle(color = NexusTextPrimary, fontSize = 16.sp),
+                    cursorBrush = SolidColor(NexusAccentSoft),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester),
+                )
+            }
+            if (query.isNotEmpty()) {
+                Spacer(Modifier.width(8.dp))
+                HeaderIcon(Icons.Filled.Close, "Clear", size = 22.dp) { onQueryChange("") }
+            }
+        } else {
+            SyntraTitle()
+            Spacer(Modifier.weight(1f))
+            // Order: search · scan · overflow
+            HeaderIcon(Icons.Filled.Search, "Search", onClick = onStartSearch)
+            HeaderIcon(Icons.Outlined.QrCodeScanner, "Scan", size = 22.dp, onClick = onScan)
+            Box {
+                var menuOpen by remember { mutableStateOf(false) }
+                HeaderIcon(Icons.Filled.MoreVert, "Menu") { menuOpen = true }
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false },
+                ) {
+                    listOf("New group", "Starred messages", "Settings").forEach { label ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            onClick = {
+                                menuOpen = false
+                                onMenuItem(label)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A borderless, ripple-free tappable header icon with a comfortable touch target. */
+@Composable
+private fun HeaderIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    size: androidx.compose.ui.unit.Dp = 24.dp,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription, tint = NexusTextPrimary, modifier = Modifier.size(size))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Active people row
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun ActiveRow(
+    people: List<ActivePerson>,
+    seen: List<ActivePerson>,
+    onStoryClick: (Int) -> Unit,
+) {
+    LazyRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 14.dp),
+        contentPadding = PaddingValues(horizontal = 20.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
+        itemsIndexed(people) { index, person ->
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                StoryAvatar(
+                    photo = person.photo,
+                    size = 56.dp,
+                    posts = person.posts,
+                    seen = person in seen,
+                    onClick = { onStoryClick(index) },
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = person.name,
+                    color = NexusTextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conversation row
+// ---------------------------------------------------------------------------
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ConversationRow(
+    convo: Conversation,
+    selected: Boolean,
+    pinned: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (selected) NexusAccent.copy(alpha = 0.16f) else Color.Transparent)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box {
+            GradientAvatar(
+                gradient = convo.gradient,
+                initial = convo.name.first().toString(),
+                size = 52.dp,
+            )
+            // Tick replaces the presence dot while this row is picked.
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(20.dp)
+                        .background(NexusAccent, CircleShape)
+                        .border(2.dp, NexusBackground, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.Check, null,
+                        tint = Color.White, modifier = Modifier.size(12.dp),
+                    )
+                }
+            }
+            if (!selected && convo.presence != Presence.NONE) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(14.dp)
+                        .background(NexusBackground, CircleShape)
+                        .padding(2.dp)
+                        .background(
+                            if (convo.presence == Presence.ONLINE) NexusOnline else NexusAccent,
+                            CircleShape,
+                        ),
+                )
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = convo.name,
+                    color = NexusTextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (pinned) {
+                    Icon(
+                        imageVector = Icons.Filled.PushPin,
+                        contentDescription = "Disematkan",
+                        tint = NexusTextSecondary,
+                        modifier = Modifier
+                            .padding(start = 6.dp)
+                            .size(13.dp),
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = convo.time,
+                    color = if (convo.unread > 0) NexusAccentSoft else NexusTextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = if (convo.unread > 0) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (convo.sent) {
+                    Text(
+                        text = "✓✓ ",
+                        color = NexusAccentSoft,
+                        fontSize = 14.sp,
+                    )
+                }
+                Text(
+                    text = convo.message,
+                    color = if (convo.presence == Presence.TYPING) NexusAccentSoft else NexusTextSecondary,
+                    fontStyle = if (convo.presence == Presence.TYPING) FontStyle.Italic else FontStyle.Normal,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (convo.unread > 0) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(22.dp)
+                            .background(NexusAccent, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = convo.unread.toString(),
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Story avatar with a segmented ring (one segment per posted story)
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun StoryAvatar(
+    photo: StoryImage,
+    size: androidx.compose.ui.unit.Dp,
+    posts: Int,
+    seen: Boolean,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            if (seen) {
+                // Already watched: the highlighted ring disappears, leaving a faint grey outline.
+                val strokeWidth = 1.5.dp.toPx()
+                val inset = strokeWidth / 2f
+                drawArc(
+                    color = StorySeenRing,
+                    startAngle = 0f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    topLeft = Offset(inset, inset),
+                    size = Size(this.size.width - strokeWidth, this.size.height - strokeWidth),
+                    style = Stroke(width = strokeWidth),
+                )
+                return@Canvas
+            }
+            val strokeWidth = 3.dp.toPx()
+            val inset = strokeWidth / 2f
+            val arcSize = Size(this.size.width - strokeWidth, this.size.height - strokeWidth)
+            val topLeft = Offset(inset, inset)
+            val segments = posts.coerceAtLeast(1)
+            // Gap (in degrees) between segments; a single story draws a full ring.
+            val gap = if (segments == 1) 0f else 10f
+            val sweep = (360f - gap * segments) / segments
+            var start = -90f
+            repeat(segments) {
+                drawArc(
+                    color = NexusRing,
+                    startAngle = start,
+                    sweepAngle = sweep,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+                )
+                start += sweep + gap
+            }
+        }
+        // Inner photo, inset so there is a small gap between ring and photo.
+        StoryPhoto(
+            photo = photo,
+            modifier = Modifier
+                .size(size - 10.dp)
+                .clip(CircleShape),
+        )
+    }
+}
+
+/** Renders a [StoryImage] from either a drawable resource or a picked bitmap. */
+@Composable
+private fun StoryPhoto(
+    photo: StoryImage,
+    modifier: Modifier = Modifier,
+) {
+    when (photo) {
+        is StoryImage.Res -> Image(
+            painter = painterResource(photo.id),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+        is StoryImage.Bitmap -> Image(
+            bitmap = photo.image,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+        is StoryImage.Video -> Image(
+            // Static thumbnail; the full-screen viewer plays the actual video.
+            bitmap = photo.thumbnail,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+        is StoryImage.Url -> AsyncImage(
+            model = photo.url,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+    }
+}
+
+/** True for any story whose media is a video (picked or remote). */
+private fun StoryImage.isVideoStory(): Boolean =
+    this is StoryImage.Video || (this is StoryImage.Url && this.isVideo)
+
+/**
+ * Plays a story video full-screen. Reports playback progress and fires [onFinished]
+ * only when the video reaches its end, so it always plays to completion.
+ */
+@Composable
+private fun StoryVideo(
+    uri: Uri,
+    paused: Boolean,
+    onProgress: (Float) -> Unit,
+    onFinished: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // Keyed on the uri: without this the pooled VideoView keeps playing the previous
+    // story's clip into the next segment, and its progress drives the wrong bar.
+    key(uri) {
+        var player by remember { mutableStateOf<MediaPlayer?>(null) }
+        // Pausing has to go through the VideoView, not the raw MediaPlayer: the view
+        // owns the playback state and would happily restart underneath us.
+        var view by remember { mutableStateOf<VideoView?>(null) }
+        var durationMs by remember { mutableIntStateOf(0) }
+        var ready by remember { mutableStateOf(false) }
+        var failed by remember { mutableStateOf(false) }
+        val finished = remember { mutableStateOf(false) }
+
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            AndroidView(
+                factory = { ctx ->
+                    VideoView(ctx).apply {
+                        setOnPreparedListener { mp ->
+                            mp.isLooping = false
+                            durationMs = mp.duration
+                            player = mp
+                            ready = true
+                            start()
+                        }
+                        setOnErrorListener { _, _, _ ->
+                            failed = true
+                            // Don't strand the viewer on a clip that will never play.
+                            if (!finished.value) {
+                                finished.value = true
+                                onFinished()
+                            }
+                            true
+                        }
+                        setOnCompletionListener {
+                            onProgress(1f)
+                            if (!finished.value) {
+                                finished.value = true
+                                onFinished()
+                            }
+                        }
+                        setVideoURI(uri)
+                        view = this
+                    }
+                },
+                // The uri is fixed for this key, so nothing to re-apply here.
+                update = {},
+                onRelease = { it.stopPlayback() },
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            if (!ready) {
+                StoryBuffering(failed = failed)
+            }
+        }
+
+        // Hold-to-pause has to reach the player too, not just the progress bar.
+        LaunchedEffect(ready, paused) {
+            val v = view ?: return@LaunchedEffect
+            if (!ready) return@LaunchedEffect
+            runCatching { if (paused) v.pause() else v.start() }
+        }
+
+        // Drive the progress bar from the real playback position.
+        LaunchedEffect(player, durationMs) {
+            val mp = player ?: return@LaunchedEffect
+            if (durationMs <= 0) return@LaunchedEffect
+            while (true) {
+                // Freeze the bar with the video instead of letting it run ahead.
+                if (!paused) {
+                    val pos = runCatching { mp.currentPosition }.getOrDefault(0)
+                    onProgress((pos.toFloat() / durationMs).coerceIn(0f, 1f))
+                }
+                delay(50)
+            }
+        }
+    }
+}
+
+/** Shown while a story video is still buffering, with a slow breathing pulse. */
+@Composable
+private fun StoryBuffering(failed: Boolean) {
+    val transition = rememberInfiniteTransition(label = "buffer")
+    val pulse by transition.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "pulse",
+    )
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(18.dp))
+            .padding(horizontal = 26.dp, vertical = 20.dp),
+    ) {
+        if (failed) {
+            Icon(
+                imageVector = Icons.Filled.Close,
+                contentDescription = null,
+                tint = Color(0xFFFF5D5D),
+                modifier = Modifier.size(26.dp),
+            )
+        } else {
+            CircularProgressIndicator(
+                color = Color.White.copy(alpha = pulse),
+                strokeWidth = 2.5.dp,
+                modifier = Modifier.size(30.dp),
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = if (failed) "Video gagal dimuat" else "Menyiapkan video…",
+            color = Color.White.copy(alpha = if (failed) 1f else pulse),
+            fontSize = 12.sp,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reusable avatar
+// ---------------------------------------------------------------------------
+
+@Composable
+internal fun GradientAvatar(
+    gradient: List<Color>,
+    initial: String,
+    size: androidx.compose.ui.unit.Dp,
+    ring: Boolean = false,
+) {
+    val base = Modifier.size(size)
+    val ringed = if (ring) {
+        base
+            .border(2.dp, NexusRing, CircleShape)
+            .padding(3.dp)
+    } else {
+        base
+    }
+    Box(
+        modifier = ringed
+            .background(Brush.verticalGradient(gradient), CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = initial.uppercase(),
+            color = Color.White,
+            fontSize = (size.value / 2.6f).sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full-screen story viewer (WhatsApp-status style)
+// ---------------------------------------------------------------------------
+
+private const val STORY_DURATION_MS = 5000L
+private const val STORY_TICK_MS = 40L
+
+/** How far sideways counts as "show me a different person". */
+private const val SWIPE_PERSON_PX = 120f
+
+@Composable
+private fun StoryViewer(
+    people: List<ActivePerson>,
+    startIndex: Int,
+    onClose: () -> Unit,
+    onSeen: (Int) -> Unit,
+    onViewed: (personIndex: Int, segment: Int) -> Unit,
+    onDeleteStory: (personIndex: Int, segment: Int) -> Unit,
+) {
+    var personIndex by remember { mutableIntStateOf(startIndex) }
+    var segment by remember { mutableIntStateOf(0) }
+    val person = people[personIndex]
+    val progress = remember { Animatable(0f) }
+    // Playback fraction for the current video story (0..1).
+    var videoFraction by remember { mutableStateOf(0f) }
+    // Held finger freezes the story, exactly like Instagram/WhatsApp.
+    var paused by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var showViewers by remember { mutableStateOf(false) }
+    // storyId -> how many people watched it (GET /stories/me).
+    val viewCounts = remember { mutableStateMapOf<String, Int>() }
+    var viewers by remember { mutableStateOf<List<NetStoryViewer>?>(null) }
+
+    // Vertical drag offset (negative = dragging up) used for the scale-to-dismiss transition.
+    val scope = rememberCoroutineScope()
+    val dragOffset = remember { Animatable(0f) }
+    val dismissThreshold = 240f
+    // Smooth entrance: fade + slight scale-up when the viewer opens.
+    val enter = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { enter.animateTo(1f, animationSpec = tween(240)) }
+
+    fun goNext() {
+        if (segment < person.posts - 1) {
+            segment++
+        } else {
+            // Finished everyone's last segment for this person -> mark as seen.
+            onSeen(personIndex)
+            if (personIndex < people.lastIndex) {
+                personIndex++
+                segment = 0
+            } else {
+                onClose()
+            }
+        }
+    }
+
+    fun goPrev() {
+        when {
+            segment > 0 -> segment--
+            personIndex > 0 -> {
+                personIndex--
+                segment = 0
+            }
+            else -> Unit // stay on the first story, restart its timer
+        }
+    }
+
+    /** Horizontal swipe jumps to a whole different person, not just a segment. */
+    fun nextPerson() {
+        if (personIndex < people.lastIndex) {
+            onSeen(personIndex)
+            personIndex++
+            segment = 0
+        } else {
+            onClose()
+        }
+    }
+
+    fun prevPerson() {
+        if (personIndex > 0) {
+            personIndex--
+            segment = 0
+        } else {
+            segment = 0
+        }
+    }
+
+    // Media of the segment currently on screen (each segment has its own).
+    val current = person.items.getOrNull(segment) ?: person.items.first()
+
+    // Drive the timer for photo stories; video stories advance on completion instead.
+    // Ticked by hand rather than animateTo so holding a finger down can pause it.
+    LaunchedEffect(personIndex, segment) {
+        progress.snapTo(0f)
+        videoFraction = 0f
+        onViewed(personIndex, segment)
+        if (!current.image.isVideoStory()) {
+            var elapsed = 0L
+            while (elapsed < STORY_DURATION_MS) {
+                delay(STORY_TICK_MS)
+                if (paused) continue
+                elapsed += STORY_TICK_MS
+                progress.snapTo((elapsed.toFloat() / STORY_DURATION_MS).coerceAtMost(1f))
+            }
+            goNext()
+        }
+    }
+
+    // View counts only exist for my own stories, so fetch them lazily.
+    LaunchedEffect(person.id) {
+        if (ApiConfig.ENABLED && person.isMine) {
+            runCatching { SyntraClient.getMyStories() }
+                .onSuccess { mine -> mine.forEach { viewCounts[it.id] = it.viewCount } }
+        }
+    }
+
+    LaunchedEffect(showViewers, current.id) {
+        if (showViewers && ApiConfig.ENABLED) {
+            viewers = runCatching { SyntraClient.getStoryViewers(current.id) }.getOrNull()
+        }
+    }
+
+    BackHandler(onBack = onClose)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onVerticalDrag = { change, dy ->
+                        change.consume()
+                        // Only follow upward drags (clamp so it can't be pulled down).
+                        scope.launch { dragOffset.snapTo((dragOffset.value + dy).coerceAtMost(0f)) }
+                    },
+                    onDragEnd = {
+                        // Past the threshold: keep shrinking to small, then close.
+                        if (dragOffset.value < -dismissThreshold) {
+                            scope.launch {
+                                dragOffset.animateTo(-1600f, animationSpec = tween(260))
+                                onClose()
+                            }
+                        } else {
+                            // Springy, natural snap back.
+                            scope.launch {
+                                dragOffset.animateTo(
+                                    0f,
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioLowBouncy,
+                                        stiffness = Spring.StiffnessLow,
+                                    ),
+                                )
+                            }
+                        }
+                    },
+                    onDragCancel = { scope.launch { dragOffset.animateTo(0f, spring()) } },
+                )
+            },
+    ) {
+        // Scaled content: shrinks, fades and rounds as it is dragged up (big -> small),
+        // and eases in when the viewer first opens.
+        val dragUp = -dragOffset.value
+        val fraction = (dragUp / 1600f).coerceIn(0f, 1f)
+        val enterV = enter.value
+        val scale = (1f - 0.7f * fraction) * (0.94f + 0.06f * enterV)
+        val fade = (1f - 0.7f * fraction) * enterV
+        val corner = 32f * fraction
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationY = dragOffset.value * 0.4f
+                    alpha = fade
+                    shape = RoundedCornerShape(corner.dp)
+                    clip = corner > 0f
+                },
+        ) {
+            // Story media: video plays to completion, photo/drawable shows as a still.
+            when (val media = current.image) {
+                is StoryImage.Video -> StoryVideo(
+                    uri = media.uri,
+                    paused = paused,
+                    onProgress = { videoFraction = it },
+                    onFinished = { goNext() },
+                    modifier = Modifier.fillMaxSize(),
+                )
+                is StoryImage.Url -> if (media.isVideo) {
+                    StoryVideo(
+                        uri = Uri.parse(media.url),
+                        paused = paused,
+                        onProgress = { videoFraction = it },
+                        onFinished = { goNext() },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    StoryPhoto(media, Modifier.fillMaxSize())
+                }
+                else -> StoryPhoto(media, Modifier.fillMaxSize())
+            }
+
+            // Gestures over the media: tap edges to step, hold to pause, swipe
+            // sideways to jump to another person's story.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(personIndex, segment) {
+                        detectTapGestures(
+                            onPress = {
+                                paused = true
+                                tryAwaitRelease()
+                                paused = false
+                            },
+                            onTap = { offset ->
+                                if (offset.x < size.width / 2f) goPrev() else goNext()
+                            },
+                        )
+                    }
+                    .pointerInput(personIndex) {
+                        var dragX = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { dragX = 0f },
+                            onHorizontalDrag = { change, dx ->
+                                change.consume()
+                                dragX += dx
+                            },
+                            onDragEnd = {
+                                if (dragX <= -SWIPE_PERSON_PX) nextPerson()
+                                else if (dragX >= SWIPE_PERSON_PX) prevPerson()
+                            },
+                        )
+                    },
+            )
+
+        // Top overlay: segmented progress bars + author + close.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                person.items.forEachIndexed { i, item ->
+                    val fraction = when {
+                        i < segment -> 1f
+                        i == segment ->
+                            if (current.image.isVideoStory()) videoFraction else progress.value
+                        // Already watched in an earlier session: show it filled…
+                        item.viewed -> 1f
+                        else -> 0f
+                    }
+                    // …but grey, so "seen before" reads differently from "seen just now".
+                    val fill = if (i < segment || i == segment) Color.White else {
+                        if (item.viewed) Color.White.copy(alpha = 0.45f) else Color.Transparent
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(3.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.White.copy(alpha = 0.28f)),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(fraction)
+                                .clip(RoundedCornerShape(50))
+                                .background(fill),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StoryPhoto(
+                    photo = person.photo,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape),
+                )
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = person.name,
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = relativeTime(current.createdAt),
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 12.sp,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                if (person.isMine) {
+                    // Eye + count: who has watched this story.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) {
+                                paused = true
+                                showViewers = true
+                            }
+                            .padding(end = 16.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Visibility,
+                            contentDescription = "Penonton story",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = viewCounts[current.id]?.toString() ?: "–",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Filled.Delete,
+                        contentDescription = "Hapus story",
+                        tint = Color.White,
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) {
+                                paused = true
+                                confirmDelete = true
+                            },
+                    )
+                    Spacer(Modifier.width(18.dp))
+                }
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = "Close",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onClose,
+                        ),
+                )
+            }
+        }
+        } // end scaled content Box
+
+        if (showViewers) {
+            StoryViewersDialog(
+                count = viewCounts[current.id],
+                viewers = viewers,
+                onDismiss = {
+                    showViewers = false
+                    viewers = null
+                    paused = false
+                },
+            )
+        }
+
+        if (confirmDelete) {
+            StoryDeleteDialog(
+                onDismiss = {
+                    confirmDelete = false
+                    paused = false
+                },
+                onConfirm = {
+                    confirmDelete = false
+                    paused = false
+                    onDeleteStory(personIndex, segment)
+                },
+            )
+        }
+    }
+}
+
+/** Long-press action on a chat row. Works for direct chats and groups alike. */
+@Composable
+private fun DeleteConversationDialog(
+    convo: Conversation,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .padding(22.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                GradientAvatar(convo.gradient, convo.name.first().toString(), 40.dp)
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = convo.name,
+                        color = NexusTextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text("Hapus percakapan", color = NexusTextSecondary, fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Percakapan ini akan dihapus dari daftar di perangkat ini. " +
+                    "Riwayatnya masih tersimpan di server, jadi pesan baru akan " +
+                    "memunculkannya kembali.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+            )
+            Spacer(Modifier.height(22.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "Batal",
+                    color = NexusTextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onDismiss,
+                        )
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onConfirm,
+                        )
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                ) {
+                    Text("Hapus", color = Color(0xFFFF5D5D), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Who watched this story. The count comes from `GET /stories/me`; the name list
+ * needs `/stories/{id}/viewers`, which the server does not answer yet — so we show
+ * the count and say plainly that names are unavailable rather than inventing them.
+ */
+@Composable
+private fun StoryViewersDialog(
+    count: Int?,
+    viewers: List<NetStoryViewer>?,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .padding(vertical = 20.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 22.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Visibility, null,
+                    tint = NexusAccentSoft, modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = when (count) {
+                        null -> "Dilihat"
+                        else -> "Dilihat $count orang"
+                    },
+                    color = NexusTextPrimary,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+
+            when {
+                !viewers.isNullOrEmpty() -> viewers.forEach { v ->
+                    val name = v.displayName.ifBlank { v.username }.ifBlank { "Pengguna" }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 22.dp, vertical = 8.dp),
+                    ) {
+                        GradientAvatar(gradientFor(v.userId), name.first().toString(), 34.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(name, color = NexusTextPrimary, fontSize = 14.sp)
+                            if (v.viewedAt.isNotBlank()) {
+                                Text(
+                                    relativeTime(v.viewedAt),
+                                    color = NexusTextSecondary,
+                                    fontSize = 11.sp,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                count == 0 -> Text(
+                    text = "Belum ada yang menonton story ini.",
+                    color = NexusTextSecondary,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(horizontal = 22.dp),
+                )
+
+                else -> Text(
+                    text = "Server belum mengirim daftar namanya, jadi baru jumlahnya " +
+                        "yang bisa ditampilkan.",
+                    color = NexusTextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    modifier = Modifier.padding(horizontal = 22.dp),
+                )
+            }
+
+            Spacer(Modifier.height(18.dp))
+            Text(
+                text = "Tutup",
+                color = NexusAccentSoft,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .align(Alignment.End)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onDismiss,
+                    )
+                    .padding(horizontal = 22.dp, vertical = 6.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun StoryDeleteDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .padding(22.dp),
+        ) {
+            Text("Hapus story ini?", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Story akan dihapus sekarang, tidak menunggu 24 jam. " +
+                    "Tindakan ini tidak bisa dibatalkan.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+            )
+            Spacer(Modifier.height(22.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "Batal",
+                    color = NexusTextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onDismiss,
+                        )
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onConfirm,
+                        )
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                ) {
+                    Text("Hapus", color = Color(0xFFFF5D5D), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Preview
+// ---------------------------------------------------------------------------
+
+@Preview(showBackground = true, backgroundColor = 0xFF121212, widthDp = 360, heightDp = 780)
+@Composable
+private fun ChatScreenPreview() {
+    SyntraTheme {
+        ChatScreen()
+    }
+}
