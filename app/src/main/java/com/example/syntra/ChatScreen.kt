@@ -181,6 +181,8 @@ data class Conversation(
     val sent: Boolean = false,
     // Other participant in a direct chat; used for presence queries.
     val counterpartId: String? = null,
+    // Username of the other participant, when known — needed to block them.
+    val counterpartUsername: String? = null,
     // Newest message the peer has read; drives the ✓✓ indicator.
     val counterpartLastReadId: String? = null,
 )
@@ -510,6 +512,7 @@ fun ChatScreen(
                     message = "",
                     time = "",
                     counterpartId = user.id,
+                    counterpartUsername = user.username,
                 )
             }.onFailure { Toast.makeText(context, "Buka chat gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
         }
@@ -735,6 +738,10 @@ fun ChatScreen(
             ChatDetailScreen(
                 conversation = convo,
                 onBack = { openedChat = null },
+                onNewGroup = {
+                    openedChat = null
+                    showNewGroup = true
+                },
             )
         }
 

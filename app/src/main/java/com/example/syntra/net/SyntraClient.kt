@@ -299,6 +299,31 @@ object SyntraClient {
     suspend fun getFollowing(): List<NetUser> =
         (getData("/api/v1/users/me/following") as JSONArray).mapObjects { it.toUser() }
 
+    /** Reports a user. `reason` is free text; verified `POST /reports` → 201. */
+    suspend fun reportUser(targetId: String, reason: String) {
+        postData(
+            "/api/v1/reports",
+            JSONObject().put("reason", reason).put("target_type", "user").put("target_id", targetId),
+        )
+    }
+
+    /** Blocks a user (by username — the UUID form 404s). Verified → 204. */
+    suspend fun blockUser(username: String) {
+        postData("/api/v1/users/$username/block", JSONObject())
+    }
+
+    suspend fun unblockUser(username: String) = delete("/api/v1/users/$username/block")
+
+    /** Users I've blocked (each has `user_id`, `username`, `display_name`). */
+    suspend fun getBlocked(): List<NetUser> =
+        (getData("/api/v1/users/me/blocked") as JSONArray).mapObjects {
+            NetUser(
+                id = it.optString("user_id", ""),
+                username = it.optString("username", ""),
+                displayName = it.optString("display_name", ""),
+            )
+        }
+
     /** Revokes the refresh token server-side, then clears the local session. */
     suspend fun logoutRemote() {
         runCatching { postData("/api/v1/auth/logout", JSONObject()) }

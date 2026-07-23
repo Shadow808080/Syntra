@@ -96,7 +96,33 @@ Yang dibutuhkan:
    `deleteMedia(oldId)`** setiap avatar diganti — sekarang no-op karena 404, langsung
    berfungsi begitu endpoint-nya ada.
 
-## 🟡 6. `POST /rooms/{id}/invite` — kontrak body
+## ✅ Blokir & laporan — sudah ada, terima kasih
+
+Terverifikasi berfungsi (sebelumnya saya kira belum ada):
+`POST/DELETE /users/{username}/block` (204), `GET /users/me/blocked`,
+`POST /reports {reason, target_type:"user", target_id}` (201). Sudah disambungkan
+ke menu titik-3 di layar percakapan.
+
+## 🔴 6. `GET /conversations` tidak mengembalikan identitas lawan bicara
+
+Response nyata sekarang hanya: `id, type, title, unread_count,
+last_message_preview, last_message_at, created_at`. **`counterpart_id` yang tercatat
+di `api.md` tidak muncul.**
+
+Akibatnya dari layar percakapan app **tidak tahu siapa lawan bicara**, sehingga:
+- **Laporkan** (butuh `target_id` UUID) hanya jalan untuk chat yang dibuka lewat
+  scan QR (di situ app menyimpan id-nya sendiri), tidak untuk chat dari daftar.
+- **Blokir** (butuh username) tidak bisa memanggil backend dari daftar chat sama
+  sekali — untuk sekarang app menyembunyikannya lokal.
+
+Mohon kembalikan **`counterpart_id`** dan tambahkan **`counterpart_username`** pada
+tiap item `direct` di `GET /conversations`. Dengan itu report & block langsung
+berfungsi dari mana saja.
+
+Tambahan kecil: agar konsisten dengan `/reports` (yang menerima UUID),
+`POST /users/{id}/block` sebaiknya **juga menerima UUID**, bukan hanya username.
+
+## 🟡 7. `POST /rooms/{id}/invite` — kontrak body
 
 Route ada (balas `400`, bukan `404`), tapi bentuk body-nya belum terdokumentasi di
 `api.md`. Mohon dilengkapi (mis. `{ "user_id": "..." }` atau `{ "username": "..." }`)

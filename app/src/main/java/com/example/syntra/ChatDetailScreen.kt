@@ -58,6 +58,8 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.EmojiEmotions
 import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -159,6 +161,7 @@ private fun sampleMessages(convo: Conversation): List<Message> = listOf(
 fun ChatDetailScreen(
     conversation: Conversation,
     onBack: () -> Unit,
+    onNewGroup: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
 
@@ -175,6 +178,11 @@ fun ChatDetailScreen(
     }
     var confirmClear by remember(conversation) { mutableStateOf(false) }
     var pendingMessage by remember(conversation) { mutableStateOf<Message?>(null) }
+    // Overflow-menu actions.
+    var showReport by remember(conversation) { mutableStateOf(false) }
+    var confirmBlock by remember(conversation) { mutableStateOf(false) }
+    var showChatTheme by remember(conversation) { mutableStateOf(false) }
+    var chatTheme by remember(conversation) { mutableStateOf(ChatThemeStore.get(context, conversation.id)) }
     val listState = rememberLazyListState()
 
     // Composer extras: emoji panel, attachments, voice notes.
@@ -249,6 +257,14 @@ fun ChatDetailScreen(
                 override fun onTyping(conversationId: String, userId: String, typing: Boolean) {
                     if (conversationId == conversation.id && userId != SyntraClient.myUserId) {
                         peerTyping = typing
+                    }
+                }
+
+                override fun onReadReceipt(conversationId: String, messageId: String) {
+                    // The peer read up to here: flip our ✓✓ to blue live, no refresh.
+                    if (conversationId != conversation.id) return
+                    if (counterpartLastReadId == null || messageId > counterpartLastReadId!!) {
+                        counterpartLastReadId = messageId
                     }
                 }
 
@@ -398,6 +414,15 @@ fun ChatDetailScreen(
             peerTyping = peerTyping,
             onBack = onBack,
             onLongPressAvatar = { confirmClear = true },
+            onMenuAction = { action ->
+                when (action) {
+                    "Laporkan" -> showReport = true
+                    "Blokir" -> confirmBlock = true
+                    "Bersihkan obrolan" -> confirmClear = true
+                    "Grup Baru" -> onNewGroup()
+                    "Tema obrolan" -> showChatTheme = true
+                }
+            },
         )
 
         LazyColumn(
@@ -412,6 +437,7 @@ fun ChatDetailScreen(
             items(messages) { msg ->
                 MessageBubble(
                     msg = msg,
+                    outgoingColor = chatTheme.bubble,
                     onLongPress = { pendingMessage = msg },
                     state = when {
                         msg.id.startsWith(LOCAL_ID_PREFIX) -> DeliveryState.SENDING
@@ -518,6 +544,67 @@ fun ChatDetailScreen(
                     "Pesan dihapus di perangkat ini saja.",
                     Toast.LENGTH_LONG,
                 ).show()
+            },
+        )
+    }
+
+    if (showReport) {
+        ReportDialog(
+            name = conversation.name,
+            onDismiss = { showReport = false },
+            onSubmit = { reason ->
+                showReport = false
+                val target = conversation.counterpartId
+                if (ApiConfig.ENABLED && target != null) {
+                    scope.launch {
+                        runCatching { SyntraClient.reportUser(target, reason) }
+                            .onSuccess {
+                                Toast.makeText(context, "Laporan terkirim. Terima kasih.", Toast.LENGTH_LONG).show()
+                            }
+                            .onFailure {
+                                Toast.makeText(context, "Gagal melapor: ${it.message}", Toast.LENGTH_SHORT).show()
+                            }
+                    }
+                } else {
+                    Toast.makeText(
+                        context,
+                        "Laporan dicatat, tapi identitas pengguna belum tersedia dari server.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            },
+        )
+    }
+
+    if (confirmBlock) {
+        ConfirmActionDialog(
+            title = "Blokir ${conversation.name}?",
+            message = "Kamu tidak akan menerima pesan darinya lagi. Percakapan ini " +
+                "disembunyikan dari daftar.",
+            confirmText = "Blokir",
+            onDismiss = { confirmBlock = false },
+            onConfirm = {
+                confirmBlock = false
+                val username = conversation.counterpartUsername
+                if (ApiConfig.ENABLED && !username.isNullOrBlank()) {
+                    scope.launch { runCatching { SyntraClient.blockUser(username) } }
+                }
+                // Hide locally regardless, so the block takes effect immediately.
+                BlockStore.block(context, conversation.name)
+                Toast.makeText(context, "${conversation.name} diblokir.", Toast.LENGTH_SHORT).show()
+                onBack()
+            },
+        )
+    }
+
+    if (showChatTheme) {
+        ChatThemeDialog(
+            current = chatTheme,
+            onDismiss = { showChatTheme = false },
+            onPick = {
+                chatTheme = it
+                ChatThemeStore.set(context, conversation.id, it)
+                showChatTheme = false
             },
         )
     }
@@ -635,6 +722,7 @@ private fun DetailTopBar(
     peerTyping: Boolean = false,
     onBack: () -> Unit = {},
     onLongPressAvatar: () -> Unit = {},
+    onMenuAction: (String) -> Unit = {},
 ) {
     val status = when {
         peerTyping -> "typing…"
@@ -703,8 +791,30 @@ private fun DetailTopBar(
         IconButtonBox {
             Icon(Icons.Filled.Call, "Call", tint = NexusTextPrimary, modifier = Modifier.size(20.dp))
         }
-        IconButtonBox {
-            Icon(Icons.Filled.MoreVert, "More", tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
+        Box {
+            var menuOpen by remember { mutableStateOf(false) }
+            IconButtonBox(onClick = { menuOpen = true }) {
+                Icon(Icons.Filled.MoreVert, "More", tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                listOf(
+                    "Laporkan" to false,
+                    "Blokir" to true,
+                    "Bersihkan obrolan" to false,
+                    "Grup Baru" to false,
+                    "Tema obrolan" to false,
+                ).forEach { (label, danger) ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(label, color = if (danger) Color(0xFFFF5D5D) else NexusTextPrimary)
+                        },
+                        onClick = {
+                            menuOpen = false
+                            onMenuAction(label)
+                        },
+                    )
+                }
+            }
         }
     }
 }
@@ -733,8 +843,13 @@ private fun DateChip(label: String) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(msg: Message, state: DeliveryState, onLongPress: () -> Unit) {
-    val bubbleColor = if (msg.fromMe) NexusAccent else NexusSurfaceElevated
+private fun MessageBubble(
+    msg: Message,
+    state: DeliveryState,
+    outgoingColor: Color,
+    onLongPress: () -> Unit,
+) {
+    val bubbleColor = if (msg.fromMe) outgoingColor else NexusSurfaceElevated
     val textColor = if (msg.fromMe) Color.White else NexusTextPrimary
     val shape = RoundedCornerShape(
         topStart = 16.dp,
