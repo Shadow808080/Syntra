@@ -18,10 +18,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.outlined.Call
-import androidx.compose.material.icons.outlined.ChatBubble
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -79,23 +83,26 @@ fun NexusBottomBar(
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        NavItem(NexusTab.CHAT, Icons.Outlined.ChatBubble, "Chat", selected, onSelect)
-        NavItem(NexusTab.SHORTS, Icons.Filled.PlayArrow, "Shorts", selected, onSelect)
-        NavItem(NexusTab.ROOMS, Icons.Outlined.Mic, "Rooms", selected, onSelect)
-        NavItem(NexusTab.CALLS, Icons.Outlined.Call, "Calls", selected, onSelect)
+        // Outline when idle, solid when active — the standard, clean Material look.
+        NavItem(NexusTab.CHAT, Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble, "Chat", selected, onSelect)
+        NavItem(NexusTab.SHORTS, Icons.Outlined.PlayCircle, Icons.Filled.PlayCircle, "Shorts", selected, onSelect)
+        NavItem(NexusTab.ROOMS, Icons.Outlined.Mic, Icons.Filled.Mic, "Rooms", selected, onSelect)
+        NavItem(NexusTab.CALLS, Icons.Outlined.Call, Icons.Filled.Call, "Calls", selected, onSelect)
     }
 }
 
 @Composable
 private fun NavItem(
     tab: NexusTab,
-    icon: ImageVector,
+    iconIdle: ImageVector,
+    iconActive: ImageVector,
     label: String,
     selected: NexusTab,
     onSelect: (NexusTab) -> Unit,
 ) {
     val isSelected = tab == selected
     val color = if (isSelected) NexusAccentSoft else NexusTextSecondary
+    val icon = if (isSelected) iconActive else iconIdle
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
