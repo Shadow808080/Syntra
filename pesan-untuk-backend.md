@@ -73,28 +73,30 @@ host-nya terlanjur hilang tanpa `leave` (mis. sisa pengujian). Sebuah
 `DELETE /api/v1/rooms/{id}` (host only) berguna untuk membersihkannya, dan agar UI
 bisa menyediakan tombol "Akhiri & hapus".
 
-## 🔴 5. Ganti foto profil — butuh 2 endpoint
+## ✅ Ganti profil — `PATCH /users/me` sudah ada, terima kasih
 
-Fitur ganti foto profil sudah dibuat di app (Settings → Profil, avatar bisa
-diketuk → kamera/galeri → unggah). Tapi **dua endpoint hilang**, jadi hasilnya
-hanya tersimpan di perangkat:
+Terverifikasi berfungsi: `PATCH /api/v1/users/me {display_name?, avatar_media_id?}`
+mengembalikan profil termasuk `avatar_url`, dan `GET /users/{username}` kini
+menyertakan avatar. Sudah disambungkan — ganti nama & foto profil tersimpan di akun.
+
+## 🔴 5. Hapus foto lama dari storage — `DELETE /media/{id}` masih hilang
 
 ```
-PATCH /api/v1/users/me   (atau PUT)   → endpoint tidak ditemukan
-DELETE /api/v1/media/{id}             → endpoint tidak ditemukan
+DELETE /api/v1/media/{id}  → endpoint tidak ditemukan
 ```
 
-Yang dibutuhkan:
+Saat pengguna mengganti foto profil, foto lama tetap tertinggal di storage. App
+sudah menyimpan `media_id` lama dan **sudah memanggil `deleteMedia(oldId)`** tiap
+ganti avatar — sekarang no-op, langsung berfungsi begitu endpoint ini ada
+(pemilik saja).
 
-1. **`PATCH /api/v1/users/me`** menerima `{ "avatar_media_id": "...", "display_name": "..." }`
-   supaya avatar/nama tersimpan di akun dan `GET /users/{username}` mengembalikannya
-   (mengembalikan `avatar_url`). Tanpa ini, foto profil tidak pernah terlihat oleh
-   pengguna lain.
-2. **`DELETE /api/v1/media/{id}`** (pemilik saja) supaya foto lama bisa dihapus dari
-   storage saat diganti. Pengguna secara eksplisit meminta agar foto lama dibersihkan.
-   App sudah menyimpan `media_id` foto sebelumnya dan **sudah memanggil
-   `deleteMedia(oldId)`** setiap avatar diganti — sekarang no-op karena 404, langsung
-   berfungsi begitu endpoint-nya ada.
+## ✅ Hapus pesan — route sudah ada
+
+`DELETE /api/v1/conversations/{id}/messages/{message_id}` kini menjawab
+"sumber daya tidak ditemukan" (bukan "endpoint..."), artinya route sudah
+terdaftar. **Edit pesan** (`PATCH .../messages/{id}`) belum ada. Mohon konfirmasi
+apakah delete menandai `is_deleted` + menyiarkan lewat WS agar perangkat lawan
+bicara ikut memperbarui real-time.
 
 ## ✅ Blokir & laporan — sudah ada, terima kasih
 

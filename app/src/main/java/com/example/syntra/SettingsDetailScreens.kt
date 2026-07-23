@@ -194,6 +194,7 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
     var displayName by remember { mutableStateOf(ProfileStore.displayName(context, email)) }
     var avatarUrl by remember { mutableStateOf(ProfileStore.avatarUrl(context)) }
     var saved by remember { mutableStateOf(false) }
+    var savingName by remember { mutableStateOf(false) }
     var uploading by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
 
@@ -207,8 +208,12 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
         val previousId = ProfileStore.avatarMediaId(context)
         scope.launch {
             runCatching {
-                SyntraClient.uploadMediaFull("image", "jpg", "image/jpeg", bytes, 512, 512)
+                // 1) upload photo → media id, 2) attach it to my account.
+                val (mediaId, _) = SyntraClient.uploadMediaFull("image", "jpg", "image/jpeg", bytes, 512, 512)
+                val me = SyntraClient.updateProfile(avatarMediaId = mediaId)
+                mediaId to (me.avatarMediaId ?: "")
             }.onSuccess { (mediaId, url) ->
+                // Cache the server-provided URL locally for instant display.
                 ProfileStore.setAvatar(context, url, mediaId)
                 avatarUrl = url
                 // Remove the replaced photo from storage. No-op until the backend
@@ -218,7 +223,7 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
                 }
                 Toast.makeText(context, "Foto profil diperbarui.", Toast.LENGTH_SHORT).show()
             }.onFailure {
-                Toast.makeText(context, "Gagal mengunggah foto: ${it.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Gagal memperbarui foto: ${it.message}", Toast.LENGTH_LONG).show()
             }
             uploading = false
         }
@@ -342,15 +347,37 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
             }
             Spacer(Modifier.height(10.dp))
             Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                PrimaryAction(if (saved) "Tersimpan" else "Simpan", enabled = displayName.isNotBlank()) {
-                    ProfileStore.setDisplayName(context, displayName.trim())
-                    saved = true
-                    Toast.makeText(context, "Nama tampilan disimpan.", Toast.LENGTH_SHORT).show()
+                PrimaryAction(
+                    text = when {
+                        savingName -> "Menyimpan…"
+                        saved -> "Tersimpan"
+                        else -> "Simpan"
+                    },
+                    enabled = displayName.isNotBlank() && !savingName,
+                ) {
+                    val name = displayName.trim()
+                    ProfileStore.setDisplayName(context, name)
+                    if (ApiConfig.ENABLED) {
+                        savingName = true
+                        scope.launch {
+                            runCatching { SyntraClient.updateProfile(displayName = name) }
+                                .onSuccess {
+                                    saved = true
+                                    Toast.makeText(context, "Profil diperbarui.", Toast.LENGTH_SHORT).show()
+                                }
+                                .onFailure {
+                                    Toast.makeText(context, "Gagal menyimpan: ${it.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            savingName = false
+                        }
+                    } else {
+                        saved = true
+                        Toast.makeText(context, "Nama tampilan disimpan.", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             Note(
-                "Foto & nama tersimpan di perangkat ini. Server belum punya endpoint " +
-                    "profil, jadi perubahan belum terlihat oleh pengguna lain.",
+                "Foto & nama kini disimpan di akunmu dan terlihat oleh pengguna lain.",
             )
         }
     }

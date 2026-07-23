@@ -208,9 +208,25 @@ fun ChatDetailScreen(
         if (!granted) Toast.makeText(context, "Izin mikrofon ditolak.", Toast.LENGTH_SHORT).show()
     }
 
-    // Keep the newest message in view.
+    // First landing: jump straight to the first unread message (or the very last
+    // when all are read), with no visible scroll from the top. Item 0 is the date
+    // chip, so message i sits at list index i+1.
+    var landed by remember(conversation) { mutableStateOf(false) }
+    LaunchedEffect(messages.isNotEmpty()) {
+        if (messages.isNotEmpty() && !landed) {
+            val firstUnread = (messages.size - conversation.unread).coerceIn(0, messages.lastIndex)
+            val target = if (conversation.unread > 0) firstUnread + 1 else messages.size
+            listState.scrollToItem(target)
+            landed = true
+        }
+    }
+
+    // After landing, keep the newest message in view — but only when the user is
+    // already near the bottom, so it doesn't yank them while reading history.
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+        if (!landed || messages.isEmpty()) return@LaunchedEffect
+        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (last >= messages.size - 2) listState.animateScrollToItem(messages.size)
     }
 
     // --- Backend: history, realtime, read receipts -------------------------

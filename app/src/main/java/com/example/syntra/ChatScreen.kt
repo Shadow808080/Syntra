@@ -445,16 +445,29 @@ fun ChatScreen(
                     val idx = chats.indexOfFirst { it.id == message.conversationId }
                     if (idx >= 0) {
                         val c = chats[idx]
+                        val mine = message.senderId == SyntraClient.myUserId
                         chats.removeAt(idx)
                         chats.add(
                             0,
                             c.copy(
                                 message = message.body.ifBlank { previewFallback(message.type) },
                                 time = formatClock(message.createdAt),
-                                unread = if (openedChat?.id == c.id) 0 else c.unread + 1,
-                                sent = message.senderId == SyntraClient.myUserId,
+                                // No badge for my own messages or the chat I'm reading.
+                                unread = when {
+                                    mine || openedChat?.id == c.id -> 0
+                                    else -> c.unread + 1
+                                },
+                                sent = mine,
                             ),
                         )
+                    }
+                }
+
+                override fun onReadReceipt(conversationId: String, messageId: String) {
+                    // I read this conversation on another device — clear the badge here.
+                    val idx = chats.indexOfFirst { it.id == conversationId }
+                    if (idx >= 0 && chats[idx].unread > 0) {
+                        chats[idx] = chats[idx].copy(unread = 0)
                     }
                 }
 
@@ -511,6 +524,23 @@ fun ChatScreen(
     val visible = notBlocked
         .filter { showArchived || it.id !in archivedIds }
         .sortedByDescending { it.id in pinnedIds }
+
+    fun openChat(convo: Conversation) {
+        // Detail keeps the original unread count so it can scroll to the first
+        // unread message; the list badge clears instantly (no refresh).
+        openedChat = convo
+        val idx = chats.indexOfFirst { it.id == convo.id }
+        if (idx >= 0 && chats[idx].unread > 0) {
+            chats[idx] = chats[idx].copy(unread = 0)
+        }
+        if (ApiConfig.ENABLED) scope.launch {
+            runCatching {
+                SyntraClient.getMessages(convo.id).firstOrNull()?.let {
+                    SyntraClient.messageRead(convo.id, it.id)
+                }
+            }
+        }
+    }
 
     fun openDirectWith(username: String) {
         scope.launch {
@@ -625,8 +655,11 @@ fun ChatScreen(
                         pinned = convo.id in pinnedIds,
                         onClick = {
                             // While selecting, a tap toggles instead of opening.
-                            if (selection.isEmpty()) openedChat = convo
-                            else if (!selection.remove(convo.id)) selection.add(convo.id)
+                            if (selection.isEmpty()) {
+                                openChat(convo)
+                            } else if (!selection.remove(convo.id)) {
+                                selection.add(convo.id)
+                            }
                         },
                         onLongClick = { if (!selection.remove(convo.id)) selection.add(convo.id) },
                     )

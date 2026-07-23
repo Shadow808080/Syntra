@@ -295,6 +295,28 @@ object SyntraClient {
 
     suspend fun unfollow(username: String) = delete("/api/v1/users/$username/follow")
 
+    /**
+     * Updates my own profile. `PATCH /users/me` accepts `display_name` and/or
+     * `avatar_media_id` and returns the fresh profile, including the public
+     * `avatar_url`. Verified against the server.
+     */
+    suspend fun updateProfile(
+        displayName: String? = null,
+        avatarMediaId: String? = null,
+    ): NetUser = withContext(Dispatchers.IO) {
+        val payload = JSONObject()
+        if (displayName != null) payload.put("display_name", displayName)
+        if (avatarMediaId != null) payload.put("avatar_media_id", avatarMediaId)
+        val data = patchData("/api/v1/users/me", payload) as JSONObject
+        NetUser(
+            id = data.optString("id", ""),
+            username = data.optString("username", ""),
+            displayName = data.optString("display_name", ""),
+            // The response carries a ready URL under avatar_url.
+            avatarMediaId = data.optString("avatar_url", "").ifBlank { data.optString("avatar_media_id", "") },
+        )
+    }
+
     /** People I follow — the pool to pick group members from. */
     suspend fun getFollowing(): List<NetUser> =
         (getData("/api/v1/users/me/following") as JSONArray).mapObjects { it.toUser() }
