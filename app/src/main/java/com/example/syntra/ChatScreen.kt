@@ -8,6 +8,8 @@ import android.net.Uri
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
@@ -63,6 +65,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.CircularProgressIndicator
@@ -507,6 +510,13 @@ fun ChatScreen(
         }
     }
 
+    // "Foto live": snap a photo and post it straight to your story.
+    val fotoLive = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicturePreview(),
+    ) { bitmap ->
+        if (bitmap != null) addStory(StoryImage.Bitmap(bitmap.asImageBitmap()))
+    }
+
     val filtered = if (query.isBlank()) {
         chats
     } else {
@@ -601,6 +611,7 @@ fun ChatScreen(
                     query = ""
                 },
                 onScan = { startScan() },
+                onFotoLive = { fotoLive.launch(null) },
                 onMenuItem = { label ->
                     val picked = chats.filter { it.id in selection }
                     when (label) {
@@ -860,6 +871,7 @@ private fun NexusHeader(
     onStartSearch: () -> Unit,
     onStopSearch: () -> Unit,
     onScan: () -> Unit,
+    onFotoLive: () -> Unit,
     onMenuItem: (String) -> Unit,
 ) {
     Row(
@@ -932,6 +944,7 @@ private fun NexusHeader(
             SyntraTitle()
             Spacer(Modifier.weight(1f))
             // Order: search · scan · overflow
+            HeaderIcon(Icons.Outlined.CameraAlt, "Foto live", size = 23.dp, onClick = onFotoLive)
             HeaderIcon(Icons.Filled.Search, "Search", onClick = onStartSearch)
             HeaderIcon(Icons.Outlined.QrCodeScanner, "Scan", size = 22.dp, onClick = onScan)
             Box {
