@@ -1,6 +1,7 @@
 package com.example.syntra
 
 import android.content.Context
+import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -42,6 +43,9 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -59,9 +63,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -120,6 +126,12 @@ fun ProfileUserScreen(
     var muted by remember(conversation.id) {
         mutableStateOf(ContactPrefs.get(context, conversation.id, "mute"))
     }
+    // Overflow menu + the name I gave this contact on this device.
+    var menuOpen by remember { mutableStateOf(false) }
+    var showRename by remember(conversation.id) { mutableStateOf(false) }
+    var customName by remember(conversation.id) {
+        mutableStateOf(ContactPrefs.name(context, conversation.id))
+    }
 
     LaunchedEffect(conversation.id) {
         if (!ApiConfig.ENABLED) return@LaunchedEffect
@@ -135,8 +147,28 @@ fun ProfileUserScreen(
             }
     }
 
-    val name = user?.displayName?.ifBlank { user?.username } ?: conversation.name
+    // A locally chosen name always wins over the one the server reports.
+    val serverName = user?.displayName?.ifBlank { user?.username } ?: conversation.name
+    val name = customName ?: serverName
     val avatarUrl = user?.avatarMediaId?.takeIf { it.startsWith("http") }
+
+    /** Hands the contact to any app that accepts text (WhatsApp, notes, e-mail…). */
+    fun shareContact() {
+        val text = buildString {
+            append(name)
+            if (!username.isNullOrBlank()) {
+                append("\n@").append(username)
+                append("\nsyntra://u/").append(username)
+            }
+        }
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Kontak Syntra")
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        runCatching { context.startActivity(Intent.createChooser(send, "Bagikan kontak")) }
+            .onFailure { Toast.makeText(context, "Tidak ada aplikasi untuk berbagi.", Toast.LENGTH_SHORT).show() }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -155,7 +187,25 @@ fun ProfileUserScreen(
             ) {
                 CircleIcon(Icons.AutoMirrored.Filled.ArrowBack, "Kembali", onBack)
                 Spacer(Modifier.weight(1f))
-                CircleIcon(Icons.Filled.MoreVert, "Menu") {}
+                Box {
+                    CircleIcon(Icons.Filled.MoreVert, "Menu") { menuOpen = true }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Edit nama", color = NexusTextPrimary) },
+                            onClick = {
+                                menuOpen = false
+                                showRename = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Bagikan kontak", color = NexusTextPrimary) },
+                            onClick = {
+                                menuOpen = false
+                                shareContact()
+                            },
+                        )
+                    }
+                }
             }
         }
 
@@ -381,6 +431,104 @@ fun ProfileUserScreen(
             }
         }
     }
+
+    if (showRename) {
+        RenameContactDialog(
+            current = name,
+            hint = serverName,
+            onDismiss = { showRename = false },
+            onSave = { entered ->
+                showRename = false
+                // Empty input clears the nickname and restores the real name.
+                val value = entered.trim().takeIf { it.isNotBlank() && it != serverName }
+                ContactPrefs.setName(context, conversation.id, value)
+                customName = value
+            },
+        )
+    }
+}
+
+/**
+ * Renames a contact for this device only. The server owns a user's real
+ * display name, so this is a local alias rather than an edit of their profile.
+ */
+@Composable
+private fun RenameContactDialog(
+    current: String,
+    hint: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var text by remember { mutableStateOf(current) }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .padding(22.dp),
+        ) {
+            Text("Edit nama", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Nama ini hanya berlaku di perangkat kamu. Nama asli mereka tetap \"$hint\".",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+            )
+            Spacer(Modifier.height(16.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(14.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
+                if (text.isEmpty()) {
+                    Text(hint, color = NexusTextSecondary, fontSize = 15.sp)
+                }
+                BasicTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    singleLine = true,
+                    textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
+                    cursorBrush = SolidColor(NexusAccentSoft),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Spacer(Modifier.height(20.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Batal",
+                    color = NexusTextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onDismiss,
+                        )
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .background(
+                            Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)),
+                            RoundedCornerShape(50),
+                        )
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = { onSave(text) },
+                        )
+                        .padding(horizontal = 22.dp, vertical = 10.dp),
+                ) {
+                    Text("Simpan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
 }
 
 private fun statusText(convo: Conversation): String = when (convo.presence) {
@@ -512,5 +660,21 @@ object ContactPrefs {
     fun set(context: Context, id: String, flag: String, value: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(key(id, flag), value).apply()
+    }
+
+    /**
+     * Name I gave this contact on this device. The server has no notion of a
+     * nickname — only the owner can change their own display name — so renaming
+     * is deliberately local, exactly like a phone's contact list.
+     */
+    fun name(context: Context, id: String): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString("contact_name_$id", null)
+            ?.takeIf { it.isNotBlank() }
+
+    fun setName(context: Context, id: String, value: String?) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        if (value.isNullOrBlank()) prefs.remove("contact_name_$id") else prefs.putString("contact_name_$id", value)
+        prefs.apply()
     }
 }
