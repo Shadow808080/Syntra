@@ -51,6 +51,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -1273,14 +1274,17 @@ private fun ConversationRow(
                 )
                 if (convo.unread > 0) {
                     Spacer(Modifier.width(8.dp))
+                    // Pill grows with the digit count (and caps at 99+) so the number
+                    // never clips the way a fixed circle did.
                     Box(
                         modifier = Modifier
-                            .size(22.dp)
-                            .background(NexusAccent, CircleShape),
+                            .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
+                            .background(NexusAccent, RoundedCornerShape(50))
+                            .padding(horizontal = 6.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            text = convo.unread.toString(),
+                            text = if (convo.unread > 99) "99+" else convo.unread.toString(),
                             color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
