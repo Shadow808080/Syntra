@@ -5,6 +5,7 @@ import android.os.Looper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -19,7 +20,12 @@ import org.json.JSONObject
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
-class ApiException(val code: String, message: String) : Exception(message)
+class ApiException(
+    val code: String,
+    message: String,
+    /** Seconds the server asked us to wait (`Retry-After`) on a 429, if any. */
+    val retryAfterSeconds: Long? = null,
+) : Exception(message)
 
 /** Something interested in realtime WebSocket events. Register via [SyntraClient.addListener]. */
 interface SocketListener {
@@ -215,33 +221,44 @@ object SyntraClient {
         return root.get("data")
     }
 
-    private suspend fun getData(path: String): Any = withContext(Dispatchers.IO) {
-        http.newCall(Request.Builder().url(rest(path)).auth().get().build()).execute()
-            .use { it.dataElement() }
+    /**
+     * Runs a REST request and honors the server's per-user rate limit: on `429`
+     * with a `Retry-After` header, it waits exactly that long (capped) and retries
+     * once; a still-limited response surfaces as `rate_limited` carrying the delay.
+     */
+    private suspend fun execute(req: Request): Any = withContext(Dispatchers.IO) {
+        var waited = false
+        while (true) {
+            val resp = http.newCall(req).execute()
+            if (resp.code == 429) {
+                val retrySec = resp.header("Retry-After")?.trim()?.toLongOrNull()?.coerceIn(1, 60)
+                resp.close()
+                if (!waited && retrySec != null) {
+                    waited = true
+                    delay(retrySec * 1000)
+                    continue
+                }
+                throw ApiException("rate_limited", "Terlalu sering. Coba lagi sebentar.", retrySec)
+            }
+            return@withContext resp.use { it.dataElement() }
+        }
+        @Suppress("UNREACHABLE_CODE") error("unreachable")
     }
 
-    private suspend fun postData(path: String, json: JSONObject): Any = withContext(Dispatchers.IO) {
-        val req = Request.Builder().url(rest(path)).auth()
-            .post(json.toString().toRequestBody(JSON)).build()
-        http.newCall(req).execute().use { it.dataElement() }
-    }
+    private suspend fun getData(path: String): Any =
+        execute(Request.Builder().url(rest(path)).auth().get().build())
 
-    private suspend fun patchData(path: String, json: JSONObject): Any = withContext(Dispatchers.IO) {
-        val req = Request.Builder().url(rest(path)).auth()
-            .patch(json.toString().toRequestBody(JSON)).build()
-        http.newCall(req).execute().use { it.dataElement() }
-    }
+    private suspend fun postData(path: String, json: JSONObject): Any =
+        execute(Request.Builder().url(rest(path)).auth().post(json.toString().toRequestBody(JSON)).build())
 
-    private suspend fun putData(path: String, json: JSONObject): Any = withContext(Dispatchers.IO) {
-        val req = Request.Builder().url(rest(path)).auth()
-            .put(json.toString().toRequestBody(JSON)).build()
-        http.newCall(req).execute().use { it.dataElement() }
-    }
+    private suspend fun patchData(path: String, json: JSONObject): Any =
+        execute(Request.Builder().url(rest(path)).auth().patch(json.toString().toRequestBody(JSON)).build())
 
-    private suspend fun delete(path: String) = withContext(Dispatchers.IO) {
-        http.newCall(Request.Builder().url(rest(path)).auth().delete().build()).execute()
-            .use { it.dataElement() }
-        Unit
+    private suspend fun putData(path: String, json: JSONObject): Any =
+        execute(Request.Builder().url(rest(path)).auth().put(json.toString().toRequestBody(JSON)).build())
+
+    private suspend fun delete(path: String) {
+        execute(Request.Builder().url(rest(path)).auth().delete().build())
     }
 
     // -----------------------------------------------------------------------
