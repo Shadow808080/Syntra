@@ -67,7 +67,9 @@ object SyntraClient {
 
     private val http = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
-        .connectTimeout(15, TimeUnit.SECONDS)
+        // Kept short so app start doesn't sit on a blank splash when the backend
+        // is unreachable; a reachable LAN/Tailscale host connects in well under 1s.
+        .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 

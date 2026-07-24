@@ -27,7 +27,6 @@ import com.example.syntra.net.SyntraClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.example.syntra.ui.theme.AppTheme
-import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.SyntraTheme
 
 class MainActivity : ComponentActivity() {
@@ -77,13 +76,15 @@ private fun NexusApp() {
                     var rejected = false
                     // A flaky first second of connectivity must not log anyone out, so
                     // only an explicit rejection from the server clears the session.
-                    repeat(3) { attempt ->
+                    // Two quick tries keep the splash short even when the backend is
+                    // unreachable (each attempt is bounded by the 8s connect timeout).
+                    repeat(2) { attempt ->
                         if (restored || rejected) return@repeat
                         runCatching { SyntraClient.restoreSession(token) }
                             .onSuccess { restored = true }
                             .onFailure { e ->
                                 if ((e as? ApiException)?.code == "unauthorized") rejected = true
-                                else if (attempt < 2) delay(1200)
+                                else if (attempt < 1) delay(400)
                             }
                     }
                     when {
@@ -102,7 +103,7 @@ private fun NexusApp() {
     }
 
     when (signedIn) {
-        null -> Box(modifier = Modifier.fillMaxSize().background(NexusBackground))
+        null -> AuthSplash()
         false -> AuthScreen(onAuthenticated = { signedIn = true })
         true -> MainTabs(onSignOut = { signedIn = false })
     }
