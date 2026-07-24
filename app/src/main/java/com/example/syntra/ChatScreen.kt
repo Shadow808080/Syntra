@@ -342,11 +342,30 @@ private fun relativeTime(iso: String): String {
     }.getOrDefault("")
 }
 
+private val idLocale = java.util.Locale.forLanguageTag("id-ID")
+
+/**
+ * Chat-list timestamp, WhatsApp-style and localised:
+ * today → `15.27` (Indonesian uses a dot), yesterday → `Kemarin`, within a week →
+ * the short day name (`Sen`, `Sel`…), older → `12/01/26`.
+ */
 private fun formatClock(iso: String?): String {
     if (iso.isNullOrBlank()) return ""
     return runCatching {
-        val local = java.time.Instant.parse(iso).atZone(java.time.ZoneId.systemDefault())
-        java.time.format.DateTimeFormatter.ofPattern("HH:mm").format(local)
+        val zone = java.time.ZoneId.systemDefault()
+        val then = java.time.Instant.parse(iso).atZone(zone)
+        val days = java.time.temporal.ChronoUnit.DAYS.between(
+            then.toLocalDate(),
+            java.time.ZonedDateTime.now(zone).toLocalDate(),
+        )
+        when {
+            days <= 0L -> java.time.format.DateTimeFormatter.ofPattern("HH.mm").format(then)
+            days == 1L -> "Kemarin"
+            days < 7L -> java.time.format.DateTimeFormatter.ofPattern("EEE", idLocale)
+                .format(then)
+                .replaceFirstChar { it.uppercase() }
+            else -> java.time.format.DateTimeFormatter.ofPattern("dd/MM/yy").format(then)
+        }
     }.getOrDefault("")
 }
 
