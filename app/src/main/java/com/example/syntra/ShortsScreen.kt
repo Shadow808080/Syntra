@@ -9,6 +9,12 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -41,8 +48,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -77,8 +82,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -150,14 +158,6 @@ fun ShortsScreen(
         scope.launch { runCatching { SyntraClient.likeReel(reel.id, now) } }
     }
 
-    fun toggleSave(reel: NetReel) {
-        val idx = reels.indexOfFirst { it.id == reel.id }
-        if (idx < 0) return
-        val now = !reel.isSaved
-        reels[idx] = reel.copy(isSaved = now)
-        scope.launch { runCatching { SyntraClient.saveReel(reel.id, now) } }
-    }
-
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -212,7 +212,6 @@ fun ShortsScreen(
                                 null
                             },
                             onLike = { toggleLike(reel) },
-                            onSave = { toggleSave(reel) },
                             onComment = { commentsFor = reel },
                             onShare = {
                                 Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show()
@@ -355,7 +354,6 @@ private fun ReelPage(
     reel: NetReel,
     active: Boolean,
     onLike: () -> Unit,
-    onSave: () -> Unit,
     onComment: () -> Unit,
     onShare: () -> Unit,
     /** Non-null only when the signed-in user owns this reel. */
@@ -424,11 +422,10 @@ private fun ReelPage(
             ReelActions(
                 reel = reel,
                 onLike = onLike,
-                onSave = onSave,
                 onComment = onComment,
                 onShare = onShare,
                 onDelete = onDelete,
-                modifier = Modifier.padding(end = 14.dp, bottom = 22.dp),
+                modifier = Modifier.padding(end = 12.dp, bottom = 22.dp),
             )
         }
     }
@@ -524,43 +521,54 @@ private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifi
     }
 }
 
+private val ShortsTeal = Color(0xFF20D5C4)
+
 @Composable
 private fun ReelCaption(reel: NetReel, modifier: Modifier = Modifier) {
+    val username = reel.creatorUsername.ifBlank { "pengguna" }
     Column(modifier = modifier) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (reel.creatorAvatarUrl != null) {
-                AsyncImage(
-                    model = reel.creatorAvatarUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(34.dp).clip(CircleShape),
-                )
-                Spacer(Modifier.width(10.dp))
-            }
-            Text(
-                text = "@" + reel.creatorUsername.ifBlank { "pengguna" },
-                color = NexusTextPrimary,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
+        Text(
+            text = "@$username",
+            color = Color.White,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+        )
         if (reel.caption.isNotBlank()) {
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
             Text(
-                text = reel.caption,
-                color = NexusTextPrimary,
+                text = highlightHashtags(reel.caption),
+                color = Color.White,
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.MusicNote, null, tint = NexusAccentSoft, modifier = Modifier.size(16.dp))
+            Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(15.dp))
             Spacer(Modifier.width(8.dp))
-            Text("Original Audio", color = NexusTextSecondary, fontSize = 13.sp)
+            Text(
+                text = "Original sound - @$username",
+                color = Color.White.copy(alpha = 0.9f),
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
+    }
+}
+
+/** Tints `#hashtags` teal like the reference feed. */
+private fun highlightHashtags(caption: String) = buildAnnotatedString {
+    val tokens = caption.split(" ")
+    tokens.forEachIndexed { i, token ->
+        if (token.startsWith("#") && token.length > 1) {
+            withStyle(SpanStyle(color = ShortsTeal, fontWeight = FontWeight.SemiBold)) { append(token) }
+        } else {
+            append(token)
+        }
+        if (i < tokens.lastIndex) append(" ")
     }
 }
 
@@ -568,72 +576,145 @@ private fun ReelCaption(reel: NetReel, modifier: Modifier = Modifier) {
 private fun ReelActions(
     reel: NetReel,
     onLike: () -> Unit,
-    onSave: () -> Unit,
     onComment: () -> Unit,
     onShare: () -> Unit,
     onDelete: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        ReelActionButton(
+        // Author avatar with a teal follow (+) badge.
+        Box(contentAlignment = Alignment.BottomCenter) {
+            Box(
+                modifier = Modifier
+                    .size(50.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF222228))
+                    .border(2.dp, Color.White, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (reel.creatorAvatarUrl != null) {
+                    AsyncImage(
+                        model = reel.creatorAvatarUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize().clip(CircleShape),
+                    )
+                } else {
+                    Text(
+                        text = (reel.creatorUsername.firstOrNull() ?: 'U').uppercase(),
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .offset(y = 9.dp)
+                    .size(20.dp)
+                    .background(ShortsTeal, CircleShape)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) {
+                        if (reel.creatorUsername.isNotBlank()) {
+                            scope.launch { runCatching { SyntraClient.follow(reel.creatorUsername) } }
+                            Toast.makeText(context, "Mengikuti @${reel.creatorUsername}", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.Add, "Ikuti", tint = Color.White, modifier = Modifier.size(14.dp))
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        RailItem(
             icon = if (reel.isLiked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-            tint = if (reel.isLiked) Color(0xFFFF3B5C) else NexusTextPrimary,
+            tint = if (reel.isLiked) Color(0xFFFF3B5C) else Color.White,
             label = compactCount(reel.likeCount),
             onClick = onLike,
         )
-        ReelActionButton(
+        RailItem(
             icon = Icons.Outlined.ModeComment,
-            tint = NexusTextPrimary,
+            tint = Color.White,
             label = compactCount(reel.commentCount),
             onClick = onComment,
         )
-        ReelActionButton(
-            icon = if (reel.isSaved) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-            tint = if (reel.isSaved) NexusAccentSoft else NexusTextPrimary,
-            label = "Simpan",
-            onClick = onSave,
-        )
-        ReelActionButton(
+        RailItem(
             icon = Icons.Filled.Share,
-            tint = NexusTextPrimary,
-            label = "Bagikan",
+            tint = Color.White,
+            label = "Share",
             onClick = onShare,
         )
-        // Owner-only: remove my own reel.
+        // Owner-only: remove my own reel (kept subtle, others never see it).
         if (onDelete != null) {
-            ReelActionButton(
+            RailItem(
                 icon = Icons.Filled.Delete,
                 tint = Color(0xFFFF5D5D),
                 label = "Hapus",
                 onClick = onDelete,
             )
         }
+        Spacer(Modifier.height(2.dp))
+        SpinningMusicDisc(avatarUrl = reel.creatorAvatarUrl)
     }
 }
 
 @Composable
-private fun ReelActionButton(icon: ImageVector, tint: Color, label: String, onClick: () -> Unit) {
+private fun RailItem(icon: ImageVector, tint: Color, label: String, onClick: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
             modifier = Modifier
-                .size(48.dp)
-                .background(Color.White.copy(alpha = 0.06f), CircleShape)
-                .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape)
+                .size(34.dp)
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
                     onClick = onClick,
                 ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(24.dp))
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** The little record that spins at the bottom of the action rail. */
+@Composable
+private fun SpinningMusicDisc(avatarUrl: String?) {
+    val transition = rememberInfiniteTransition(label = "disc")
+    val angle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(4500, easing = LinearEasing), RepeatMode.Restart),
+        label = "spin",
+    )
+    Box(
+        modifier = Modifier
+            .size(46.dp)
+            .graphicsLayer { rotationZ = angle }
+            .clip(CircleShape)
+            .background(Brush.radialGradient(listOf(Color(0xFF3A3A3A), Color(0xFF101014))))
+            .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (avatarUrl != null) {
+            AsyncImage(
+                model = avatarUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(22.dp).clip(CircleShape),
+            )
+        } else {
+            Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(18.dp))
         }
-        Spacer(Modifier.height(6.dp))
-        Text(label, color = NexusTextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -643,26 +724,20 @@ private fun ReelActionButton(icon: ImageVector, tint: Color, label: String, onCl
 
 @Composable
 private fun ShortsHeader(onPost: () -> Unit) {
-    Row(
+    val context = LocalContext.current
+    var following by remember { mutableStateOf(false) }
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(SyntraHeaderPadding),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
-        SyntraTitle()
-        Spacer(Modifier.weight(1f))
-        Icon(
-            imageVector = Icons.Filled.Search,
-            contentDescription = "Search",
-            tint = NexusTextPrimary,
-            modifier = Modifier.size(24.dp),
-        )
-        Spacer(Modifier.width(16.dp))
+        // Left: teal create/upload button.
         Box(
             modifier = Modifier
-                .size(34.dp)
-                .background(Brush.linearGradient(listOf(NexusAccentSoft, NexusAccent)), CircleShape)
+                .align(Alignment.CenterStart)
+                .size(38.dp)
+                .background(ShortsTeal, RoundedCornerShape(11.dp))
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
@@ -670,8 +745,55 @@ private fun ShortsHeader(onPost: () -> Unit) {
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.Add, "Posting short", tint = Color.White, modifier = Modifier.size(20.dp))
+            Icon(Icons.Filled.PlayArrow, "Unggah", tint = Color(0xFF0A1414), modifier = Modifier.size(24.dp))
         }
+        // Center: Following / For You tabs.
+        Row(
+            modifier = Modifier.align(Alignment.Center),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(22.dp),
+        ) {
+            ShortsTab("Following", active = following) {
+                following = true
+                Toast.makeText(context, "Feed Following segera hadir.", Toast.LENGTH_SHORT).show()
+            }
+            ShortsTab("For You", active = !following) { following = false }
+        }
+        // Right: search.
+        Icon(
+            imageVector = Icons.Filled.Search,
+            contentDescription = "Cari",
+            tint = Color.White,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .size(26.dp),
+        )
+    }
+}
+
+@Composable
+private fun ShortsTab(text: String, active: Boolean, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable(
+            indication = null,
+            interactionSource = remember { MutableInteractionSource() },
+            onClick = onClick,
+        ),
+    ) {
+        Text(
+            text = text,
+            color = if (active) Color.White else Color.White.copy(alpha = 0.55f),
+            fontSize = if (active) 18.sp else 15.sp,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+        )
+        Spacer(Modifier.height(4.dp))
+        Box(
+            modifier = Modifier
+                .width(24.dp)
+                .height(3.dp)
+                .background(if (active) ShortsTeal else Color.Transparent, RoundedCornerShape(50)),
+        )
     }
 }
 
@@ -905,8 +1027,9 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit) {
 private fun compactCount(n: Int): String = when {
     n <= 0 -> "0"
     n < 1000 -> n.toString()
-    n < 1_000_000 -> "%.1fk".format(n / 1000f)
-    else -> "%.1fM".format(n / 1_000_000f)
+    // Indonesian style: "88,4K", and a whole thousand shows as "1K".
+    n < 1_000_000 -> "%.1f".format(n / 1000f).removeSuffix(".0").replace('.', ',') + "K"
+    else -> "%.1f".format(n / 1_000_000f).removeSuffix(".0").replace('.', ',') + "M"
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF090910, widthDp = 360, heightDp = 780)
