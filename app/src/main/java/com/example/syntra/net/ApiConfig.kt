@@ -13,14 +13,14 @@ object ApiConfig {
     const val ENABLED = true
 
     /**
-     * REST base. Use the machine's LAN IP so a physical phone can reach it —
-     * `localhost` on the phone means the phone itself. On an emulator the host is
-     * reachable at `http://10.0.2.2:8081` instead.
+     * REST base. Points at the backend's Cloudflare Tunnel, so any phone with
+     * internet reaches it — no LAN/Wi-Fi dependency. No trailing slash: paths
+     * like `/api/v1/...` are appended directly.
      */
-    const val BASE_URL = "http://192.168.1.6:8081"
+    const val BASE_URL = "https://classifieds-jesus-arts-implementation.trycloudflare.com"
 
-    /** WebSocket base — same host, `ws://` (or `wss://` behind TLS). */
-    const val WS_URL = "ws://192.168.1.6:8081"
+    /** WebSocket base — same host over TLS, so `wss://`. */
+    const val WS_URL = "wss://classifieds-jesus-arts-implementation.trycloudflare.com"
 
     /**
      * Only for a backend running with `AUTH_DEV_BYPASS=true` and `APP_ENV` other
