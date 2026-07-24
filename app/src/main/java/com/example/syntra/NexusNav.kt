@@ -94,14 +94,15 @@ fun NexusBottomBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+                .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            NavItem(NexusTab.CHAT, Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble, "Chat", selected, onSelect)
-            NavItem(NexusTab.SHORTS, Icons.Outlined.PlayCircle, Icons.Filled.PlayCircle, "Shorts", selected, onSelect)
-            NavItem(NexusTab.ROOMS, Icons.Outlined.Mic, Icons.Filled.Mic, "Rooms", selected, onSelect)
-            NavItem(NexusTab.CALLS, Icons.Outlined.Call, Icons.Filled.Call, "Calls", selected, onSelect)
+            // Each tab takes an equal 1/4 slice so they span edge to edge — no
+            // empty gutters on the sides.
+            NavItem(NexusTab.CHAT, Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble, "Chat", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.SHORTS, Icons.Outlined.PlayCircle, Icons.Filled.PlayCircle, "Shorts", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.ROOMS, Icons.Outlined.Mic, Icons.Filled.Mic, "Rooms", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.CALLS, Icons.Outlined.Call, Icons.Filled.Call, "Calls", selected, onSelect, Modifier.weight(1f))
         }
     }
 }
@@ -114,6 +115,7 @@ private fun NavItem(
     label: String,
     selected: NexusTab,
     onSelect: (NexusTab) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val isSelected = tab == selected
 
@@ -132,7 +134,7 @@ private fun NavItem(
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },

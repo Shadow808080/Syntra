@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -27,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Notifications
@@ -51,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.text.font.FontWeight
@@ -577,82 +580,151 @@ private fun RoomCard(
     faces: List<NetRoomParticipant>,
     onJoin: () -> Unit,
 ) {
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
-            .background(NexusSurface, RoundedCornerShape(20.dp))
-            .border(1.dp, NexusStroke, RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(22.dp))
+            // A megaphone-mouth wash: bright at the top-left "horn", fading into the
+            // surface — the card reads like a megaphone calling people over.
+            .background(
+                Brush.linearGradient(
+                    listOf(room.accent.copy(alpha = 0.24f), NexusSurface),
+                ),
+            )
+            .border(1.dp, room.accent.copy(alpha = 0.35f), RoundedCornerShape(22.dp))
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onJoin,
-            )
-            .padding(16.dp),
+            ),
     ) {
-        // Top: topic tag + participant count
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (room.topic.isNotBlank()) CategoryTag(room.topic, room.accent)
-            Spacer(Modifier.weight(1f))
-            Icon(
-                imageVector = Icons.Filled.Headphones,
-                contentDescription = null,
-                tint = NexusTextSecondary,
-                modifier = Modifier.size(15.dp),
-            )
-            Spacer(Modifier.width(5.dp))
-            Text(
-                text = room.participantCount.toString(),
-                color = NexusTextSecondary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        Text(
-            text = room.title,
-            color = NexusTextPrimary,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
+        // Big faint megaphone bleeding off the right edge — the visual hallmark.
+        Icon(
+            imageVector = Icons.Filled.Campaign,
+            contentDescription = null,
+            tint = room.accent.copy(alpha = 0.10f),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .size(148.dp)
+                .offset(x = 26.dp, y = (-20).dp)
+                .graphicsLayer { rotationZ = -18f },
         )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = "${room.speakerCount} speaker · ${room.participantCount} peserta",
-            color = NexusTextSecondary,
-            fontSize = 13.sp,
-            lineHeight = 18.sp,
-        )
-        Spacer(Modifier.height(14.dp))
-        // Bottom: who is inside + Join
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (faces.isNotEmpty()) {
-                AvatarStack(faces, room.participantCount)
-            } else if (room.hostName.isNotBlank()) {
-                GradientAvatar(
-                    gradient = listOf(room.accent, room.accent.copy(alpha = 0.6f)),
-                    initial = room.hostName.first().toString(),
-                    size = 30.dp,
-                )
-                Spacer(Modifier.width(10.dp))
-                Column {
+
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Author (host) up top: their avatar sits at the mouth of a megaphone
+            // badge, next to a "calling you" line, with the listener count on the right.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MegaphoneAuthor(room)
+                Spacer(Modifier.width(11.dp))
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        room.hostName,
+                        text = room.hostName.ifBlank { "Host" },
                         color = NexusTextPrimary,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    Text("HOST", color = NexusTextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = "memanggil kamu untuk gabung",
+                        color = room.accent,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.Headphones,
+                        contentDescription = null,
+                        tint = NexusTextSecondary,
+                        modifier = Modifier.size(15.dp),
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = room.participantCount.toString(),
+                        color = NexusTextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
                 }
             }
-            Spacer(Modifier.weight(1f))
-            JoinButton(enabled = joinable, onJoin = onJoin)
+            Spacer(Modifier.height(14.dp))
+            if (room.topic.isNotBlank()) {
+                CategoryTag(room.topic, room.accent)
+                Spacer(Modifier.height(10.dp))
+            }
+            Text(
+                text = room.title,
+                color = NexusTextPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "${room.speakerCount} speaker · ${room.participantCount} peserta",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+            )
+            Spacer(Modifier.height(14.dp))
+            // Bottom: overlapping avatars of who is inside + Join
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (faces.isNotEmpty()) {
+                    AvatarStack(faces, room.participantCount)
+                } else {
+                    Text(
+                        text = "Jadi yang pertama gabung",
+                        color = NexusTextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                JoinButton(enabled = joinable, onJoin = onJoin)
+            }
         }
     }
 }
 
-/** Overlapping avatars of the people currently inside, newest first. */
+/** The room author's avatar, framed as the mouth of a small megaphone badge. */
+@Composable
+private fun MegaphoneAuthor(room: Room) {
+    Box(contentAlignment = Alignment.Center) {
+        GradientAvatar(
+            gradient = listOf(room.accent, room.accent.copy(alpha = 0.55f)),
+            initial = room.hostName.ifBlank { "?" }.first().toString(),
+            size = 46.dp,
+        )
+        // Little megaphone chip clipped to the avatar's corner.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .offset(x = 3.dp, y = 3.dp)
+                .size(20.dp)
+                .background(room.accent, CircleShape)
+                .border(2.dp, NexusSurface, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Campaign,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(12.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Overlapping avatars of the people currently inside. Shows exactly as many faces
+ * as there are participants (two joined → two stacked), up to four, then "+N".
+ */
 @Composable
 private fun AvatarStack(faces: List<NetRoomParticipant>, total: Int) {
     val shown = faces.take(4)

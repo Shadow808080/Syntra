@@ -6,8 +6,14 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -356,18 +362,24 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     val speakers = participants.filter { it.role != "listener" }
     val listeners = participants.filter { it.role == "listener" }
 
-    // Hold everything back until the audio session is genuinely up. Showing the
-    // room while still connecting makes a muted, silent room look broken.
-    if (joinState != JoinState.CONNECTED) {
-        JoinGate(
-            room = room,
-            state = joinState,
-            error = joinError,
-            onRetry = { scope.launch { joinAndConnect() } },
-            onCancel = { leave() },
-        )
-        return
-    }
+    // Crossfade between the join gate and the live room so entering feels smooth
+    // instead of snapping. Hold everything back until the audio session is up —
+    // showing the room while still connecting makes a silent room look broken.
+    androidx.compose.animation.Crossfade(
+        targetState = joinState == JoinState.CONNECTED,
+        animationSpec = tween(320),
+        label = "room-join",
+    ) { connected ->
+        if (!connected) {
+            JoinGate(
+                room = room,
+                state = joinState,
+                error = joinError,
+                onRetry = { scope.launch { joinAndConnect() } },
+                onCancel = { leave() },
+            )
+            return@Crossfade
+        }
 
     Box(
         modifier = Modifier
@@ -384,13 +396,6 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 onMinimize = { requestLeave() },
             )
 
-            SpeakingStatusBanner(
-                role = myRole,
-                handRaised = handRaised,
-                promoted = promoted,
-                onDismissPromoted = { promoted = false },
-            )
-
             VolumeBar(
                 volume = volume,
                 loudspeaker = loudspeaker,
@@ -401,26 +406,25 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 },
             )
 
-            // Host-only queue of people asking to speak.
-            val raised = participants.filter { it.hasRaisedHand && it.role == "listener" }
-            if (isHost && raised.isNotEmpty()) {
-                HandRaiseQueue(
-                    requests = raised,
-                    onApprove = { setRole(it, "speaker") },
-                    onOpen = { manageTarget = it },
-                )
-            }
+            // No hand-raise queue: everyone joins as a speaker and can just
+            // unmute, so there's nothing to approve.
 
-            if (showChat) {
+            androidx.compose.animation.Crossfade(
+                targetState = showChat,
+                animationSpec = tween(260),
+                modifier = Modifier.weight(1f),
+                label = "room-body",
+            ) { chatMode ->
+            if (chatMode) {
                 RoomChatPane(
                     lines = chat,
                     listState = chatListState,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxSize(),
                 )
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(4),
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -469,6 +473,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                     }
                 }
             }
+            } // end Crossfade room-body
 
             if (showChat) {
                 RoomChatInput(
@@ -529,6 +534,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
             )
         }
     }
+    } // end Crossfade
 }
 
 // ---------------------------------------------------------------------------
@@ -983,6 +989,52 @@ private fun SectionLabel(text: String) {
     )
 }
 
+/**
+ * A ring of thin bars around an avatar that pulse with the voice — the ChatGPT
+ * "talking" look. Each bar has its own phase so the ring ripples; amplitude
+ * follows [level] (0..1) with a low idle shimmer so a live-but-quiet mic still
+ * breathes gently.
+ */
+@Composable
+private fun VoiceWaveRing(level: Float, ringSize: androidx.compose.ui.unit.Dp) {
+    val bars = 28
+    val transition = rememberInfiniteTransition(label = "wave")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Restart),
+        label = "wave-phase",
+    )
+    Canvas(modifier = Modifier.size(ringSize)) {
+        val radius = size.minDimension / 2f
+        val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
+        val idle = 0.12f
+        val amp = idle + level * 0.88f
+        val baseLen = radius * 0.10f
+        val strokeW = 3.2f
+        for (i in 0 until bars) {
+            val angle = (i.toFloat() / bars) * 2f * Math.PI.toFloat()
+            // Per-bar wave — two offset sines make it feel organic, not uniform.
+            val wave = (kotlin.math.sin(phase + i * 0.7f) * 0.5f + 0.5f) *
+                (kotlin.math.sin(phase * 0.6f + i * 0.3f) * 0.5f + 0.5f)
+            val len = baseLen + radius * 0.28f * amp * wave
+            val inner = radius - baseLen * 0.3f
+            val outer = inner + len
+            val sx = center.x + kotlin.math.cos(angle) * inner
+            val sy = center.y + kotlin.math.sin(angle) * inner
+            val ex = center.x + kotlin.math.cos(angle) * outer
+            val ey = center.y + kotlin.math.sin(angle) * outer
+            drawLine(
+                color = NexusOnline.copy(alpha = 0.35f + 0.5f * amp),
+                start = androidx.compose.ui.geometry.Offset(sx, sy),
+                end = androidx.compose.ui.geometry.Offset(ex, ey),
+                strokeWidth = strokeW,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+            )
+        }
+    }
+}
+
 @Composable
 private fun ParticipantTile(
     p: NetRoomParticipant,
@@ -1015,26 +1067,19 @@ private fun ParticipantTile(
             ),
     ) {
         Box(contentAlignment = Alignment.Center) {
-            // Outer glow that expands with loudness — the "breathing" reaction.
+            // Soft breathing glow behind the avatar, scaled by loudness.
             if (glow > 0.01f) {
                 Box(
                     modifier = Modifier
-                        .size(size + 4.dp + 30.dp * glow)
-                        .background(NexusOnline.copy(alpha = 0.10f + 0.32f * glow), CircleShape),
+                        .size(size + 4.dp + 26.dp * glow)
+                        .background(NexusOnline.copy(alpha = 0.10f + 0.28f * glow), CircleShape),
                 )
             }
-            // Steady halo whenever the mic is live; its ring brightens with the voice.
+            // ChatGPT-style voice bars arranged around the avatar — each bar
+            // dances to the live audio level (with a subtle idle shimmer when mic
+            // is on but quiet), so an active speaker reads instantly.
             if (micOn) {
-                Box(
-                    modifier = Modifier
-                        .size(size + 8.dp)
-                        .background(NexusOnline.copy(alpha = 0.12f + 0.14f * glow), CircleShape)
-                        .border(
-                            width = 2.dp + 1.5.dp * glow,
-                            color = NexusOnline.copy(alpha = 0.45f + 0.55f * glow),
-                            shape = CircleShape,
-                        ),
-                )
+                VoiceWaveRing(level = glow, ringSize = size + 20.dp)
             }
             GradientAvatar(
                 gradient = gradientForId(p.userId),
@@ -1241,16 +1286,7 @@ private fun RoomControlBar(
             background = Color(0xFF24242C),
             onClick = onToggleChat,
         )
-        // Raise hand is only meaningful while you cannot speak yet.
-        if (!canPublish) {
-            RoundControl(
-                icon = Icons.Filled.PanTool,
-                description = "Angkat tangan",
-                background = if (handRaised) Color(0xFFF2994A) else Color(0xFF24242C),
-                tint = if (handRaised) Color.White else NexusTextPrimary,
-                onClick = onToggleHand,
-            )
-        }
+        // No raise-hand button: everyone can speak the moment they join.
         // Mic: green + "ON" when live, red-outlined + "OFF" when muted. The label
         // removes any doubt about which state you are in.
         val live = canPublish && !muted

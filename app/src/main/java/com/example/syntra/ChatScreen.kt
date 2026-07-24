@@ -436,6 +436,7 @@ fun ChatScreen(
     var showAddStatus by remember { mutableStateOf(false) }
     var showTextStory by remember { mutableStateOf(false) }
     var pendingPhoto by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var pendingVideo by remember { mutableStateOf<android.net.Uri?>(null) }
     // Conversation the user long-pressed and may want to remove.
     var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
     // Multi-select: long-press ticks a chat and swaps the overflow menu for actions.
@@ -460,7 +461,8 @@ fun ChatScreen(
     // Tell the host pager whenever something covers the whole screen.
     val overlayOpen = openedStory != null || openedChat != null ||
         showAddStatus || showNewGroup || showSettings || showTextStory ||
-        showDiscover || openProfileUser != null || pendingPhoto != null
+        showDiscover || openProfileUser != null || pendingPhoto != null ||
+        pendingVideo != null
     LaunchedEffect(overlayOpen) { onOverlayChange(overlayOpen) }
 
     // Pull-to-refresh state for the chat list.
@@ -1064,11 +1066,12 @@ fun ChatScreen(
             AddStatusScreen(
                 onClose = { showAddStatus = false },
                 onSelectUri = { uri ->
-                    // Photos go through a preview/edit screen first; videos post directly.
-                    when (val m = loadStoryMedia(context, uri)) {
-                        is StoryImage.Bitmap -> { showAddStatus = false; pendingPhoto = m.image.asAndroidBitmap() }
-                        is StoryImage -> addStory(m)
-                        else -> {}
+                    // Photos → preview/edit; videos → trim (≤15s); both before posting.
+                    val mime = context.contentResolver.getType(uri).orEmpty()
+                    if (mime.startsWith("video")) {
+                        showAddStatus = false; pendingVideo = uri
+                    } else {
+                        loadStoryBitmap(context, uri)?.let { showAddStatus = false; pendingPhoto = it.asAndroidBitmap() }
                     }
                 },
                 onCaptureBitmap = { bmp -> showAddStatus = false; pendingPhoto = bmp },
@@ -1076,14 +1079,29 @@ fun ChatScreen(
             )
         }
 
-        // Photo preview + light edit (caption) before posting.
+        // Photo preview + light edit (caption) before posting. Back → reopen the
+        // picker so you can choose a different photo.
         pendingPhoto?.let { bmp ->
             PhotoStoryPreview(
                 photo = bmp,
-                onCancel = { pendingPhoto = null },
+                onCancel = { pendingPhoto = null; showAddStatus = true },
                 onDone = { edited ->
                     pendingPhoto = null
                     addStory(StoryImage.Bitmap(edited.asImageBitmap()))
+                },
+            )
+        }
+
+        // Video preview + trim to ≤15s before posting. Back → reopen the picker.
+        pendingVideo?.let { uri ->
+            VideoTrimScreen(
+                uri = uri,
+                onCancel = { pendingVideo = null; showAddStatus = true },
+                onDone = { trimmed ->
+                    pendingVideo = null
+                    extractVideoThumbnail(context, trimmed)?.let {
+                        addStory(StoryImage.Video(trimmed, it))
+                    }
                 },
             )
         }
