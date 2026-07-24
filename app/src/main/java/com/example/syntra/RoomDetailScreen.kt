@@ -6,6 +6,12 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -57,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -142,6 +149,9 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     }
 
     val chatListState = rememberLazyListState()
+
+    // Live "who is actually talking now" from LiveKit, keyed by user id.
+    val speakingIds by VoiceEngine.speakingIds.collectAsState()
 
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -435,7 +445,12 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                     if (speakers.isNotEmpty()) {
                         item(span = { GridItemSpan(4) }) { SectionLabel("Speaker · ${speakers.size}") }
                         items(speakers) { p ->
-                            ParticipantTile(p, big = true, manageable = isHost && p.role != "host") {
+                            ParticipantTile(
+                                p,
+                                big = true,
+                                speaking = p.userId in speakingIds,
+                                manageable = isHost && p.role != "host",
+                            ) {
                                 manageTarget = p
                             }
                         }
@@ -448,7 +463,12 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                             }
                         }
                         items(listeners) { p ->
-                            ParticipantTile(p, big = false, manageable = isHost) { manageTarget = p }
+                            ParticipantTile(
+                                p,
+                                big = false,
+                                speaking = p.userId in speakingIds,
+                                manageable = isHost,
+                            ) { manageTarget = p }
                         }
                     }
                 }
@@ -971,12 +991,14 @@ private fun SectionLabel(text: String) {
 private fun ParticipantTile(
     p: NetRoomParticipant,
     big: Boolean,
+    speaking: Boolean = false,
     manageable: Boolean = false,
     onManage: () -> Unit = {},
 ) {
     val size = if (big) 64.dp else 48.dp
     val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
-    val speaking = p.role != "listener" && !p.isMuted
+    // Mic is on (static state from the server) vs. actually talking now (LiveKit).
+    val micOn = p.role != "listener" && !p.isMuted
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
@@ -989,13 +1011,39 @@ private fun ParticipantTile(
             ),
     ) {
         Box(contentAlignment = Alignment.Center) {
-            // A live mic gets a green halo, so "who can talk" is readable at a glance.
+            // While actually talking, emit an expanding "ping" ring that fades out —
+            // a live pulse tied to real voice activity, not just mic-on state.
             if (speaking) {
+                val transition = rememberInfiniteTransition(label = "speak")
+                val pulse by transition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(1000, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Restart,
+                    ),
+                    label = "ping",
+                )
+                Box(
+                    modifier = Modifier
+                        .size(size + 6.dp + 22.dp * pulse)
+                        .background(NexusOnline.copy(alpha = 0.30f * (1f - pulse)), CircleShape),
+                )
+            }
+            // Steady halo: bright while talking, subtle when the mic is merely on.
+            if (speaking || micOn) {
                 Box(
                     modifier = Modifier
                         .size(size + 8.dp)
-                        .background(NexusOnline.copy(alpha = 0.18f), CircleShape)
-                        .border(2.dp, NexusOnline, CircleShape),
+                        .background(
+                            NexusOnline.copy(alpha = if (speaking) 0.22f else 0.14f),
+                            CircleShape,
+                        )
+                        .border(
+                            width = if (speaking) 2.5.dp else 2.dp,
+                            color = NexusOnline.copy(alpha = if (speaking) 1f else 0.55f),
+                            shape = CircleShape,
+                        ),
                 )
             }
             GradientAvatar(
@@ -1008,7 +1056,7 @@ private fun ParticipantTile(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .size(22.dp)
-                        .background(if (speaking) NexusOnline else Color(0xFF3A3A44), CircleShape)
+                        .background(if (micOn) NexusOnline else Color(0xFF3A3A44), CircleShape)
                         .border(2.dp, NexusSurface, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
