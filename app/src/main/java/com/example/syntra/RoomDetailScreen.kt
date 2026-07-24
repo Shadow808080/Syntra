@@ -6,11 +6,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -150,8 +146,8 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
 
     val chatListState = rememberLazyListState()
 
-    // Live "who is actually talking now" from LiveKit, keyed by user id.
-    val speakingIds by VoiceEngine.speakingIds.collectAsState()
+    // Live microphone loudness (0..1) per user id, straight from LiveKit.
+    val audioLevels by VoiceEngine.audioLevels.collectAsState()
 
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -448,7 +444,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                             ParticipantTile(
                                 p,
                                 big = true,
-                                speaking = p.userId in speakingIds,
+                                level = audioLevels[p.userId] ?: 0f,
                                 manageable = isHost && p.role != "host",
                             ) {
                                 manageTarget = p
@@ -466,7 +462,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                             ParticipantTile(
                                 p,
                                 big = false,
-                                speaking = p.userId in speakingIds,
+                                level = audioLevels[p.userId] ?: 0f,
                                 manageable = isHost,
                             ) { manageTarget = p }
                         }
@@ -991,14 +987,22 @@ private fun SectionLabel(text: String) {
 private fun ParticipantTile(
     p: NetRoomParticipant,
     big: Boolean,
-    speaking: Boolean = false,
+    level: Float = 0f,
     manageable: Boolean = false,
     onManage: () -> Unit = {},
 ) {
     val size = if (big) 64.dp else 48.dp
     val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
-    // Mic is on (static state from the server) vs. actually talking now (LiveKit).
+    // Mic on (server state) vs. how loud they are right now (LiveKit, 0..1).
     val micOn = p.role != "listener" && !p.isMuted
+    // Normalise: real speech rarely fills 0..1, so lift the low end and clamp,
+    // then smooth so the ring glides with the voice instead of jittering.
+    val loudness = (level.coerceIn(0f, 1f) * 2.4f).coerceIn(0f, 1f)
+    val glow by animateFloatAsState(
+        targetValue = if (micOn) loudness else 0f,
+        animationSpec = tween(durationMillis = 110),
+        label = "loudness",
+    )
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
@@ -1011,37 +1015,23 @@ private fun ParticipantTile(
             ),
     ) {
         Box(contentAlignment = Alignment.Center) {
-            // While actually talking, emit an expanding "ping" ring that fades out —
-            // a live pulse tied to real voice activity, not just mic-on state.
-            if (speaking) {
-                val transition = rememberInfiniteTransition(label = "speak")
-                val pulse by transition.animateFloat(
-                    initialValue = 0f,
-                    targetValue = 1f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(1000, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Restart,
-                    ),
-                    label = "ping",
-                )
+            // Outer glow that expands with loudness — the "breathing" reaction.
+            if (glow > 0.01f) {
                 Box(
                     modifier = Modifier
-                        .size(size + 6.dp + 22.dp * pulse)
-                        .background(NexusOnline.copy(alpha = 0.30f * (1f - pulse)), CircleShape),
+                        .size(size + 4.dp + 30.dp * glow)
+                        .background(NexusOnline.copy(alpha = 0.10f + 0.32f * glow), CircleShape),
                 )
             }
-            // Steady halo: bright while talking, subtle when the mic is merely on.
-            if (speaking || micOn) {
+            // Steady halo whenever the mic is live; its ring brightens with the voice.
+            if (micOn) {
                 Box(
                     modifier = Modifier
                         .size(size + 8.dp)
-                        .background(
-                            NexusOnline.copy(alpha = if (speaking) 0.22f else 0.14f),
-                            CircleShape,
-                        )
+                        .background(NexusOnline.copy(alpha = 0.12f + 0.14f * glow), CircleShape)
                         .border(
-                            width = if (speaking) 2.5.dp else 2.dp,
-                            color = NexusOnline.copy(alpha = if (speaking) 1f else 0.55f),
+                            width = 2.dp + 1.5.dp * glow,
+                            color = NexusOnline.copy(alpha = 0.45f + 0.55f * glow),
                             shape = CircleShape,
                         ),
                 )

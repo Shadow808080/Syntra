@@ -3,15 +3,15 @@ package com.example.syntra.net
 import android.content.Context
 import android.media.AudioManager
 import io.livekit.android.LiveKit
-import io.livekit.android.events.RoomEvent
-import io.livekit.android.events.collect
 import io.livekit.android.room.Room
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -34,12 +34,12 @@ object VoiceEngine {
     val isConnected: Boolean get() = room != null
 
     /**
-     * Identities (backend `user_id` UUIDs) of participants LiveKit reports as
-     * currently speaking — including the local user. The room UI observes this to
-     * animate whoever is actually talking, live.
+     * Live microphone loudness (0..1) per participant, keyed by backend `user_id`
+     * (the LiveKit identity = token `sub`). Includes the local user, so the room
+     * UI can animate whoever is talking in proportion to how loud they are.
      */
-    private val _speakingIds = MutableStateFlow<Set<String>>(emptySet())
-    val speakingIds: StateFlow<Set<String>> = _speakingIds
+    private val _audioLevels = MutableStateFlow<Map<String, Float>>(emptyMap())
+    val audioLevels: StateFlow<Map<String, Float>> = _audioLevels
 
     /** Connects to the SFU. Safe to call again; the previous session is dropped first. */
     suspend fun connect(context: Context, url: String, token: String) {
@@ -47,15 +47,25 @@ object VoiceEngine {
         val r = LiveKit.create(appContext = context.applicationContext)
         r.connect(url, token)
         room = r
-        // Track active speakers. The identity LiveKit carries is the user's UUID
-        // (the token's `sub`), which matches NetRoomParticipant.userId.
+        // Sample every participant's audio level a few times a frame's worth apart.
+        // LiveKit keeps these updated internally; polling turns them into a smooth,
+        // responsive signal for the UI. Identity == user's UUID (token `sub`).
         val s = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         scope = s
         s.launch {
-            r.events.collect { event ->
-                if (event is RoomEvent.ActiveSpeakersChanged) {
-                    _speakingIds.value = event.speakers.mapNotNull { it.identity?.value }.toSet()
+            while (isActive) {
+                val rm = room
+                if (rm != null) {
+                    val levels = HashMap<String, Float>()
+                    rm.localParticipant.let { lp ->
+                        lp.identity?.value?.let { levels[it] = lp.audioLevel.coerceIn(0f, 1f) }
+                    }
+                    rm.remoteParticipants.values.forEach { rp ->
+                        rp.identity?.value?.let { levels[it] = rp.audioLevel.coerceIn(0f, 1f) }
+                    }
+                    _audioLevels.value = levels
                 }
+                delay(80)
             }
         }
         audio = (context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.apply {
@@ -88,7 +98,7 @@ object VoiceEngine {
     fun disconnect() {
         runCatching { scope?.cancel() }
         scope = null
-        _speakingIds.value = emptySet()
+        _audioLevels.value = emptyMap()
         runCatching { room?.disconnect() }
         runCatching { audio?.mode = AudioManager.MODE_NORMAL }
         room = null
