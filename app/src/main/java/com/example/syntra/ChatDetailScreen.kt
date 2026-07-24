@@ -1106,73 +1106,75 @@ private fun MessageBubble(
         appear.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium))
     }
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (msg.fromMe) Alignment.End else Alignment.Start,
-    ) {
-        Column(
-            modifier = Modifier
-                .graphicsLayer {
-                    scaleX = appear.value
-                    scaleY = appear.value
-                    alpha = appear.value
-                    transformOrigin = TransformOrigin(if (msg.fromMe) 1f else 0f, 1f)
-                }
-                .widthIn(max = 280.dp)
-                .background(bubbleColor, shape)
-                .combinedClickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                    onClick = {},
-                    onLongClick = onLongPress,
-                )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Bottom,
         ) {
-            // Attachments come back as ready URLs; a caption may sit under them.
-            val media = msg.media
-            when {
-                media != null && media.isAudioUrl() -> AudioBubble(media, textColor)
-                media != null -> AsyncImage(
-                    model = media,
-                    contentDescription = "Foto",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(width = 220.dp, height = 260.dp)
-                        .clip(RoundedCornerShape(12.dp)),
-                )
-                else -> Text(
-                    text = msg.text,
-                    color = if (msg.isDeleted) textColor.copy(alpha = 0.6f) else textColor,
-                    fontStyle = if (msg.isDeleted) FontStyle.Italic else FontStyle.Normal,
-                    fontSize = 15.sp,
-                    lineHeight = 20.sp,
-                )
+            if (msg.fromMe) Spacer(Modifier.weight(1f))
+            Column(
+                modifier = Modifier
+                    .graphicsLayer {
+                        scaleX = appear.value
+                        scaleY = appear.value
+                        alpha = appear.value
+                        transformOrigin = TransformOrigin(if (msg.fromMe) 1f else 0f, 1f)
+                    }
+                    .widthIn(max = 260.dp)
+                    .background(bubbleColor, shape)
+                    .combinedClickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = {},
+                        onLongClick = onLongPress,
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                // Attachments come back as ready URLs; a caption may sit under them.
+                val media = msg.media
+                when {
+                    media != null && media.isAudioUrl() -> AudioBubble(media, textColor)
+                    media != null -> AsyncImage(
+                        model = media,
+                        contentDescription = "Foto",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(width = 220.dp, height = 260.dp)
+                            .clip(RoundedCornerShape(12.dp)),
+                    )
+                    else -> Text(
+                        text = msg.text,
+                        color = if (msg.isDeleted) textColor.copy(alpha = 0.6f) else textColor,
+                        fontStyle = if (msg.isDeleted) FontStyle.Italic else FontStyle.Normal,
+                        fontSize = 15.sp,
+                        lineHeight = 20.sp,
+                    )
+                }
+                if (media != null && msg.text.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(text = msg.text, color = textColor, fontSize = 15.sp, lineHeight = 20.sp)
+                }
             }
-            if (media != null && msg.text.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                Text(text = msg.text, color = textColor, fontSize = 15.sp, lineHeight = 20.sp)
-            }
+            // Timestamp pinned to the far right of the row, outside the bubble.
+            if (msg.fromMe) Spacer(Modifier.width(6.dp)) else Spacer(Modifier.weight(1f))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .align(Alignment.End)
-                    .padding(top = 2.dp),
+                modifier = Modifier.padding(bottom = 2.dp),
             ) {
-                Text(
-                    text = msg.time,
-                    color = textColor.copy(alpha = 0.6f),
-                    fontSize = 10.sp,
-                )
+                Text(text = msg.time, color = NexusTextSecondary, fontSize = 10.sp)
                 if (msg.fromMe) {
-                    Spacer(Modifier.width(4.dp))
-                    DeliveryTicks(state, textColor)
+                    Spacer(Modifier.width(3.dp))
+                    DeliveryTicks(state, NexusTextSecondary)
                 }
             }
         }
         // Reaction chips sit just under the bubble, on the same side.
         if (reactions.isNotEmpty()) {
             Spacer(Modifier.height(3.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = if (msg.fromMe) Arrangement.End else Arrangement.Start,
+            ) {
                 reactions.forEach { (emoji, count) ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
