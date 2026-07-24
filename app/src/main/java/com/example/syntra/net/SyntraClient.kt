@@ -28,6 +28,12 @@ interface SocketListener {
     fun onPresence(presence: NetPresence) {}
     fun onTyping(conversationId: String, userId: String, typing: Boolean) {}
     fun onReadReceipt(conversationId: String, messageId: String) {}
+    /** A message was deleted for everyone — show it as a "deleted" tombstone. */
+    fun onMessageDeleted(conversationId: String, messageId: String) {}
+    /** A reaction was added/changed/removed. Empty [emoji] means removed. */
+    fun onMessageReaction(conversationId: String, messageId: String, userId: String, emoji: String) {}
+    /** A user changed their name/photo — sync it (own devices or a contact). */
+    fun onUserUpdated(userId: String, displayName: String, avatarUrl: String?) {}
     fun onAck(ref: String?, data: Any?) {}
     fun onReconnect() {}
     /** Ephemeral room chat message. */
@@ -274,6 +280,35 @@ object SyntraClient {
      * backend note) broadcasts so the peer updates live. Path is `/messages/{id}`.
      */
     suspend fun deleteMessage(messageId: String) = delete("/api/v1/messages/$messageId")
+
+    /** `PUT /messages/{id}/reaction`. Blank [emoji] removes my reaction. Broadcasts. */
+    suspend fun reactToMessage(messageId: String, emoji: String) {
+        putData("/api/v1/messages/$messageId/reaction", JSONObject().put("emoji", emoji))
+    }
+
+    /**
+     * Reactions for a batch of messages in one call (`GET .../reactions`), returned
+     * as `messageId -> (userId -> emoji)` so the UI can aggregate counts itself.
+     */
+    suspend fun getReactions(
+        conversationId: String,
+        messageIds: List<String>,
+    ): Map<String, Map<String, String>> {
+        if (messageIds.isEmpty()) return emptyMap()
+        val ids = messageIds.joinToString(",")
+        val arr = getData("/api/v1/conversations/$conversationId/reactions?message_ids=$ids") as JSONArray
+        val out = HashMap<String, HashMap<String, String>>()
+        (0 until arr.length()).forEach { i ->
+            val o = arr.getJSONObject(i)
+            val mid = o.optString("message_id")
+            val uid = o.optString("user_id")
+            val emoji = o.optString("emoji")
+            if (mid.isNotBlank() && uid.isNotBlank() && emoji.isNotBlank()) {
+                out.getOrPut(mid) { HashMap() }[uid] = emoji
+            }
+        }
+        return out
+    }
 
     suspend fun createDirect(userId: String): String {
         val payload = JSONObject().put("type", "direct").put("user_id", userId)
@@ -816,6 +851,28 @@ object SyntraClient {
                 }
                 "message.read" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onReadReceipt(d.getString("conversation_id"), d.optString("message_id")) }
+                }
+                "message.deleted" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onMessageDeleted(d.optString("conversation_id"), d.optString("message_id")) }
+                }
+                "message.reaction" -> (data as? JSONObject)?.let { d ->
+                    dispatch {
+                        it.onMessageReaction(
+                            d.optString("conversation_id"),
+                            d.optString("message_id"),
+                            d.optString("user_id"),
+                            d.optString("emoji"),
+                        )
+                    }
+                }
+                "user.updated" -> (data as? JSONObject)?.let { d ->
+                    dispatch {
+                        it.onUserUpdated(
+                            d.optString("user_id"),
+                            d.optString("display_name"),
+                            d.strOrNull("avatar_url"),
+                        )
+                    }
                 }
                 "room.participants" -> (data as? JSONObject)?.let { d ->
                     val roomId = d.optString("room_id")

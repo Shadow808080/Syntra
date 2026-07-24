@@ -567,6 +567,28 @@ fun ChatScreen(
                     }
                 }
 
+                override fun onUserUpdated(userId: String, displayName: String, avatarUrl: String?) {
+                    if (userId == SyntraClient.myUserId) {
+                        // My own profile changed on another device — mirror it locally.
+                        if (displayName.isNotBlank()) ProfileStore.setDisplayName(context, displayName)
+                        if (!avatarUrl.isNullOrBlank()) {
+                            ProfileStore.setAvatar(context, avatarUrl, ProfileStore.avatarMediaId(context).orEmpty())
+                        }
+                        return
+                    }
+                    // A contact changed name/photo. counterpartId is only set on direct
+                    // chats, so updating name here never mislabels a group.
+                    chats.forEachIndexed { i, c ->
+                        if (c.counterpartId == userId) {
+                            var u = c
+                            if (displayName.isNotBlank()) u = u.copy(name = displayName)
+                            if (!avatarUrl.isNullOrBlank()) u = u.copy(avatarUrl = avatarUrl)
+                            chats[i] = u
+                            if (!avatarUrl.isNullOrBlank()) c.counterpartUsername?.let { avatarCache[it] = avatarUrl }
+                        }
+                    }
+                }
+
                 override fun onReadReceipt(conversationId: String, messageId: String) {
                     // I read this conversation on another device — clear the badge here.
                     val idx = chats.indexOfFirst { it.id == conversationId }

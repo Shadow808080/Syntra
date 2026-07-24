@@ -14,6 +14,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -40,6 +41,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -67,6 +69,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -87,6 +90,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -104,6 +108,7 @@ import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
@@ -128,6 +133,8 @@ private data class Message(
      * photo is never shown as a raw URL in the bubble.
      */
     val media: String? = null,
+    /** True once deleted-for-everyone — rendered as a greyed "deleted" tombstone. */
+    val isDeleted: Boolean = false,
 )
 
 /** Marks a message that only exists on this device until the server confirms it. */
@@ -149,6 +156,7 @@ private fun NetMessage.toUi(): Message {
         fromMe = senderId == SyntraClient.myUserId,
         time = formatClock(createdAt),
         media = if (isDeleted) null else attachment ?: legacyUrl,
+        isDeleted = isDeleted,
     )
 }
 
@@ -188,6 +196,9 @@ fun ChatDetailScreen(
         if (ApiConfig.ENABLED) mutableStateListOf()
         else sampleMessages(conversation).toMutableStateList()
     }
+    // Reactions per message: messageId -> (userId -> emoji). Replacing the value
+    // (not mutating in place) is what drives recomposition.
+    val reactions = remember(conversation) { mutableStateMapOf<String, Map<String, String>>() }
     var input by remember { mutableStateOf("") }
     var peerTyping by remember { mutableStateOf(false) }
     // Live online state for the header; seeded from the list, then kept current
@@ -287,6 +298,9 @@ fun ChatDetailScreen(
                 messages.clear()
                 messages.addAll(history.map { it.toUi() })
                 history.lastOrNull()?.let { SyntraClient.messageRead(conversation.id, it.id) }
+                // Load existing reactions for the visible messages in one call.
+                runCatching { SyntraClient.getReactions(conversation.id, history.map { it.id }) }
+                    .getOrNull()?.let { reactions.clear(); reactions.putAll(it) }
             }.onFailure {
                 Toast.makeText(context, "Gagal memuat pesan: ${it.message}", Toast.LENGTH_SHORT).show()
             }
@@ -310,7 +324,10 @@ fun ChatDetailScreen(
                             return
                         }
                     }
-                    messages.add(message.toUi())
+                    // A freshly broadcast message is never a deletion — the delete
+                    // tombstone only ever comes from the message.deleted event or from
+                    // loaded history, so guard against a stray is_deleted here.
+                    messages.add(message.copy(isDeleted = false).toUi())
                     peerTyping = false
                     // Honour the privacy switch: no read receipt when it is off.
                     if (SettingsStore.getBool(context, SettingsStore.READ_RECEIPTS, true)) {
@@ -336,6 +353,39 @@ fun ChatDetailScreen(
                     // Online/offline in the header updates itself.
                     if (presence.userId == conversation.counterpartId) {
                         peerOnline = presence.online
+                    }
+                }
+
+                override fun onMessageDeleted(conversationId: String, messageId: String) {
+                    if (conversationId != conversation.id) return
+                    val i = messages.indexOfFirst { it.id == messageId }
+                    if (i >= 0) {
+                        messages[i] = messages[i].copy(
+                            text = "Pesan ini dihapus",
+                            media = null,
+                            isDeleted = true,
+                        )
+                    }
+                    reactions.remove(messageId)
+                }
+
+                override fun onMessageReaction(
+                    conversationId: String,
+                    messageId: String,
+                    userId: String,
+                    emoji: String,
+                ) {
+                    if (conversationId != conversation.id) return
+                    val current = reactions[messageId].orEmpty()
+                    reactions[messageId] =
+                        if (emoji.isBlank()) current - userId else current + (userId to emoji)
+                }
+
+                override fun onUserUpdated(userId: String, displayName: String, avatarUrl: String?) {
+                    // The person I'm chatting with changed their photo — reflect it in
+                    // the header without leaving the chat.
+                    if (userId == conversation.counterpartId && !avatarUrl.isNullOrBlank()) {
+                        peerAvatar = avatarUrl
                     }
                 }
 
@@ -537,6 +587,7 @@ fun ChatDetailScreen(
             items(messages) { msg ->
                 MessageBubble(
                     msg = msg,
+                    reactions = aggregateReactions(reactions[msg.id]),
                     outgoingColor = chatTheme.bubble,
                     onLongPress = { pendingMessage = msg },
                     state = when {
@@ -605,8 +656,20 @@ fun ChatDetailScreen(
     }
 
     pendingMessage?.let { msg ->
+        val mine = SyntraClient.myUserId
         MessageActionsDialog(
             msg = msg,
+            myReaction = mine?.let { reactions[msg.id]?.get(it) },
+            onReact = { emoji ->
+                pendingMessage = null
+                if (ApiConfig.ENABLED && mine != null) {
+                    // Tapping the emoji I already picked clears it (toggle).
+                    val base = reactions[msg.id].orEmpty()
+                    val next = if (base[mine] == emoji) "" else emoji
+                    reactions[msg.id] = if (next.isBlank()) base - mine else base + (mine to next)
+                    scope.launch { runCatching { SyntraClient.reactToMessage(msg.id, next) } }
+                }
+            },
             onDismiss = { pendingMessage = null },
             onDeleteForMe = {
                 pendingMessage = null
@@ -616,7 +679,18 @@ fun ChatDetailScreen(
                 pendingMessage = null
                 scope.launch {
                     runCatching { SyntraClient.deleteMessage(msg.id) }
-                        .onSuccess { messages.remove(msg) }
+                        .onSuccess {
+                            // Keep the tombstone (matches what the peer sees), don't drop it.
+                            val i = messages.indexOfFirst { it.id == msg.id }
+                            if (i >= 0) {
+                                messages[i] = messages[i].copy(
+                                    text = "Pesan ini dihapus",
+                                    media = null,
+                                    isDeleted = true,
+                                )
+                            }
+                            reactions.remove(msg.id)
+                        }
                         .onFailure {
                             val why = if ((it as? ApiException)?.code == "not_found") {
                                 "Server belum mendukung hapus untuk semua orang."
@@ -732,9 +806,13 @@ fun ChatDetailScreen(
 }
 
 /** Long-press a bubble. "For everyone" only makes sense for messages I sent. */
+private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
 @Composable
 private fun MessageActionsDialog(
     msg: Message,
+    myReaction: String?,
+    onReact: (String) -> Unit,
     onDismiss: () -> Unit,
     onDeleteForMe: () -> Unit,
     onDeleteForEveryone: () -> Unit,
@@ -746,6 +824,36 @@ private fun MessageActionsDialog(
                 .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
                 .padding(vertical = 18.dp),
         ) {
+            // Quick-reaction row — hidden for a message that's already deleted.
+            if (!msg.isDeleted) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    QUICK_REACTIONS.forEach { emoji ->
+                        val picked = emoji == myReaction
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(
+                                    if (picked) NexusAccent.copy(alpha = 0.25f) else Color.Transparent,
+                                    CircleShape,
+                                )
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    onClick = { onReact(emoji) },
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(emoji, fontSize = 22.sp)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+            }
             Text(
                 text = msg.text,
                 color = NexusTextSecondary,
@@ -755,7 +863,7 @@ private fun MessageActionsDialog(
                 modifier = Modifier.padding(horizontal = 22.dp),
             )
             Spacer(Modifier.height(14.dp))
-            if (msg.fromMe) {
+            if (msg.fromMe && !msg.isDeleted) {
                 MessageAction("Hapus untuk semua orang", Color(0xFFFF5D5D), onDeleteForEveryone)
             }
             MessageAction("Hapus untuk saya", NexusTextPrimary, onDeleteForMe)
@@ -981,6 +1089,7 @@ private fun MessageBubble(
     state: DeliveryState,
     outgoingColor: Color,
     onLongPress: () -> Unit,
+    reactions: Map<String, Int> = emptyMap(),
 ) {
     val bubbleColor = if (msg.fromMe) outgoingColor else NexusSurfaceElevated
     val textColor = if (msg.fromMe) Color.White else NexusTextPrimary
@@ -997,9 +1106,9 @@ private fun MessageBubble(
         appear.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium))
     }
 
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (msg.fromMe) Arrangement.End else Arrangement.Start,
+        horizontalAlignment = if (msg.fromMe) Alignment.End else Alignment.Start,
     ) {
         Column(
             modifier = Modifier
@@ -1033,7 +1142,8 @@ private fun MessageBubble(
                 )
                 else -> Text(
                     text = msg.text,
-                    color = textColor,
+                    color = if (msg.isDeleted) textColor.copy(alpha = 0.6f) else textColor,
+                    fontStyle = if (msg.isDeleted) FontStyle.Italic else FontStyle.Normal,
                     fontSize = 15.sp,
                     lineHeight = 20.sp,
                 )
@@ -1059,7 +1169,34 @@ private fun MessageBubble(
                 }
             }
         }
+        // Reaction chips sit just under the bubble, on the same side.
+        if (reactions.isNotEmpty()) {
+            Spacer(Modifier.height(3.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                reactions.forEach { (emoji, count) ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .background(NexusSurfaceElevated, RoundedCornerShape(50))
+                            .border(1.dp, NexusStroke, RoundedCornerShape(50))
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                    ) {
+                        Text(emoji, fontSize = 12.sp)
+                        if (count > 1) {
+                            Spacer(Modifier.width(3.dp))
+                            Text(count.toString(), color = NexusTextSecondary, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+/** Collapses `userId -> emoji` into `emoji -> count` for display. */
+private fun aggregateReactions(users: Map<String, String>?): Map<String, Int> {
+    if (users.isNullOrEmpty()) return emptyMap()
+    return users.values.groupingBy { it }.eachCount()
 }
 
 /** A body that is nothing but a link to our own media bucket. */
