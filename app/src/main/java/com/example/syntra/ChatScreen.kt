@@ -48,6 +48,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -59,11 +60,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.PersonAddAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Visibility
@@ -121,6 +124,8 @@ import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusOnline
 import com.example.syntra.ui.theme.NexusRing
+import com.example.syntra.ui.theme.NexusStroke
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
@@ -171,6 +176,9 @@ private data class ActivePerson(
 ) {
     /** Cover shown on the row: first unseen segment, else the first one. */
     val photo: StoryImage get() = (items.firstOrNull { !it.viewed } ?: items.first()).image
+
+    /** First segment not yet watched; 0 (replay from start) when all are watched. */
+    fun firstUnwatched(): Int = items.indexOfFirst { !it.viewed }.let { if (it < 0) 0 else it }
     val posts: Int get() = items.size
 }
 
@@ -193,6 +201,9 @@ data class Conversation(
     val counterpartUsername: String? = null,
     // Newest message the peer has read; drives the ✓✓ indicator.
     val counterpartLastReadId: String? = null,
+    // Id of the last message — compared with counterpartLastReadId to know if my
+    // last sent message has been read (blue ✓✓) or just delivered (grey).
+    val lastMessageId: String? = null,
     // Real profile photo of the counterpart / group, when the server knows one.
     val avatarUrl: String? = null,
 )
@@ -299,6 +310,7 @@ private fun NetConversation.toUi() = Conversation(
     counterpartId = counterpartId,
     counterpartUsername = counterpartUsername,
     counterpartLastReadId = counterpartLastReadId,
+    lastMessageId = lastMessageId,
     // Only a real URL is usable; a bare media id stays null and falls back to
     // the letter tile until the photo is resolved (see resolveAvatars).
     avatarUrl = avatarMediaId?.takeIf { it.startsWith("http") },
@@ -422,6 +434,8 @@ fun ChatScreen(
     var query by remember { mutableStateOf("") }
     // Whether the "Tambah status" sheet is open.
     var showAddStatus by remember { mutableStateOf(false) }
+    var showTextStory by remember { mutableStateOf(false) }
+    var pendingPhoto by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     // Conversation the user long-pressed and may want to remove.
     var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
     // Multi-select: long-press ticks a chat and swaps the overflow menu for actions.
@@ -431,6 +445,9 @@ fun ChatScreen(
     var showArchived by remember { mutableStateOf(false) }
     var showNewGroup by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showManualScan by remember { mutableStateOf(false) }
+    var showDiscover by remember { mutableStateOf(false) }
+    var openProfileUser by remember { mutableStateOf<String?>(null) }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -442,11 +459,13 @@ fun ChatScreen(
 
     // Tell the host pager whenever something covers the whole screen.
     val overlayOpen = openedStory != null || openedChat != null ||
-        showAddStatus || showNewGroup || showSettings
+        showAddStatus || showNewGroup || showSettings || showTextStory ||
+        showDiscover || openProfileUser != null || pendingPhoto != null
     LaunchedEffect(overlayOpen) { onOverlayChange(overlayOpen) }
 
     // Pull-to-refresh state for the chat list.
     var refreshing by remember { mutableStateOf(false) }
+    var firstLoadDone by remember { mutableStateOf(false) }
     // username -> resolved photo URL, so the list endpoint's missing avatars are
     // only looked up once per session.
     val avatarCache = remember { mutableStateMapOf<String, String>() }
@@ -460,11 +479,29 @@ fun ChatScreen(
             val groups = SyntraClient.getStories()
             stories.clear()
             seenStories.clear()
-            groups.forEach { g ->
+            val watchedOwn = ChatFlags.watchedOwnStories(context)
+            val built = groups.mapNotNull { g ->
                 g.toUi()?.let { person ->
-                    stories.add(person)
-                    if (g.allViewed) seenStories.add(person)
+                    // My own stories: the backend never marks them viewed, so apply the
+                    // local "watched" set so the ring stays dimmed after a refresh.
+                    if (person.isMine) {
+                        person.copy(items = person.items.map {
+                            if (watchedOwn.contains(it.id)) it.copy(viewed = true) else it
+                        })
+                    } else {
+                        person
+                    }
                 }
+            }
+            // Ordering: my own story first, then people with UNWATCHED stories, then
+            // the fully-watched ones — so fresh stories always sit up front.
+            val ordered = built.sortedWith(
+                compareByDescending<ActivePerson> { it.isMine }
+                    .thenByDescending { it.items.any { item -> !item.viewed } },
+            )
+            ordered.forEach { person ->
+                stories.add(person)
+                if (person.items.all { it.viewed }) seenStories.add(person)
             }
             SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
             SyntraClient.presenceQuery(convs.mapNotNull { it.counterpartId })
@@ -514,6 +551,7 @@ fun ChatScreen(
                 SyntraClient.connect()
             }
             refresh()
+            firstLoadDone = true
         }
         DisposableEffect(Unit) {
             val listener = object : SocketListener {
@@ -590,8 +628,10 @@ fun ChatScreen(
                     }
                 }
 
-                override fun onReadReceipt(conversationId: String, messageId: String) {
-                    // I read this conversation on another device — clear the badge here.
+                override fun onReadReceipt(conversationId: String, userId: String, messageId: String) {
+                    // Clear the badge only when *I* read it (possibly on another
+                    // device). The peer reading must not clear my unread count.
+                    if (userId != SyntraClient.myUserId) return
                     val idx = chats.indexOfFirst { it.id == conversationId }
                     if (idx >= 0 && chats[idx].unread > 0) {
                         chats[idx] = chats[idx].copy(unread = 0)
@@ -640,6 +680,11 @@ fun ChatScreen(
         showAddStatus = false
         if (ApiConfig.ENABLED) scope.launch {
             runCatching { uploadStory(context, media) }
+                .onSuccess {
+                    // Reconcile with the server so the story carries its real id +
+                    // resolved media URL (and shows for the rest of the app).
+                    runCatching { refresh() }
+                }
                 .onFailure { Toast.makeText(context, "Upload story gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
         }
     }
@@ -708,8 +753,10 @@ fun ChatScreen(
                 }
             }
             .addOnCanceledListener { /* user dismissed the scanner */ }
-            .addOnFailureListener { e ->
-                Toast.makeText(context, "Scan failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            .addOnFailureListener {
+                // Scanner unavailable on this device (Play Services) — fall back to
+                // typing the username manually so you can still start a chat.
+                showManualScan = true
             }
     }
 
@@ -738,6 +785,7 @@ fun ChatScreen(
                     query = ""
                 },
                 onScan = { startScan() },
+                onDiscover = { showDiscover = true },
                 onMenuItem = { label ->
                     val picked = chats.filter { it.id in selection }
                     when (label) {
@@ -789,6 +837,12 @@ fun ChatScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
+                // First-load skeleton: shimmering placeholder rows instead of a
+                // blank screen (or a heavy spinner) while chats stream in.
+                if (!firstLoadDone && chats.isEmpty() && !searching) {
+                    items(8) { ChatRowSkeleton() }
+                    return@LazyColumn
+                }
                 if (!searching) {
                     item {
                         ActiveRow(
@@ -799,7 +853,9 @@ fun ChatScreen(
                     }
                     item { Spacer(Modifier.height(4.dp)) }
                 }
-                itemsIndexed(visible) { index, convo ->
+                itemsIndexed(visible, key = { _, convo -> convo.id }) { _, convo ->
+                    // The row carries its own even vertical margin (card style), so no
+                    // extra spacer between items — that produced uneven gaps before.
                     ConversationRow(
                         convo = convo,
                         selected = convo.id in selection,
@@ -814,9 +870,6 @@ fun ChatScreen(
                         },
                         onLongClick = { if (!selection.remove(convo.id)) selection.add(convo.id) },
                     )
-                    if (index != visible.lastIndex) {
-                        Spacer(Modifier.height(10.dp))
-                    }
                 }
                 if (archivedCount > 0 && !searching) {
                     item {
@@ -897,7 +950,11 @@ fun ChatScreen(
                             },
                         )
                         // Never register a view on my own story — I'm not a viewer.
-                        if (ApiConfig.ENABLED && !person.isMine) scope.launch {
+                        // Instead remember it locally so the ring stays dimmed after
+                        // a refresh (the backend always reports my own as unviewed).
+                        if (person.isMine) {
+                            ChatFlags.markOwnStoryWatched(context, item.id)
+                        } else if (ApiConfig.ENABLED) scope.launch {
                             runCatching { SyntraClient.viewStory(item.id) }
                         }
                     }
@@ -985,12 +1042,61 @@ fun ChatScreen(
             )
         }
 
+        if (showManualScan) {
+            ManualUsernameDialog(
+                onDismiss = { showManualScan = false },
+                onSubmit = { uname -> showManualScan = false; openDirectWith(uname) },
+            )
+        }
+
+        if (showDiscover) {
+            DiscoverScreen(
+                onClose = { showDiscover = false },
+                onOpenProfile = { uname -> openProfileUser = uname },
+            )
+        }
+        openProfileUser?.let { uname ->
+            ProfileScreen(username = uname, onClose = { openProfileUser = null })
+        }
+
         // "Tambah status" sheet (gallery grid + actions)
         if (showAddStatus) {
             AddStatusScreen(
                 onClose = { showAddStatus = false },
-                onSelectUri = { uri -> loadStoryMedia(context, uri)?.let { addStory(it) } },
-                onCaptureBitmap = { bmp -> addStory(StoryImage.Bitmap(bmp.asImageBitmap())) },
+                onSelectUri = { uri ->
+                    // Photos go through a preview/edit screen first; videos post directly.
+                    when (val m = loadStoryMedia(context, uri)) {
+                        is StoryImage.Bitmap -> { showAddStatus = false; pendingPhoto = m.image.asAndroidBitmap() }
+                        is StoryImage -> addStory(m)
+                        else -> {}
+                    }
+                },
+                onCaptureBitmap = { bmp -> showAddStatus = false; pendingPhoto = bmp },
+                onTextStory = { showAddStatus = false; showTextStory = true },
+            )
+        }
+
+        // Photo preview + light edit (caption) before posting.
+        pendingPhoto?.let { bmp ->
+            PhotoStoryPreview(
+                photo = bmp,
+                onCancel = { pendingPhoto = null },
+                onDone = { edited ->
+                    pendingPhoto = null
+                    addStory(StoryImage.Bitmap(edited.asImageBitmap()))
+                },
+            )
+        }
+
+        // Text-story composer → renders the text to a bitmap and posts it as an
+        // image story (reuses the normal upload path).
+        if (showTextStory) {
+            TextStoryScreen(
+                onClose = { showTextStory = false },
+                onDone = { bmp ->
+                    showTextStory = false
+                    addStory(StoryImage.Bitmap(bmp.asImageBitmap()))
+                },
             )
         }
     }
@@ -1010,6 +1116,7 @@ private fun NexusHeader(
     onStartSearch: () -> Unit,
     onStopSearch: () -> Unit,
     onScan: () -> Unit,
+    onDiscover: () -> Unit,
     onMenuItem: (String) -> Unit,
 ) {
     Row(
@@ -1081,7 +1188,8 @@ private fun NexusHeader(
         } else {
             SyntraTitle()
             Spacer(Modifier.weight(1f))
-            // Order: search · scan · overflow
+            // Order: find-people · search · scan · overflow
+            HeaderIcon(Icons.Filled.PersonAddAlt, "Cari orang", size = 27.dp, onClick = onDiscover)
             HeaderIcon(Icons.Filled.Search, "Search", size = 28.dp, onClick = onStartSearch)
             HeaderIcon(Icons.Outlined.QrCodeScanner, "Scan", size = 27.dp, onClick = onScan)
             Box {
@@ -1145,13 +1253,15 @@ private fun ActiveRow(
         contentPadding = PaddingValues(horizontal = 20.dp),
         horizontalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        itemsIndexed(people) { index, person ->
+        itemsIndexed(people, key = { _, person -> person.id }) { index, person ->
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 StoryAvatar(
                     photo = person.photo,
                     size = 56.dp,
                     posts = person.posts,
-                    seen = person in seen,
+                    // Per-segment: watched stories dim, unwatched stay lit. Watching
+                    // updates each item's `viewed`, so this reflects progress live.
+                    viewedCount = person.items.count { it.viewed },
                     onClick = { onStoryClick(index) },
                 )
                 Spacer(Modifier.height(8.dp))
@@ -1160,6 +1270,10 @@ private fun ActiveRow(
                     color = NexusTextSecondary,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.width(64.dp),
                 )
             }
         }
@@ -1182,16 +1296,18 @@ private fun ConversationRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(18.dp))
             .background(if (selected) NexusAccent.copy(alpha = 0.16f) else Color.Transparent)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 20.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box {
             GradientAvatar(
                 gradient = convo.gradient,
                 initial = convo.name.first().toString(),
-                size = 52.dp,
+                size = 54.dp,
                 photoUrl = convo.avatarUrl,
             )
             // Tick replaces the presence dot while this row is picked.
@@ -1257,10 +1373,19 @@ private fun ConversationRow(
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (convo.sent) {
-                    Text(
-                        text = "✓✓ ",
-                        color = NexusAccentSoft,
-                        fontSize = 14.sp,
+                    // Blue ✓✓ only when the peer has actually read my last message
+                    // (lastMessageId <= counterpartLastReadId, UUIDv7 time-ordered);
+                    // otherwise grey "delivered". Consistent with the chat detail.
+                    val read = convo.lastMessageId != null &&
+                        convo.counterpartLastReadId != null &&
+                        convo.lastMessageId <= convo.counterpartLastReadId
+                    Icon(
+                        imageVector = Icons.Filled.DoneAll,
+                        contentDescription = if (read) "Dibaca" else "Terkirim",
+                        tint = if (read) Color(0xFF7FE3FF) else NexusTextSecondary,
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .size(15.dp),
                     )
                 }
                 Text(
@@ -1274,20 +1399,27 @@ private fun ConversationRow(
                 )
                 if (convo.unread > 0) {
                     Spacer(Modifier.width(8.dp))
-                    // Pill grows with the digit count (and caps at 99+) so the number
-                    // never clips the way a fixed circle did.
+                    // A perfect round badge (not an elongated pill), number centred.
                     Box(
                         modifier = Modifier
-                            .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
-                            .background(NexusAccent, RoundedCornerShape(50))
-                            .padding(horizontal = 6.dp),
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(NexusAccent),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            text = if (convo.unread > 99) "99+" else convo.unread.toString(),
+                            text = if (convo.unread > 99) "99" else convo.unread.toString(),
                             color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            // Kill the font's built-in top/bottom padding and pin the
+                            // line height to the glyph size so the digit sits dead-centre
+                            // in the circle instead of drifting low.
+                            style = androidx.compose.ui.text.TextStyle(
+                                platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false),
+                                lineHeight = 11.sp,
+                            ),
                         )
                     }
                 }
@@ -1305,7 +1437,7 @@ private fun StoryAvatar(
     photo: StoryImage,
     size: androidx.compose.ui.unit.Dp,
     posts: Int,
-    seen: Boolean,
+    viewedCount: Int,
     onClick: () -> Unit,
 ) {
     Box(
@@ -1319,21 +1451,6 @@ private fun StoryAvatar(
         contentAlignment = Alignment.Center,
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
-            if (seen) {
-                // Already watched: the highlighted ring disappears, leaving a faint grey outline.
-                val strokeWidth = 1.5.dp.toPx()
-                val inset = strokeWidth / 2f
-                drawArc(
-                    color = StorySeenRing,
-                    startAngle = 0f,
-                    sweepAngle = 360f,
-                    useCenter = false,
-                    topLeft = Offset(inset, inset),
-                    size = Size(this.size.width - strokeWidth, this.size.height - strokeWidth),
-                    style = Stroke(width = strokeWidth),
-                )
-                return@Canvas
-            }
             val strokeWidth = 3.dp.toPx()
             val inset = strokeWidth / 2f
             val arcSize = Size(this.size.width - strokeWidth, this.size.height - strokeWidth)
@@ -1342,17 +1459,38 @@ private fun StoryAvatar(
             // Gap (in degrees) between segments; a single story draws a full ring.
             val gap = if (segments == 1) 0f else 10f
             val sweep = (360f - gap * segments) / segments
+            // A brand sweep gradient (purple → blue → purple) for unwatched segments —
+            // reads as a live signal. Watched segments dim to a faint grey.
+            val ringBrush = Brush.sweepGradient(
+                listOf(NexusRing, NexusAccentSoft, NexusRing),
+                center = Offset(this.size.width / 2f, this.size.height / 2f),
+            )
             var start = -90f
-            repeat(segments) {
-                drawArc(
-                    color = NexusRing,
-                    startAngle = start,
-                    sweepAngle = sweep,
-                    useCenter = false,
-                    topLeft = topLeft,
-                    size = arcSize,
-                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-                )
+            repeat(segments) { i ->
+                // Stories are watched in order: the first [viewedCount] segments are
+                // done (dim), the rest are still lit. Watch 1 of 3 → 2 stay lit.
+                val watched = i < viewedCount
+                if (watched) {
+                    drawArc(
+                        color = StorySeenRing,
+                        startAngle = start,
+                        sweepAngle = sweep,
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(width = 1.5.dp.toPx()),
+                    )
+                } else {
+                    drawArc(
+                        brush = ringBrush,
+                        startAngle = start,
+                        sweepAngle = sweep,
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+                    )
+                }
                 start += sweep + gap
             }
         }
@@ -1392,12 +1530,16 @@ private fun StoryPhoto(
             contentScale = ContentScale.Crop,
             modifier = modifier,
         )
-        is StoryImage.Url -> AsyncImage(
-            model = photo.url,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = modifier,
-        )
+        is StoryImage.Url -> Box(modifier) {
+            // Breathing placeholder while the photo streams in — never a black gap.
+            ShimmerFill(Modifier.matchParentSize())
+            AsyncImage(
+                model = photo.url,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
     }
 }
 
@@ -1604,7 +1746,10 @@ private fun StoryViewer(
     onDeleteStory: (personIndex: Int, segment: Int) -> Unit,
 ) {
     var personIndex by remember { mutableIntStateOf(startIndex) }
-    var segment by remember { mutableIntStateOf(0) }
+    // Open on the first unwatched story — already-watched ones are skipped.
+    var segment by remember { mutableIntStateOf(people[startIndex].firstUnwatched()) }
+    // A video only counts as watched once it actually starts playing (below).
+    var videoMarked by remember { mutableStateOf(false) }
     val person = people[personIndex]
     val progress = remember { Animatable(0f) }
     // Playback fraction for the current video story (0..1).
@@ -1637,7 +1782,7 @@ private fun StoryViewer(
             onSeen(personIndex)
             if (personIndex < people.lastIndex) {
                 personIndex++
-                segment = 0
+                segment = people[personIndex].firstUnwatched()
             } else {
                 onClose()
             }
@@ -1660,7 +1805,7 @@ private fun StoryViewer(
         if (personIndex < people.lastIndex) {
             onSeen(personIndex)
             personIndex++
-            segment = 0
+            segment = people[personIndex].firstUnwatched()
         } else {
             onClose()
         }
@@ -1683,8 +1828,10 @@ private fun StoryViewer(
     LaunchedEffect(personIndex, segment) {
         progress.snapTo(0f)
         videoFraction = 0f
-        onViewed(personIndex, segment)
+        videoMarked = false
         if (!current.image.isVideoStory()) {
+            // Photos count as watched the moment they're shown.
+            onViewed(personIndex, segment)
             var elapsed = 0L
             while (elapsed < STORY_DURATION_MS) {
                 delay(STORY_TICK_MS)
@@ -1695,6 +1842,8 @@ private fun StoryViewer(
             }
             goNext()
         }
+        // Videos are marked watched from onProgress once they truly start playing —
+        // a video that never plays is NOT counted as viewed.
     }
 
     // View counts only exist for my own stories, so fetch them lazily.
@@ -1776,7 +1925,14 @@ private fun StoryViewer(
                 is StoryImage.Video -> StoryVideo(
                     uri = media.uri,
                     paused = paused,
-                    onProgress = { videoFraction = it },
+                    onProgress = { f ->
+                        videoFraction = f
+                        // First real frame of playback → now it's been watched.
+                        if (f > 0f && !videoMarked) {
+                            videoMarked = true
+                            onViewed(personIndex, segment)
+                        }
+                    },
                     onFinished = { goNext() },
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -1784,7 +1940,14 @@ private fun StoryViewer(
                     StoryVideo(
                         uri = Uri.parse(media.url),
                         paused = paused,
-                        onProgress = { videoFraction = it },
+                        onProgress = { f ->
+                        videoFraction = f
+                        // First real frame of playback → now it's been watched.
+                        if (f > 0f && !videoMarked) {
+                            videoMarked = true
+                            onViewed(personIndex, segment)
+                        }
+                    },
                         onFinished = { goNext() },
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -1801,13 +1964,17 @@ private fun StoryViewer(
                     .fillMaxSize()
                     .pointerInput(personIndex, segment) {
                         detectTapGestures(
-                            onPress = {
+                            onPress = { offset ->
+                                // Hold pauses; on release, only a SHORT tap navigates —
+                                // a long hold just resumes the same story (no "jump").
+                                val downAt = System.currentTimeMillis()
                                 paused = true
-                                tryAwaitRelease()
+                                val released = tryAwaitRelease()
                                 paused = false
-                            },
-                            onTap = { offset ->
-                                if (offset.x < size.width / 2f) goPrev() else goNext()
+                                val heldMs = System.currentTimeMillis() - downAt
+                                if (released && heldMs < 250) {
+                                    if (offset.x < size.width / 2f) goPrev() else goNext()
+                                }
                             },
                         )
                     }
@@ -1910,7 +2077,9 @@ private fun StoryViewer(
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = viewCounts[current.id]?.toString() ?: "–",
+                            // 0 when nobody has watched yet (the author never counts
+                            // themselves — the backend excludes author_id).
+                            text = (viewCounts[current.id] ?: 0).toString(),
                             color = Color.White,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -1958,7 +2127,18 @@ private fun StoryViewer(
                 scope.launch {
                     runCatching {
                         val convId = SyntraClient.createDirect(authorId)
-                        SyntraClient.sendMessageRest(convId, text)
+                        // Embed the story image URL as a marker so the chat bubble can
+                        // render a small blurred thumbnail of the exact story replied to.
+                        // Format: STORYREPLY<0x1>url<0x1>text  (backend has no story-
+                        // reply endpoint yet, so we ride on a normal text message).
+                        val current = person.items.getOrNull(segment)
+                        val storyUrl = (current?.image as? StoryImage.Url)?.url.orEmpty()
+                        val body = if (storyUrl.isNotBlank()) {
+                            "STORYREPLY$storyUrl$text"
+                        } else {
+                            text
+                        }
+                        SyntraClient.sendMessageRest(convId, body)
                     }.onSuccess {
                         replyText = ""
                         Toast.makeText(storyContext, "Balasan terkirim ke ${person.name}.", Toast.LENGTH_SHORT).show()
@@ -2295,6 +2475,114 @@ private fun StoryDeleteDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
 // ---------------------------------------------------------------------------
 // Preview
 // ---------------------------------------------------------------------------
+
+/** A shimmering placeholder chat row shown while the first load is in flight. */
+@Composable
+private fun ChatRowSkeleton() {
+    val transition = rememberInfiniteTransition(label = "chat-skeleton")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.75f,
+        animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+        label = "sk-alpha",
+    )
+    val bar = NexusSurfaceElevated.copy(alpha = alpha)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 22.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(54.dp).clip(CircleShape).background(bar))
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Box(Modifier.fillMaxWidth(0.45f).height(13.dp).clip(RoundedCornerShape(6.dp)).background(bar))
+            Spacer(Modifier.height(9.dp))
+            Box(Modifier.fillMaxWidth(0.7f).height(11.dp).clip(RoundedCornerShape(6.dp)).background(bar))
+        }
+    }
+}
+
+/** Fallback for when the QR scanner isn't available: type a username to start a chat. */
+@Composable
+private fun ManualUsernameDialog(onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
+    var value by remember { mutableStateOf("") }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onDismiss,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(36.dp)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(NexusSurfaceElevated)
+                .border(1.dp, NexusStroke, RoundedCornerShape(20.dp))
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
+                .padding(22.dp),
+        ) {
+            Text("Cari lewat username", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Scanner tidak tersedia di perangkat ini. Ketik username untuk memulai chat.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(14.dp))
+                    .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("@", color = NexusTextSecondary, fontSize = 15.sp)
+                Spacer(Modifier.width(6.dp))
+                Box(Modifier.weight(1f)) {
+                    if (value.isEmpty()) Text("username", color = NexusTextSecondary.copy(alpha = 0.6f), fontSize = 15.sp)
+                    BasicTextField(
+                        value = value,
+                        onValueChange = { v -> value = v.filterNot { it.isWhitespace() }.lowercase() },
+                        singleLine = true,
+                        textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
+                        cursorBrush = SolidColor(NexusAccentSoft),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(if (value.isBlank()) Color.White.copy(alpha = 0.08f) else NexusAccent)
+                    .clickable(
+                        enabled = value.isNotBlank(),
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { onSubmit(value.trim()) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Mulai chat",
+                    color = if (value.isBlank()) NexusTextSecondary else Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
 
 @Preview(showBackground = true, backgroundColor = 0xFF121212, widthDp = 360, heightDp = 780)
 @Composable

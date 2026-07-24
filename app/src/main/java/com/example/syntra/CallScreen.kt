@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -141,6 +142,10 @@ fun CallScreen(
             phase = if (incoming) CallPhase.CONNECTING else CallPhase.RINGING
             statusLine = if (incoming) "Menyambungkan…" else "Memanggil…"
         }.onFailure {
+            // The screen closing mid-connect cancels this — that's not a call
+            // failure. Re-throw cancellation so it doesn't surface as the bogus
+            // "coroutine scope left the composition" error.
+            if (it is kotlinx.coroutines.CancellationException) throw it
             statusLine = it.message ?: "Panggilan gagal"
             Toast.makeText(context, statusLine, Toast.LENGTH_LONG).show()
             phase = CallPhase.ENDED
@@ -196,6 +201,35 @@ fun CallScreen(
                 elapsed++
             }
         }
+    }
+
+    // Ringtone while waiting — on BOTH sides (the receiver's INCOMING and the
+    // caller's RINGING) and for both audio & video calls. Uses MediaPlayer with
+    // real looping so it works on every Android version (Ringtone.isLooping is
+    // API 28+ only). Stops the moment the call connects or ends.
+    val ringing = phase == CallPhase.INCOMING || phase == CallPhase.RINGING
+    DisposableEffect(ringing) {
+        var player: android.media.MediaPlayer? = null
+        if (ringing) {
+            val uri = android.media.RingtoneManager
+                .getActualDefaultRingtoneUri(context, android.media.RingtoneManager.TYPE_RINGTONE)
+                ?: android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_RINGTONE)
+            runCatching {
+                player = android.media.MediaPlayer().apply {
+                    setDataSource(context, uri)
+                    isLooping = true
+                    setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build(),
+                    )
+                    prepare()
+                    start()
+                }
+            }
+        }
+        onDispose { runCatching { player?.stop(); player?.release() } }
     }
 
     // Realtime call signalling: the far side answering, declining, or hanging up.
@@ -346,6 +380,7 @@ fun CallScreen(
 
             Spacer(Modifier.weight(1f))
 
+            Box(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
             when (phase) {
                 CallPhase.INCOMING -> IncomingControls(
                     video = isVideo,
@@ -362,7 +397,8 @@ fun CallScreen(
                     onHangUp = { hangUp() },
                 )
             }
-            Spacer(Modifier.height(28.dp))
+            }
+            Spacer(Modifier.height(36.dp))
         }
 
         // Self-preview picture-in-picture (video calls only).
@@ -435,10 +471,10 @@ private fun OngoingControls(
     // A single frosted dock keeps the controls grouped and readable over video.
     Row(
         modifier = Modifier
-            .background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(40.dp))
-            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(40.dp))
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+            .background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(44.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(44.dp))
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         CallControl(

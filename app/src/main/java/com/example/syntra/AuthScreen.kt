@@ -1,5 +1,15 @@
 package com.example.syntra
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -13,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,13 +37,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mail
-import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -47,11 +57,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -61,12 +74,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
+import com.example.syntra.ui.theme.NexusRing
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
@@ -76,49 +91,51 @@ import kotlinx.coroutines.launch
 /** Which pane of the auth flow is showing. */
 private enum class AuthMode { WELCOME, LOGIN, REGISTER }
 
-/** How the user identifies themselves when logging in. */
-private enum class LoginMethod { EMAIL, PHONE }
-
 private val ErrorRed = Color(0xFFFF6B6B)
 private val OkGreen = Color(0xFF23C55E)
 
+// Shared palette for the auth surface — kept here so every pane matches.
+private val AuthTopColor = Color(0xFF17132A)
+private val AuthMidColor = Color(0xFF121019)
+private val AuthBottomColor = Color(0xFF0B0B11)
+private val FieldFill = Color(0xFF15151E)
+
 /**
- * Gate shown when nobody is signed in. Calls [onAuthenticated] once a session exists,
- * which lets [SyntraApp] swap in the real app.
+ * Gate shown when nobody is signed in. Calls [onAuthenticated] once a session
+ * exists, which lets [SyntraApp] swap in the real app.
  */
 @Composable
-fun AuthScreen(onAuthenticated: () -> Unit) {
-    var mode by remember { mutableStateOf(AuthMode.WELCOME) }
+fun AuthScreen(onAuthenticated: () -> Unit, notice: String? = null) {
+    // A deletion/expiry notice drops the user straight onto the login pane so the
+    // reason is visible immediately, rather than the welcome splash.
+    var mode by remember { mutableStateOf(if (notice != null) AuthMode.LOGIN else AuthMode.WELCOME) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color(0xFF1B1430), Color(0xFF141021), Color(0xFF0E0E14)),
-                ),
-            ),
-    ) {
-        when (mode) {
-            AuthMode.WELCOME -> WelcomePane(
-                onLogin = { mode = AuthMode.LOGIN },
-                onRegister = { mode = AuthMode.REGISTER },
-            )
-            AuthMode.LOGIN -> CredentialsPane(
-                register = false,
-                onBack = { mode = AuthMode.WELCOME },
-                onSwap = { mode = AuthMode.REGISTER },
-                onAuthenticated = onAuthenticated,
-            )
-            AuthMode.REGISTER -> CredentialsPane(
-                register = true,
-                onBack = { mode = AuthMode.WELCOME },
-                onSwap = { mode = AuthMode.LOGIN },
-                onAuthenticated = onAuthenticated,
-            )
+    Box(modifier = Modifier.fillMaxSize().authBackground()) {
+        Crossfade(targetState = mode, animationSpec = tween(280), label = "auth-mode") { m ->
+            when (m) {
+                AuthMode.WELCOME -> WelcomePane(
+                    onLogin = { mode = AuthMode.LOGIN },
+                    onRegister = { mode = AuthMode.REGISTER },
+                )
+                AuthMode.LOGIN -> LoginPane(
+                    onBack = { mode = AuthMode.WELCOME },
+                    onSwap = { mode = AuthMode.REGISTER },
+                    onAuthenticated = onAuthenticated,
+                    notice = if (mode == AuthMode.LOGIN) notice else null,
+                )
+                AuthMode.REGISTER -> RegisterWizard(
+                    onBack = { mode = AuthMode.WELCOME },
+                    onSwap = { mode = AuthMode.LOGIN },
+                    onAuthenticated = onAuthenticated,
+                )
+            }
         }
     }
 }
+
+/** The dark gradient + soft accent glow behind every auth pane. */
+private fun Modifier.authBackground(): Modifier = this
+    .background(Brush.verticalGradient(listOf(AuthTopColor, AuthMidColor, AuthBottomColor)))
 
 // ---------------------------------------------------------------------------
 // Welcome
@@ -134,37 +151,37 @@ private fun WelcomePane(onLogin: () -> Unit, onRegister: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Spacer(Modifier.height(24.dp))
-        LogoMark(size = 104.dp)
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(20.dp))
+        GlowingLogo(size = 108.dp)
+        Spacer(Modifier.height(30.dp))
         Text(
             text = "Syntra",
             style = TextStyle(brush = Brush.horizontalGradient(listOf(Color(0xFFB79CFF), Color(0xFF6E8BFF)))),
-            fontSize = 36.sp,
+            fontSize = 40.sp,
             fontWeight = FontWeight.ExtraBold,
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            text = "Chat, status, voice room, dan panggilan\ndalam satu aplikasi.",
+            text = "Chat, status, voice room, dan panggilan —\nsemua dalam satu aplikasi realtime.",
             color = NexusTextSecondary,
             fontSize = 15.sp,
-            lineHeight = 22.sp,
+            lineHeight = 23.sp,
             textAlign = TextAlign.Center,
         )
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(26.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            FeatureChip("Terenkripsi")
             FeatureChip("Realtime")
+            FeatureChip("Aman")
             FeatureChip("Gratis")
         }
-        Spacer(Modifier.height(40.dp))
+        Spacer(Modifier.height(44.dp))
         PrimaryButton("Masuk", onClick = onLogin)
         Spacer(Modifier.height(12.dp))
-        SecondaryButton("Daftar akun baru", onClick = onRegister)
-        Spacer(Modifier.height(24.dp))
+        SecondaryButton("Buat akun baru", onClick = onRegister)
+        Spacer(Modifier.height(26.dp))
         Text(
-            text = "Dengan melanjutkan kamu menyetujui Ketentuan Layanan dan Kebijakan Privasi.",
-            color = NexusTextSecondary.copy(alpha = 0.7f),
+            text = "Dengan melanjutkan, kamu menyetujui Ketentuan Layanan\ndan Kebijakan Privasi Syntra.",
+            color = NexusTextSecondary.copy(alpha = 0.65f),
             fontSize = 11.sp,
             lineHeight = 16.sp,
             textAlign = TextAlign.Center,
@@ -182,84 +199,52 @@ private fun FeatureChip(text: String) {
         modifier = Modifier
             .background(Color.White.copy(alpha = 0.05f), CircleShape)
             .border(1.dp, NexusStroke, CircleShape)
-            .padding(horizontal = 14.dp, vertical = 7.dp),
+            .padding(horizontal = 15.dp, vertical = 7.dp),
     )
 }
 
 // ---------------------------------------------------------------------------
-// Login / Register form
+// Login
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun CredentialsPane(
-    register: Boolean,
+private fun LoginPane(
     onBack: () -> Unit,
     onSwap: () -> Unit,
     onAuthenticated: () -> Unit,
+    notice: String? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val focus = LocalFocusManager.current
 
-    var fullName by remember { mutableStateOf("") }
-    var username by remember { mutableStateOf("") }
-    var phone by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var confirm by remember { mutableStateOf("") }
-    var loginMethod by remember { mutableStateOf(LoginMethod.EMAIL) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    // Phone auth isn't wired on the backend yet, so that path stays inert.
-    val emailFlow = register || loginMethod == LoginMethod.EMAIL
-
-    fun validate(): String? {
-        if (register && fullName.isBlank()) return "Isi nama lengkap kamu."
-        if (register) {
-            val u = username.trim()
-            if (u.isBlank()) return "Isi nama pengguna."
-            if (u.length < 3) return "Nama pengguna minimal 3 karakter."
-            if (u.any { it.isWhitespace() }) return "Nama pengguna tidak boleh mengandung spasi."
-        }
-        if (email.isBlank()) return "Isi alamat email."
-        if (!android.util.Patterns.EMAIL_ADDRESS.matcher(email.trim()).matches()) {
-            return "Format email tidak valid."
-        }
-        if (password.isBlank()) return "Isi kata sandi."
-        if (password.length < 6) return "Kata sandi minimal 6 karakter."
-        if (register && confirm != password) return "Konfirmasi kata sandi tidak cocok."
-        return null
-    }
-
     fun submit() {
-        if (!emailFlow) {
-            error = "Login dengan nomor HP segera hadir. Untuk sekarang, gunakan email."
-            return
+        focus.clearFocus()
+        error = when {
+            email.isBlank() -> "Isi alamat email."
+            !android.util.Patterns.EMAIL_ADDRESS.matcher(email.trim()).matches() -> "Format email tidak valid."
+            password.isBlank() -> "Isi kata sandi."
+            else -> null
         }
-        error = validate()
         if (error != null) return
         busy = true
         scope.launch {
             val result = runCatching {
                 if (!ApiConfig.ENABLED) {
-                    // No backend configured: accept the input and continue offline.
                     SessionStore.markSignedIn(context, email.trim())
                 } else {
-                    if (register) {
-                        // Backend takes display_name straight in register (api.md §1),
-                        // so no follow-up PATCH is needed. Phone is collected but not
-                        // sent — the server has no field for it yet.
-                        SyntraClient.register(email.trim(), password, username.trim(), fullName.trim())
-                    } else {
-                        SyntraClient.loginWith(email.trim(), password)
-                    }
+                    SyntraClient.loginWith(email.trim(), password)
                     SessionStore.markSignedIn(context, email.trim(), SyntraClient.currentRefreshToken)
                 }
             }
             busy = false
-            result
-                .onSuccess { onAuthenticated() }
-                .onFailure { error = it.message ?: "Gagal, coba lagi." }
+            result.onSuccess { onAuthenticated() }
+                .onFailure { error = it.message ?: "Gagal masuk, coba lagi." }
         }
     }
 
@@ -268,201 +253,306 @@ private fun CredentialsPane(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .imePadding()
-            .padding(horizontal = 28.dp, vertical = 40.dp),
+            .padding(horizontal = 28.dp, vertical = 36.dp),
     ) {
-        // Back + compact logo header
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(Color.White.copy(alpha = 0.05f), CircleShape)
-                    .border(1.dp, NexusStroke, CircleShape)
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                        onClick = onBack,
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Kembali",
-                    tint = NexusTextPrimary,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            Spacer(Modifier.weight(1f))
-            LogoMark(size = 40.dp, corner = 12.dp)
-        }
+        AuthHeader(onBack = onBack)
 
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(30.dp))
+        Text("Selamat datang kembali", color = NexusTextPrimary, fontSize = 27.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
         Text(
-            text = if (register) "Buat akun baru" else "Masuk ke Syntra",
-            color = NexusTextPrimary,
-            fontSize = 28.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = if (register) "Lengkapi data di bawah untuk mulai memakai Syntra."
-            else "Selamat datang kembali, senang melihatmu lagi.",
+            "Masuk untuk melanjutkan percakapanmu di Syntra.",
             color = NexusTextSecondary,
             fontSize = 14.sp,
             lineHeight = 20.sp,
         )
-        Spacer(Modifier.height(24.dp))
 
-        // Login can be by email or phone; register always uses email.
-        if (!register) {
-            LoginMethodToggle(
-                selected = loginMethod,
-                onSelect = { loginMethod = it; error = null },
-            )
-            Spacer(Modifier.height(22.dp))
-        }
-
-        if (register) {
-            AuthField(
-                label = "Nama lengkap",
-                value = fullName,
-                onValueChange = { fullName = it; error = null },
-                placeholder = "mis. Budi Santoso",
-                icon = Icons.Filled.Badge,
-                keyboardType = KeyboardType.Text,
-            )
-            Spacer(Modifier.height(16.dp))
-            AuthField(
-                label = "Nama pengguna",
-                value = username,
-                onValueChange = { username = it.filterNot { c -> c.isWhitespace() }; error = null },
-                placeholder = "mis. budi",
-                icon = Icons.Filled.AlternateEmail,
-                keyboardType = KeyboardType.Text,
-                helper = "Unik, tanpa spasi. Dipakai orang lain untuk menemukanmu.",
-            )
-            Spacer(Modifier.height(16.dp))
-        }
-
-        if (emailFlow) {
-            AuthField(
-                label = "Email",
-                value = email,
-                onValueChange = { email = it; error = null },
-                placeholder = "nama@email.com",
-                icon = Icons.Filled.Mail,
-                keyboardType = KeyboardType.Email,
-            )
-        } else {
-            // Phone login: the field is shown for readiness but stays inert.
-            AuthField(
-                label = "Nomor HP",
-                value = phone,
-                onValueChange = { phone = it.filter { c -> c.isDigit() || c == '+' } },
-                placeholder = "mis. 0812xxxxxxx",
-                icon = Icons.Filled.Phone,
-                keyboardType = KeyboardType.Phone,
-            )
-            Spacer(Modifier.height(12.dp))
-            InfoBanner("Login dengan nomor HP segera hadir. Untuk sekarang, silakan masuk memakai email.")
-        }
-
-        if (register) {
-            Spacer(Modifier.height(16.dp))
-            AuthField(
-                label = "Nomor HP (opsional)",
-                value = phone,
-                onValueChange = { phone = it.filter { c -> c.isDigit() || c == '+' }; error = null },
-                placeholder = "mis. 0812xxxxxxx",
-                icon = Icons.Filled.Phone,
-                keyboardType = KeyboardType.Phone,
-                helper = "Segera hadir — belum disimpan untuk saat ini.",
-            )
-        }
-
-        if (emailFlow) {
-            Spacer(Modifier.height(16.dp))
-            AuthField(
-                label = "Kata sandi",
-                value = password,
-                onValueChange = { password = it; error = null },
-                placeholder = "Minimal 6 karakter",
-                icon = Icons.Filled.Lock,
-                keyboardType = KeyboardType.Password,
-                isPassword = true,
-                imeAction = if (register) ImeAction.Next else ImeAction.Done,
-                onImeAction = { if (!register) submit() },
-            )
-        }
-        if (register) {
-            Spacer(Modifier.height(16.dp))
-            AuthField(
-                label = "Konfirmasi kata sandi",
-                value = confirm,
-                onValueChange = { confirm = it; error = null },
-                placeholder = "Ulangi kata sandi",
-                icon = Icons.Filled.CheckCircle,
-                keyboardType = KeyboardType.Password,
-                isPassword = true,
-                imeAction = ImeAction.Done,
-                onImeAction = { submit() },
-                trailingOk = confirm.isNotEmpty() && confirm == password,
-            )
-        }
-
-        error?.let {
-            Spacer(Modifier.height(16.dp))
+        if (notice != null) {
+            Spacer(Modifier.height(18.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(ErrorRed.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                    .background(NexusAccent.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+                    .border(1.dp, NexusAccent.copy(alpha = 0.30f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(it, color = ErrorRed, fontSize = 13.sp, lineHeight = 18.sp)
+                Text(notice, color = NexusTextPrimary, fontSize = 13.sp, lineHeight = 18.sp)
             }
         }
 
-        Spacer(Modifier.height(28.dp))
-        PrimaryButton(
-            text = if (register) "Daftar" else "Masuk",
-            busy = busy,
-            enabled = emailFlow,
-            onClick = { submit() },
+        Spacer(Modifier.height(30.dp))
+        AuthField(
+            label = "Email",
+            value = email,
+            onValueChange = { email = it; error = null },
+            placeholder = "nama@email.com",
+            icon = Icons.Filled.Mail,
+            keyboardType = KeyboardType.Email,
+            imeAction = ImeAction.Next,
+        )
+        Spacer(Modifier.height(16.dp))
+        AuthField(
+            label = "Kata sandi",
+            value = password,
+            onValueChange = { password = it; error = null },
+            placeholder = "Masukkan kata sandi",
+            icon = Icons.Filled.Lock,
+            keyboardType = KeyboardType.Password,
+            isPassword = true,
+            imeAction = ImeAction.Done,
+            onImeAction = { submit() },
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = "Lupa kata sandi?",
+            color = NexusAccentSoft,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.End,
+            modifier = Modifier.fillMaxWidth(),
         )
 
-        if (register) {
-            Spacer(Modifier.height(14.dp))
-            Text(
-                text = "Dengan mendaftar kamu menyetujui Ketentuan Layanan dan Kebijakan Privasi Syntra.",
-                color = NexusTextSecondary.copy(alpha = 0.7f),
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
+        ErrorBanner(error)
+
+        Spacer(Modifier.height(26.dp))
+        PrimaryButton(text = "Masuk", busy = busy, onClick = { submit() })
+
+        Spacer(Modifier.height(22.dp))
+        SwapRow(prompt = "Belum punya akun?", action = "Daftar", onClick = onSwap)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Register — step-by-step wizard
+// ---------------------------------------------------------------------------
+
+private enum class RegStep { IDENTITY, EMAIL, SECURITY }
+
+@Composable
+private fun RegisterWizard(onBack: () -> Unit, onSwap: () -> Unit, onAuthenticated: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val focus = LocalFocusManager.current
+
+    var step by remember { mutableStateOf(RegStep.IDENTITY) }
+    var fullName by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun validate(target: RegStep): String? = when (target) {
+        RegStep.IDENTITY -> {
+            val u = username.trim()
+            when {
+                fullName.isBlank() -> "Isi nama lengkap kamu."
+                u.isBlank() -> "Isi nama pengguna."
+                u.length < 3 -> "Nama pengguna minimal 3 karakter."
+                !u.first().isLetter() -> "Nama pengguna harus diawali huruf."
+                else -> null
+            }
+        }
+        RegStep.EMAIL -> when {
+            email.isBlank() -> "Isi alamat email."
+            !android.util.Patterns.EMAIL_ADDRESS.matcher(email.trim()).matches() -> "Format email tidak valid."
+            else -> null
+        }
+        RegStep.SECURITY -> when {
+            password.isBlank() -> "Isi kata sandi."
+            password.length < 6 -> "Kata sandi minimal 6 karakter."
+            confirm != password -> "Konfirmasi kata sandi tidak cocok."
+            else -> null
+        }
+    }
+
+    fun goBack() {
+        error = null
+        focus.clearFocus()
+        when (step) {
+            RegStep.IDENTITY -> onBack()
+            RegStep.EMAIL -> step = RegStep.IDENTITY
+            RegStep.SECURITY -> step = RegStep.EMAIL
+        }
+    }
+
+    fun submit() {
+        focus.clearFocus()
+        error = validate(RegStep.SECURITY)
+        if (error != null) return
+        busy = true
+        scope.launch {
+            val result = runCatching {
+                if (!ApiConfig.ENABLED) {
+                    SessionStore.markSignedIn(context, email.trim())
+                } else {
+                    SyntraClient.register(email.trim(), password, username.trim(), fullName.trim())
+                    // If email confirmation is required, register returns no session.
+                    // Try logging straight in — this succeeds when confirmation is
+                    // disabled or the account auto-confirms.
+                    if (!SyntraClient.hasSession) {
+                        runCatching { SyntraClient.loginWith(email.trim(), password) }
+                    }
+                    if (SyntraClient.hasSession) {
+                        SessionStore.markSignedIn(context, email.trim(), SyntraClient.currentRefreshToken)
+                    } else {
+                        throw IllegalStateException(
+                            "Akun berhasil dibuat. Konfirmasi lewat email yang kami kirim, lalu masuk.",
+                        )
+                    }
+                }
+            }
+            busy = false
+            result.onSuccess { onAuthenticated() }
+                .onFailure { error = it.message ?: "Pendaftaran gagal, coba lagi." }
+        }
+    }
+
+    fun advance() {
+        error = validate(step)
+        if (error != null) return
+        focus.clearFocus()
+        when (step) {
+            RegStep.IDENTITY -> step = RegStep.EMAIL
+            RegStep.EMAIL -> step = RegStep.SECURITY
+            RegStep.SECURITY -> submit()
+        }
+    }
+
+    val subtitle = when (step) {
+        RegStep.IDENTITY -> "Kenalkan dirimu. Nama pengguna dipakai orang lain untuk menemukanmu."
+        RegStep.EMAIL -> "Email dipakai untuk masuk dan mengamankan akunmu."
+        RegStep.SECURITY -> "Buat kata sandi yang kuat untuk mengunci akunmu."
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .imePadding()
+            .padding(horizontal = 28.dp, vertical = 36.dp),
+    ) {
+        AuthHeader(onBack = { goBack() })
+
+        Spacer(Modifier.height(26.dp))
+        StepIndicator(current = step.ordinal, total = RegStep.entries.size)
+
+        Spacer(Modifier.height(24.dp))
+        Text("Buat akun Syntra", color = NexusTextPrimary, fontSize = 27.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text("Langkah ${step.ordinal + 1} dari ${RegStep.entries.size}", color = NexusAccentSoft, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        Text(subtitle, color = NexusTextSecondary, fontSize = 14.sp, lineHeight = 20.sp)
+
+        Spacer(Modifier.height(26.dp))
+        AnimatedContent(
+            targetState = step,
+            transitionSpec = {
+                val forward = targetState.ordinal >= initialState.ordinal
+                val dir = if (forward) 1 else -1
+                (slideInHorizontally(tween(320)) { w -> dir * w } + fadeIn(tween(320))) togetherWith
+                    (slideOutHorizontally(tween(320)) { w -> -dir * w } + fadeOut(tween(220)))
+            },
+            label = "reg-step",
+        ) { current ->
+            Column {
+                when (current) {
+                    RegStep.IDENTITY -> {
+                        AuthField(
+                            label = "Nama lengkap",
+                            value = fullName,
+                            onValueChange = { fullName = it; error = null },
+                            placeholder = "mis. Budi Santoso",
+                            icon = Icons.Filled.Badge,
+                            imeAction = ImeAction.Next,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        AuthField(
+                            label = "Nama pengguna",
+                            value = username,
+                            onValueChange = { v -> username = v.filterNot { it.isWhitespace() }.lowercase(); error = null },
+                            placeholder = "mis. budi",
+                            icon = Icons.Filled.AlternateEmail,
+                            helper = "Huruf kecil, angka, titik, garis bawah. Diawali huruf.",
+                            imeAction = ImeAction.Done,
+                            onImeAction = { advance() },
+                        )
+                    }
+                    RegStep.EMAIL -> {
+                        AuthField(
+                            label = "Email",
+                            value = email,
+                            onValueChange = { email = it; error = null },
+                            placeholder = "nama@email.com",
+                            icon = Icons.Filled.Mail,
+                            keyboardType = KeyboardType.Email,
+                            imeAction = ImeAction.Done,
+                            onImeAction = { advance() },
+                        )
+                    }
+                    RegStep.SECURITY -> {
+                        AuthField(
+                            label = "Kata sandi",
+                            value = password,
+                            onValueChange = { password = it; error = null },
+                            placeholder = "Minimal 6 karakter",
+                            icon = Icons.Filled.Lock,
+                            keyboardType = KeyboardType.Password,
+                            isPassword = true,
+                            imeAction = ImeAction.Next,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        AuthField(
+                            label = "Konfirmasi kata sandi",
+                            value = confirm,
+                            onValueChange = { confirm = it; error = null },
+                            placeholder = "Ulangi kata sandi",
+                            icon = Icons.Filled.CheckCircle,
+                            keyboardType = KeyboardType.Password,
+                            isPassword = true,
+                            imeAction = ImeAction.Done,
+                            onImeAction = { advance() },
+                            trailingOk = confirm.isNotEmpty() && confirm == password,
+                        )
+                    }
+                }
+            }
         }
 
-        Spacer(Modifier.height(20.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-        ) {
-            Text(
-                text = if (register) "Sudah punya akun?" else "Belum punya akun?",
-                color = NexusTextSecondary,
-                fontSize = 13.sp,
+        ErrorBanner(error)
+
+        Spacer(Modifier.height(26.dp))
+        PrimaryButton(
+            text = if (step == RegStep.SECURITY) "Daftar" else "Lanjut",
+            busy = busy,
+            trailingArrow = step != RegStep.SECURITY,
+            onClick = { advance() },
+        )
+
+        Spacer(Modifier.height(22.dp))
+        SwapRow(prompt = "Sudah punya akun?", action = "Masuk", onClick = onSwap)
+    }
+}
+
+/** Segmented progress bar for the register wizard. */
+@Composable
+private fun StepIndicator(current: Int, total: Int) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        repeat(total) { i ->
+            val active = i <= current
+            val color by animateColorAsState(
+                targetValue = if (active) NexusAccentSoft else NexusStroke,
+                animationSpec = tween(300),
+                label = "seg-$i",
             )
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text = if (register) "Masuk" else "Daftar",
-                color = NexusAccentSoft,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                    onClick = onSwap,
-                ),
+            Box(
+                Modifier
+                    .weight(1f)
+                    .height(5.dp)
+                    .clip(CircleShape)
+                    .background(color),
             )
         }
     }
@@ -472,54 +562,153 @@ private fun CredentialsPane(
 // Splash (shown while the session is being restored)
 // ---------------------------------------------------------------------------
 
-/** Branded loading screen so app start never shows a blank dark rectangle. */
+/**
+ * Minimal startup screen: four brand tiles start scattered and snap together
+ * one by one — a quiet "assemble" — then the wordmark fades in. No spinner, no
+ * copy; just the mark forming. Simple, modern, professional.
+ */
 @Composable
 fun AuthSplash() {
+    // 2×2 tiles. Each starts offset + faded, then eases into place in sequence.
+    val tileColors = listOf(
+        Color(0xFFB79CFF), Color(0xFF8E9DFF),
+        Color(0xFF6E8BFF), Color(0xFF3B68F5),
+    )
+    // Final positions relative to centre (in dp), and the scattered start offsets.
+    val finals = listOf(
+        (-18).dp to (-18).dp, 18.dp to (-18).dp,
+        (-18).dp to 18.dp, 18.dp to 18.dp,
+    )
+    val starts = listOf(
+        (-160).dp to (-120).dp, 150.dp to (-140).dp,
+        (-140).dp to 150.dp, 160.dp to 130.dp,
+    )
+
+    val progress = remember { List(4) { androidx.compose.animation.core.Animatable(0f) } }
+    var showWord by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        progress.forEachIndexed { i, anim ->
+            launch {
+                kotlinx.coroutines.delay(i * 130L)
+                anim.animateTo(1f, tween(480, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+            }
+        }
+        kotlinx.coroutines.delay(4 * 130L + 400L)
+        showWord = true
+    }
+
+    // Once assembled, a gentle breathing pulse keeps the mark alive for however
+    // long the session restore actually takes — so the splash stays useful during
+    // loading instead of freezing.
+    val pulseTransition = androidx.compose.animation.core.rememberInfiniteTransition(label = "splash-pulse")
+    val pulse by pulseTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.06f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            tween(900, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            androidx.compose.animation.core.RepeatMode.Reverse,
+        ),
+        label = "pulse",
+    )
+
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color(0xFF1B1430), Color(0xFF141021), Color(0xFF0E0E14)),
-                ),
-            ),
+        modifier = Modifier.fillMaxSize().authBackground(),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            LogoMark(size = 96.dp)
-            Spacer(Modifier.height(22.dp))
-            Text(
-                text = "Syntra",
-                style = TextStyle(brush = Brush.horizontalGradient(listOf(Color(0xFFB79CFF), Color(0xFF6E8BFF)))),
-                fontSize = 30.sp,
-                fontWeight = FontWeight.ExtraBold,
-            )
-            Spacer(Modifier.height(24.dp))
-            CircularProgressIndicator(
-                color = NexusAccentSoft,
-                strokeWidth = 2.5.dp,
-                modifier = Modifier.size(26.dp),
-            )
-            Spacer(Modifier.height(14.dp))
-            Text("Menyiapkan Syntra…", color = NexusTextSecondary, fontSize = 13.sp)
+            Box(modifier = Modifier.size(120.dp), contentAlignment = Alignment.Center) {
+                progress.forEachIndexed { i, anim ->
+                    val t = anim.value
+                    val (fx, fy) = finals[i]
+                    val (sx, sy) = starts[i]
+                    val x = androidx.compose.ui.unit.lerp(sx, fx, t)
+                    val y = androidx.compose.ui.unit.lerp(sy, fy, t)
+                    // Breathing pulse applies only once assembled (t == 1).
+                    val p = if (t >= 1f) pulse else (0.6f + 0.4f * t)
+                    Box(
+                        modifier = Modifier
+                            .offset(x = x, y = y)
+                            .size(34.dp)
+                            .graphicsLayer {
+                                alpha = t
+                                rotationZ = (1f - t) * 45f
+                                scaleX = p
+                                scaleY = p
+                            }
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(tileColors[i]),
+                    )
+                }
+            }
+            Spacer(Modifier.height(30.dp))
+            androidx.compose.animation.AnimatedVisibility(
+                visible = showWord,
+                enter = fadeIn(tween(360)),
+            ) {
+                Text(
+                    text = "Syntra",
+                    style = TextStyle(brush = Brush.horizontalGradient(listOf(Color(0xFFB79CFF), Color(0xFF6E8BFF)))),
+                    fontSize = 30.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                )
+            }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Pieces
+// Shared pieces
 // ---------------------------------------------------------------------------
 
-/** The Syntra brand tile, used at various sizes across the auth flow. */
+/** Back button + compact brand mark, shared by login & register. */
 @Composable
-private fun LogoMark(size: androidx.compose.ui.unit.Dp, corner: androidx.compose.ui.unit.Dp = 28.dp) {
+private fun AuthHeader(onBack: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .background(Color.White.copy(alpha = 0.05f), CircleShape)
+                .border(1.dp, NexusStroke, CircleShape)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onBack,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Kembali",
+                tint = NexusTextPrimary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        Spacer(Modifier.weight(1f))
+        LogoMark(size = 42.dp, corner = 13.dp)
+    }
+}
+
+/** The Syntra brand tile. */
+@Composable
+private fun LogoMark(size: Dp, corner: Dp = 28.dp) {
     Image(
         painter = painterResource(R.drawable.ic_syntra_logo),
         contentDescription = "Logo Syntra",
-        modifier = Modifier
-            .size(size)
-            .clip(RoundedCornerShape(corner)),
+        modifier = Modifier.size(size).clip(RoundedCornerShape(corner)),
     )
+}
+
+/** Logo with a soft accent halo behind it, for hero moments. */
+@Composable
+private fun GlowingLogo(size: Dp) {
+    Box(contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(size + 56.dp)
+                .background(Brush.radialGradient(listOf(NexusRing.copy(alpha = 0.28f), Color.Transparent)), CircleShape),
+        )
+        LogoMark(size = size, corner = size / 3.6f)
+    }
 }
 
 @Composable
@@ -537,10 +726,16 @@ private fun AuthField(
     trailingOk: Boolean = false,
 ) {
     var revealed by remember { mutableStateOf(false) }
+    var focused by remember { mutableStateOf(false) }
+    val borderColor by animateColorAsState(
+        targetValue = if (focused) NexusAccentSoft else NexusStroke,
+        animationSpec = tween(180),
+        label = "field-border",
+    )
     Column {
         Text(
             text = label,
-            color = NexusTextSecondary,
+            color = if (focused) NexusAccentSoft else NexusTextSecondary,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
@@ -548,16 +743,16 @@ private fun AuthField(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(16.dp))
-                .border(1.dp, NexusStroke, RoundedCornerShape(16.dp))
-                .padding(horizontal = 16.dp, vertical = 15.dp),
+                .background(FieldFill, RoundedCornerShape(16.dp))
+                .border(1.5.dp, borderColor, RoundedCornerShape(16.dp))
+                .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(icon, null, tint = NexusTextSecondary, modifier = Modifier.size(20.dp))
+            Icon(icon, null, tint = if (focused) NexusAccentSoft else NexusTextSecondary, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(12.dp))
             Box(modifier = Modifier.weight(1f)) {
                 if (value.isEmpty()) {
-                    Text(placeholder, color = NexusTextSecondary.copy(alpha = 0.7f), fontSize = 15.sp)
+                    Text(placeholder, color = NexusTextSecondary.copy(alpha = 0.6f), fontSize = 15.sp)
                 }
                 BasicTextField(
                     value = value,
@@ -566,16 +761,11 @@ private fun AuthField(
                     textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
                     cursorBrush = SolidColor(NexusAccentSoft),
                     keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
-                    keyboardActions = KeyboardActions(
-                        onDone = { onImeAction() },
-                        onGo = { onImeAction() },
-                    ),
-                    visualTransformation = if (isPassword && !revealed) {
-                        PasswordVisualTransformation()
-                    } else {
-                        VisualTransformation.None
-                    },
-                    modifier = Modifier.fillMaxWidth(),
+                    keyboardActions = KeyboardActions(onDone = { onImeAction() }, onGo = { onImeAction() }),
+                    visualTransformation = if (isPassword && !revealed) PasswordVisualTransformation() else VisualTransformation.None,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { focused = it.isFocused },
                 )
             }
             if (isPassword) {
@@ -594,12 +784,7 @@ private fun AuthField(
                 )
             } else if (trailingOk) {
                 Spacer(Modifier.width(8.dp))
-                Icon(
-                    Icons.Filled.CheckCircle,
-                    contentDescription = null,
-                    tint = OkGreen,
-                    modifier = Modifier.size(20.dp),
-                )
+                Icon(Icons.Filled.CheckCircle, null, tint = OkGreen, modifier = Modifier.size(20.dp))
             }
         }
         if (helper != null) {
@@ -615,10 +800,27 @@ private fun AuthField(
 }
 
 @Composable
+private fun ErrorBanner(error: String?) {
+    if (error == null) return
+    Spacer(Modifier.height(16.dp))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ErrorRed.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+            .border(1.dp, ErrorRed.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(error, color = ErrorRed, fontSize = 13.sp, lineHeight = 18.sp)
+    }
+}
+
+@Composable
 private fun PrimaryButton(
     text: String,
     busy: Boolean = false,
     enabled: Boolean = true,
+    trailingArrow: Boolean = false,
     onClick: () -> Unit,
 ) {
     Box(
@@ -639,92 +841,26 @@ private fun PrimaryButton(
         contentAlignment = Alignment.Center,
     ) {
         if (busy) {
-            CircularProgressIndicator(
-                color = Color.White,
-                strokeWidth = 2.dp,
-                modifier = Modifier.size(22.dp),
-            )
+            CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
         } else {
-            Text(
-                text,
-                color = if (enabled) Color.White else NexusTextSecondary,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-    }
-}
-
-/** Email / phone segmented switch on the login pane. */
-@Composable
-private fun LoginMethodToggle(selected: LoginMethod, onSelect: (LoginMethod) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(16.dp))
-            .border(1.dp, NexusStroke, RoundedCornerShape(16.dp))
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        ToggleSegment("Email", selected == LoginMethod.EMAIL, Modifier.weight(1f)) {
-            onSelect(LoginMethod.EMAIL)
-        }
-        ToggleSegment("Nomor HP", selected == LoginMethod.PHONE, Modifier.weight(1f)) {
-            onSelect(LoginMethod.PHONE)
-        }
-    }
-}
-
-@Composable
-private fun ToggleSegment(
-    text: String,
-    selected: Boolean,
-    modifier: Modifier,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = modifier
-            .height(42.dp)
-            .then(
-                if (selected) {
-                    Modifier.background(
-                        Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)),
-                        RoundedCornerShape(12.dp),
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text,
+                    color = if (enabled) Color.White else NexusTextSecondary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (trailingArrow) {
+                    Spacer(Modifier.width(8.dp))
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(19.dp),
                     )
-                } else {
-                    Modifier
-                },
-            )
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = onClick,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text,
-            color = if (selected) Color.White else NexusTextSecondary,
-            fontSize = 14.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-        )
-    }
-}
-
-/** Small accent-tinted note used for "coming soon" and similar hints. */
-@Composable
-private fun InfoBanner(text: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(NexusAccent.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
-            .border(1.dp, NexusAccent.copy(alpha = 0.30f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.Filled.Info, null, tint = NexusAccentSoft, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(10.dp))
-        Text(text, color = NexusTextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
+                }
+            }
+        }
     }
 }
 
@@ -744,6 +880,26 @@ private fun SecondaryButton(text: String, onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(text, color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** "Sudah punya akun? Masuk" style footer row. */
+@Composable
+private fun SwapRow(prompt: String, action: String, onClick: () -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        Text(prompt, color = NexusTextSecondary, fontSize = 13.sp)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = action,
+            color = NexusAccentSoft,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        )
     }
 }
 

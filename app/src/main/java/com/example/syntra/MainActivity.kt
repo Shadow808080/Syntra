@@ -58,6 +58,9 @@ private fun NexusApp() {
     val context = LocalContext.current
     // null = still deciding, so we don't flash the login screen at a signed-in user.
     var signedIn by remember { mutableStateOf<Boolean?>(null) }
+    // Set when the session was valid but the account no longer exists in the
+    // database (deleted): the login screen shows this as the reason.
+    var deletedNotice by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         val remembered = SessionStore.isSignedIn(context)
@@ -87,6 +90,21 @@ private fun NexusApp() {
                                 else if (attempt < 1) delay(400)
                             }
                     }
+                    // Session refreshed — but a deleted user can still hold a valid
+                    // Supabase token, so confirm the account really exists in the
+                    // database. A 404 means it was deleted: sign out and say why.
+                    if (restored) {
+                        runCatching { SyntraClient.getMyProfile() }
+                            .onFailure { e ->
+                                if ((e as? ApiException)?.code == "not_found") {
+                                    restored = false
+                                    rejected = true
+                                    deletedNotice =
+                                        "Akun Anda telah dihapus. Silakan masuk atau daftar akun baru."
+                                }
+                                // Any other error (network hiccup) keeps the session.
+                            }
+                    }
                     when {
                         restored -> SessionStore.markSignedIn(
                             context,
@@ -104,7 +122,10 @@ private fun NexusApp() {
 
     when (signedIn) {
         null -> AuthSplash()
-        false -> AuthScreen(onAuthenticated = { signedIn = true })
+        false -> AuthScreen(
+            onAuthenticated = { signedIn = true; deletedNotice = null },
+            notice = deletedNotice,
+        )
         true -> MainTabs(onSignOut = { signedIn = false })
     }
 }

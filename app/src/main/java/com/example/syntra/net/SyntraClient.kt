@@ -33,13 +33,17 @@ interface SocketListener {
     fun onMessageNew(message: NetMessage) {}
     fun onPresence(presence: NetPresence) {}
     fun onTyping(conversationId: String, userId: String, typing: Boolean) {}
-    fun onReadReceipt(conversationId: String, messageId: String) {}
+    fun onReadReceipt(conversationId: String, userId: String, messageId: String) {}
     /** A message was deleted for everyone — show it as a "deleted" tombstone. */
     fun onMessageDeleted(conversationId: String, messageId: String) {}
     /** A reaction was added/changed/removed. Empty [emoji] means removed. */
     fun onMessageReaction(conversationId: String, messageId: String, userId: String, emoji: String) {}
     /** A user changed their name/photo — sync it (own devices or a contact). */
     fun onUserUpdated(userId: String, displayName: String, avatarUrl: String?) {}
+    /** Someone liked/unliked a reel — bump the counter live. */
+    fun onReelLike(reelId: String, userId: String, liked: Boolean) {}
+    /** A new comment landed on a reel — bump the count live. */
+    fun onReelComment(reelId: String, userId: String, body: String) {}
     fun onAck(ref: String?, data: Any?) {}
     fun onReconnect() {}
     /** Ephemeral room chat message. */
@@ -147,6 +151,10 @@ object SyntraClient {
                 .put("username", username)
                 .apply { if (!displayName.isNullOrBlank()) put("display_name", displayName) },
             failureMessage = "Pendaftaran gagal",
+            // When the Supabase project requires email confirmation, register
+            // succeeds but returns no session yet. That's not an error — the
+            // caller checks [hasSession] and reacts (auto-login or "check email").
+            allowNoToken = true,
         )
     }
 
@@ -163,7 +171,12 @@ object SyntraClient {
     }
 
     /** Shared shape for the three auth endpoints; stores the resulting session. */
-    private fun authRequest(path: String, payload: JSONObject, failureMessage: String) {
+    private fun authRequest(
+        path: String,
+        payload: JSONObject,
+        failureMessage: String,
+        allowNoToken: Boolean = false,
+    ) {
         val req = Request.Builder()
             .url(rest(path))
             .post(payload.toString().toRequestBody(JSON))
@@ -182,12 +195,17 @@ object SyntraClient {
             if (!resp.isSuccessful) throw ApiException("unauthorized", failureMessage)
 
             val data = root.optJSONObject("data") ?: root
-            jwt = data.optString("access_token", "").ifBlank {
-                throw ApiException("internal", "Server tidak mengirim access_token")
-            }
-            refreshToken = data.optString("refresh_token", null)
+            val token = data.optString("access_token", "")
             myUserId = data.optJSONObject("user")?.optString("id")
                 ?: data.optString("user_id", null)
+            if (token.isBlank()) {
+                // Register with email confirmation on: account created, no session
+                // yet. Not an error — leave jwt null and let the caller decide.
+                if (allowNoToken) return
+                throw ApiException("internal", "Server tidak mengirim access_token")
+            }
+            jwt = token
+            refreshToken = data.optString("refresh_token", null)
         }
     }
 
@@ -283,11 +301,12 @@ object SyntraClient {
         conversationId: String,
         body: String,
         mediaIds: List<String> = emptyList(),
+        replyToId: String? = null,
     ): NetMessage {
         val payload = JSONObject()
             .put("type", if (mediaIds.isEmpty()) "text" else "media")
             .put("body", body)
-            .put("reply_to_id", JSONObject.NULL)
+            .put("reply_to_id", replyToId ?: JSONObject.NULL)
         if (mediaIds.isNotEmpty()) payload.put("media_ids", JSONArray(mediaIds))
         return (postData("/api/v1/conversations/$conversationId/messages", payload) as JSONObject).toMessage()
     }
@@ -393,6 +412,12 @@ object SyntraClient {
             )
         }
 
+    /** Search/discover users by username or display name. Blank query = suggestions. */
+    suspend fun searchUsers(query: String): List<NetUser> {
+        val q = java.net.URLEncoder.encode(query, "UTF-8")
+        return (getData("/api/v1/users/search?q=$q") as JSONArray).mapObjects { it.toUser() }
+    }
+
     suspend fun getUser(username: String): NetUser =
         (getData("/api/v1/users/$username") as JSONObject).toUser()
 
@@ -411,10 +436,12 @@ object SyntraClient {
     suspend fun updateProfile(
         displayName: String? = null,
         avatarMediaId: String? = null,
+        username: String? = null,
     ): NetUser = withContext(Dispatchers.IO) {
         val payload = JSONObject()
         if (displayName != null) payload.put("display_name", displayName)
         if (avatarMediaId != null) payload.put("avatar_media_id", avatarMediaId)
+        if (username != null) payload.put("username", username)
         val data = patchData("/api/v1/users/me", payload) as JSONObject
         NetUser(
             id = data.optString("id", ""),
@@ -471,6 +498,7 @@ object SyntraClient {
             viewCount = optInt("view_count", 0),
             isLiked = optBoolean("liked", optBoolean("is_liked", false)),
             isSaved = optBoolean("saved", optBoolean("is_saved", false)),
+            isFollowing = optBoolean("is_following", false),
         )
     }
 
@@ -479,6 +507,18 @@ object SyntraClient {
 
     suspend fun getReels(): List<NetReel> =
         (getData("/api/v1/reels") as JSONArray).mapObjects { it.toReel() }
+
+    /** My own uploaded shorts — for the profile grid. */
+    suspend fun getMyReels(): List<NetReel> =
+        (getData("/api/v1/reels/me") as JSONArray).mapObjects { it.toReel() }
+
+    /** Shorts I've saved — for the profile "saved" grid. */
+    suspend fun getSavedReels(): List<NetReel> =
+        (getData("/api/v1/reels/saved") as JSONArray).mapObjects { it.toReel() }
+
+    /** Another user's public shorts — for their profile grid. */
+    suspend fun getUserReels(username: String): List<NetReel> =
+        (getData("/api/v1/users/$username/reels") as JSONArray).mapObjects { it.toReel() }
 
     suspend fun postReel(mediaId: String, caption: String): String {
         val data = postData("/api/v1/reels", JSONObject().put("media_id", mediaId).put("caption", caption)) as JSONObject
@@ -867,7 +907,7 @@ object SyntraClient {
                     dispatch { it.onTyping(d.getString("conversation_id"), d.optString("user_id"), true) }
                 }
                 "message.read" -> (data as? JSONObject)?.let { d ->
-                    dispatch { it.onReadReceipt(d.getString("conversation_id"), d.optString("message_id")) }
+                    dispatch { it.onReadReceipt(d.getString("conversation_id"), d.optString("user_id"), d.optString("message_id")) }
                 }
                 "message.deleted" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onMessageDeleted(d.optString("conversation_id"), d.optString("message_id")) }
@@ -890,6 +930,12 @@ object SyntraClient {
                             d.strOrNull("avatar_url"),
                         )
                     }
+                }
+                "reel.like" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onReelLike(d.optString("reel_id"), d.optString("user_id"), d.optBoolean("liked")) }
+                }
+                "reel.comment" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onReelComment(d.optString("reel_id"), d.optString("user_id"), d.optString("body")) }
                 }
                 "room.participants" -> (data as? JSONObject)?.let { d ->
                     val roomId = d.optString("room_id")
@@ -987,6 +1033,7 @@ private fun JSONObject.toConversation() = NetConversation(
     lastPreview = optString("last_message_preview", ""),
     lastType = optString("last_message_type", "text"),
     lastSenderId = strOrNull("last_message_sender_id"),
+    lastMessageId = strOrNull("last_message_id"),
     lastAt = strOrNull("last_message_at"),
     createdAt = strOrNull("created_at"),
     counterpartLastReadId = strOrNull("counterpart_last_read_id"),

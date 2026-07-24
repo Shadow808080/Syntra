@@ -113,6 +113,13 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
     var confirmSignOut by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var open by remember { mutableStateOf<SettingsPage?>(null) }
+    var showMyProfile by remember { mutableStateOf(false) }
+
+    // Tapping the profile card opens the full TikTok-style profile page.
+    if (showMyProfile) {
+        ProfileScreen(username = null, onClose = { showMyProfile = false })
+        return
+    }
 
     // Sub-screens take over the whole surface when open.
     open?.let { page ->
@@ -181,6 +188,7 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                     username = username,
                     email = email,
                     avatarUrl = ProfileStore.avatarUrl(context),
+                    onClick = { showMyProfile = true },
                 )
             }
 
@@ -378,13 +386,19 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun ProfileCard(username: String, email: String, avatarUrl: String?) {
+private fun ProfileCard(username: String, email: String, avatarUrl: String?, onClick: () -> Unit = {}) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(20.dp))
             .background(NexusSurface, RoundedCornerShape(20.dp))
             .border(1.dp, NexusStroke, RoundedCornerShape(20.dp))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -26,6 +26,7 @@ data class NetConversation(
     val lastPreview: String = "",
     val lastType: String = "text",
     val lastSenderId: String? = null,
+    val lastMessageId: String? = null,
     val lastAt: String? = null,
     val createdAt: String? = null,
     /**
@@ -152,6 +153,7 @@ data class NetReel(
     val viewCount: Int = 0,
     val isLiked: Boolean = false,
     val isSaved: Boolean = false,
+    val isFollowing: Boolean = false,
 )
 
 data class NetReelComment(

@@ -44,5 +44,10 @@ class SyntraApp : Application(), ImageLoaderFactory {
             .networkCachePolicy(CachePolicy.ENABLED)
             // Fading every avatar in costs a frame for no real benefit here.
             .crossfade(false)
+            // RGB_565 halves the memory per decoded bitmap (2 bytes/pixel instead
+            // of 4). For avatars, story photos and reel thumbnails the quality
+            // loss is invisible, but the GC pressure — the main cause of the
+            // "heavy when loading images" jank — drops sharply.
+            .allowRgb565(true)
             .build()
 }

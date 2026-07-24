@@ -46,7 +46,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
@@ -100,9 +102,11 @@ import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import com.example.syntra.ui.theme.SyntraTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 // ---------------------------------------------------------------------------
@@ -129,21 +133,61 @@ fun ShortsScreen(
     var commentsFor by remember { mutableStateOf<NetReel?>(null) }
     // Reel the owner asked to delete, pending confirmation.
     var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
+    // Author whose profile is open (tapped their avatar), null = feed.
+    var openProfileUser by remember { mutableStateOf<String?>(null) }
 
     suspend fun reload() {
         if (!ApiConfig.ENABLED) { loading = false; return }
-        runCatching { SyntraClient.getReels() }
-            .onSuccess { list -> reels.clear(); reels.addAll(list) }
-            .onFailure { Toast.makeText(context, "Gagal memuat reels: ${it.message}", Toast.LENGTH_SHORT).show() }
+        try {
+            val list = SyntraClient.getReels()
+            reels.clear()
+            reels.addAll(list)
+        } catch (c: CancellationException) {
+            // Switching tabs cancels this load mid-flight — that's normal, not a
+            // failure. Re-throw so cancellation propagates; DON'T show a toast or
+            // the feed would look "broken" every time you leave and return.
+            throw c
+        } catch (e: Exception) {
+            Toast.makeText(context, "Gagal memuat reels: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
         loading = false
     }
 
     LaunchedEffect(Unit) { reload() }
 
-    // The server has no reel events, so the feed refreshes itself whenever this
-    // tab comes back on screen — new reels show up without pulling to refresh.
     LaunchedEffect(visible) {
         if (visible && !loading) reload()
+    }
+
+    // Realtime: like & comment counters change live for everyone watching a reel.
+    DisposableEffect(Unit) {
+        val listener = object : com.example.syntra.net.SocketListener {
+            override fun onReelLike(reelId: String, userId: String, liked: Boolean) {
+                val i = reels.indexOfFirst { it.id == reelId }
+                if (i < 0) return
+                // Ignore my own action (already applied optimistically).
+                if (userId == SyntraClient.myUserId) return
+                val r = reels[i]
+                reels[i] = r.copy(likeCount = (r.likeCount + if (liked) 1 else -1).coerceAtLeast(0))
+            }
+            override fun onReelComment(reelId: String, userId: String, body: String) {
+                val i = reels.indexOfFirst { it.id == reelId }
+                if (i < 0) return
+                if (userId == SyntraClient.myUserId) return
+                val r = reels[i]
+                reels[i] = r.copy(commentCount = r.commentCount + 1)
+            }
+        }
+        SyntraClient.addListener(listener)
+        onDispose { SyntraClient.removeListener(listener) }
+    }
+
+    // Subscribe to the reel currently on screen so its like/comment events arrive.
+    // (reels:all for new/deleted is handled by the feed reload above.)
+    LaunchedEffect(reels.size) {
+        if (reels.isNotEmpty()) {
+            SyntraClient.subscribe(reels.map { "reel:${it.id}" })
+        }
     }
 
     val pickVideo = rememberLauncherForActivityResult(
@@ -203,18 +247,16 @@ fun ShortsScreen(
                             reel = reel,
                             // Play only the reel in view *and* only while the tab is shown.
                             active = visible && page == pager.currentPage,
-                            // Delete is offered only on my own reels (server: 403 otherwise).
-                            onDelete = if (reel.authorId.isNotBlank() &&
-                                reel.authorId == SyntraClient.myUserId
-                            ) {
-                                { pendingDelete = reel }
-                            } else {
-                                null
-                            },
+                            // Deleting reels lives in Settings › Profil now, not on the
+                            // feed — so no delete affordance here.
+                            onDelete = null,
                             onLike = { toggleLike(reel) },
                             onComment = { commentsFor = reel },
                             onShare = {
                                 Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show()
+                            },
+                            onOpenProfile = {
+                                if (reel.creatorUsername.isNotBlank()) openProfileUser = reel.creatorUsername
                             },
                         )
                     }
@@ -272,7 +314,19 @@ fun ShortsScreen(
     }
 
     commentsFor?.let { reel ->
-        ReelCommentsSheet(reel = reel, onDismiss = { commentsFor = null })
+        ReelCommentsSheet(
+            reel = reel,
+            onDismiss = { commentsFor = null },
+            onPosted = {
+                val i = reels.indexOfFirst { it.id == reel.id }
+                if (i >= 0) reels[i] = reels[i].copy(commentCount = reels[i].commentCount + 1)
+            },
+        )
+    }
+
+    // Author profile (TikTok-style) opened by tapping an avatar in the feed.
+    openProfileUser?.let { uname ->
+        ProfileScreen(username = uname, onClose = { openProfileUser = null })
     }
 
     pendingDelete?.let { reel ->
@@ -358,6 +412,7 @@ private fun ReelPage(
     onShare: () -> Unit,
     /** Non-null only when the signed-in user owns this reel. */
     onDelete: (() -> Unit)? = null,
+    onOpenProfile: () -> Unit = {},
 ) {
     // Tap-to-pause, per reel. Reset when the reel scrolls off so coming back plays.
     var paused by remember { mutableStateOf(false) }
@@ -366,11 +421,13 @@ private fun ReelPage(
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         ReelVideo(url = reel.mediaUrl, playing = active && !paused, modifier = Modifier.fillMaxSize())
 
-        // Full-screen tap layer toggles pause. Sits above the video but below the
-        // caption/action row (drawn later), so those buttons still receive taps.
+        // Tap layer toggles pause — but only over the upper video area. The
+        // bottom strip (caption, username, action rail) is left out so tapping
+        // those never pauses the video.
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .padding(bottom = 200.dp)
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
@@ -415,6 +472,7 @@ private fun ReelPage(
         ) {
             ReelCaption(
                 reel = reel,
+                onOpenProfile = onOpenProfile,
                 modifier = Modifier
                     .weight(1f)
                     .padding(start = 20.dp, end = 12.dp, bottom = 22.dp),
@@ -425,6 +483,7 @@ private fun ReelPage(
                 onComment = onComment,
                 onShare = onShare,
                 onDelete = onDelete,
+                onOpenProfile = onOpenProfile,
                 modifier = Modifier.padding(end = 12.dp, bottom = 22.dp),
             )
         }
@@ -506,6 +565,9 @@ private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifi
         )
 
         if (!ready) {
+            // A soft breathing placeholder fills the frame while the video buffers,
+            // so the screen never shows a black void during load.
+            ShimmerFill(Modifier.fillMaxSize())
             if (failed) {
                 Text("Video gagal dimuat", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
             } else {
@@ -521,10 +583,111 @@ private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifi
     }
 }
 
+/**
+ * Full-screen vertical reel viewer, opened from a profile grid. Shows [reels]
+ * as swipeable pages (like the Shorts feed), starting at [startIndex].
+ */
+@Composable
+fun ReelViewer(reels: List<NetReel>, startIndex: Int, onClose: () -> Unit) {
+    androidx.activity.compose.BackHandler(onBack = onClose)
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val items = remember { mutableStateListOf<NetReel>().apply { addAll(reels) } }
+    var commentsFor by remember { mutableStateOf<NetReel?>(null) }
+
+    if (items.isEmpty()) { onClose(); return }
+    val pager = rememberPagerState(
+        initialPage = startIndex.coerceIn(0, items.lastIndex),
+        pageCount = { items.size },
+    )
+    LaunchedEffect(pager.currentPage) {
+        items.getOrNull(pager.currentPage)?.let { r ->
+            SyntraClient.fireAndForget { SyntraClient.viewReel(r.id) }
+        }
+    }
+    fun toggleLike(reel: NetReel) {
+        val idx = items.indexOfFirst { it.id == reel.id }
+        if (idx < 0) return
+        val now = !reel.isLiked
+        items[idx] = reel.copy(isLiked = now, likeCount = (reel.likeCount + if (now) 1 else -1).coerceAtLeast(0))
+        scope.launch { runCatching { SyntraClient.likeReel(reel.id, now) } }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        VerticalPager(state = pager, beyondViewportPageCount = 0, modifier = Modifier.fillMaxSize()) { page ->
+            val reel = items[page]
+            ReelPage(
+                reel = reel,
+                active = page == pager.currentPage,
+                onLike = { toggleLike(reel) },
+                onComment = { commentsFor = reel },
+                onShare = { Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show() },
+            )
+        }
+        // Back button over the viewer.
+        Box(
+            modifier = Modifier
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(10.dp)
+                .size(40.dp)
+                .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onClose,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                "Kembali",
+                tint = Color.White,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+    }
+    commentsFor?.let { reel ->
+        ReelCommentsSheet(
+            reel = reel,
+            onDismiss = { commentsFor = null },
+            onPosted = {
+                val i = items.indexOfFirst { it.id == reel.id }
+                if (i >= 0) items[i] = items[i].copy(commentCount = items[i].commentCount + 1)
+            },
+        )
+    }
+}
+
 private val ShortsTeal = Color(0xFF20D5C4)
 
+/**
+ * A gentle breathing placeholder shown behind media while it loads, so photos and
+ * videos never reveal a black/empty void mid-load. Animates alpha only (no layout),
+ * so it's cheap and honours the motion discipline.
+ */
 @Composable
-private fun ReelCaption(reel: NetReel, modifier: Modifier = Modifier) {
+fun ShimmerFill(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val alpha by transition.animateFloat(
+        initialValue = 0.30f,
+        targetValue = 0.72f,
+        animationSpec = infiniteRepeatable(tween(850), RepeatMode.Reverse),
+        label = "shimmer-alpha",
+    )
+    Box(
+        modifier.background(
+            Brush.verticalGradient(
+                listOf(
+                    Color(0xFF23232E).copy(alpha = alpha),
+                    Color(0xFF141019).copy(alpha = alpha),
+                ),
+            ),
+        ),
+    )
+}
+
+@Composable
+private fun ReelCaption(reel: NetReel, onOpenProfile: () -> Unit = {}, modifier: Modifier = Modifier) {
     val username = reel.creatorUsername.ifBlank { "pengguna" }
     Column(modifier = modifier) {
         Text(
@@ -532,6 +695,11 @@ private fun ReelCaption(reel: NetReel, modifier: Modifier = Modifier) {
             color = Color.White,
             fontSize = 16.sp,
             fontWeight = FontWeight.Bold,
+            modifier = Modifier.clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onOpenProfile,
+            ),
         )
         if (reel.caption.isNotBlank()) {
             Spacer(Modifier.height(8.dp))
@@ -579,23 +747,34 @@ private fun ReelActions(
     onComment: () -> Unit,
     onShare: () -> Unit,
     onDelete: (() -> Unit)? = null,
+    onOpenProfile: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Hides the + once you follow this author. Seeded from the server's
+    // is_following so already-followed authors show no +, and flips locally on tap.
+    var followed by remember(reel.authorId) { mutableStateOf(reel.isFollowing) }
+    var showFollowSheet by remember { mutableStateOf(false) }
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        // Author avatar with a teal follow (+) badge.
+        // Author avatar with a teal follow (+) badge. Tapping the avatar opens
+        // the author's profile.
         Box(contentAlignment = Alignment.BottomCenter) {
             Box(
                 modifier = Modifier
                     .size(50.dp)
                     .clip(CircleShape)
                     .background(Color(0xFF222228))
-                    .border(2.dp, Color.White, CircleShape),
+                    .border(2.dp, Color.White, CircleShape)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onOpenProfile,
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 if (reel.creatorAvatarUrl != null) {
@@ -614,23 +793,22 @@ private fun ReelActions(
                     )
                 }
             }
-            Box(
-                modifier = Modifier
-                    .offset(y = 9.dp)
-                    .size(20.dp)
-                    .background(ShortsTeal, CircleShape)
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                    ) {
-                        if (reel.creatorUsername.isNotBlank()) {
-                            scope.launch { runCatching { SyntraClient.follow(reel.creatorUsername) } }
-                            Toast.makeText(context, "Mengikuti @${reel.creatorUsername}", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Filled.Add, "Ikuti", tint = Color.White, modifier = Modifier.size(14.dp))
+            // Follow (+) — hidden on your own reels AND once you've followed.
+            // Tapping it opens a small sheet: Follow, or view the profile.
+            if (reel.authorId.isNotBlank() && reel.authorId != SyntraClient.myUserId && !followed) {
+                Box(
+                    modifier = Modifier
+                        .offset(y = 9.dp)
+                        .size(20.dp)
+                        .background(ShortsTeal, CircleShape)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { showFollowSheet = true },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.Add, "Ikuti", tint = Color.White, modifier = Modifier.size(14.dp))
+                }
             }
         }
         Spacer(Modifier.height(2.dp))
@@ -663,6 +841,68 @@ private fun ReelActions(
         }
         Spacer(Modifier.height(2.dp))
         SpinningMusicDisc(avatarUrl = reel.creatorAvatarUrl)
+    }
+
+    if (showFollowSheet) {
+        FollowActionSheet(
+            username = reel.creatorUsername,
+            onDismiss = { showFollowSheet = false },
+            onFollow = {
+                showFollowSheet = false
+                if (reel.creatorUsername.isNotBlank()) {
+                    followed = true
+                    scope.launch { runCatching { SyntraClient.follow(reel.creatorUsername) } }
+                    Toast.makeText(context, "Mengikuti @${reel.creatorUsername}", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onViewProfile = { showFollowSheet = false; onOpenProfile() },
+        )
+    }
+}
+
+/** Small bottom sheet on the reel + badge: follow the author, or open their profile. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun FollowActionSheet(
+    username: String,
+    onDismiss: () -> Unit,
+    onFollow: () -> Unit,
+    onViewProfile: () -> Unit,
+) {
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = NexusSurface,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text(
+                "@$username",
+                color = NexusTextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            )
+            SheetRow(Icons.Filled.Add, "Ikuti", onFollow)
+            SheetRow(Icons.Filled.AccountCircle, "Lihat profil", onViewProfile)
+        }
+    }
+}
+
+@Composable
+private fun SheetRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 20.dp, vertical = 15.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(16.dp))
+        Text(label, color = NexusTextPrimary, fontSize = 15.sp)
     }
 }
 
@@ -745,7 +985,7 @@ private fun ShortsHeader(onPost: () -> Unit) {
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.PlayArrow, "Unggah", tint = Color(0xFF0A1414), modifier = Modifier.size(24.dp))
+            Icon(Icons.Filled.Add, "Unggah", tint = Color(0xFF0A1414), modifier = Modifier.size(26.dp))
         }
         // Center: Following / For You tabs.
         Row(
@@ -891,13 +1131,16 @@ private fun PostReelDialog(onDismiss: () -> Unit, onPost: (String) -> Unit) {
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit) {
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: () -> Unit = {}) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val comments = remember { mutableStateListOf<NetReelComment>() }
     var loading by remember { mutableStateOf(true) }
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
+    // My own username for the optimistic comment (so it isn't shown as "kamu").
+    val myUsername = ProfileStore.username(context, SessionStore.signedInEmail(context).orEmpty())
 
     LaunchedEffect(reel.id) {
         runCatching { SyntraClient.getReelComments(reel.id) }
@@ -905,12 +1148,18 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit) {
         loading = false
     }
 
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+    // skipPartiallyExpanded = open at full height straight away, so the input
+    // row is visible immediately (no dragging up first).
+    val sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Color(0xFF15151C),
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF15151C), RoundedCornerShape(22.dp))
-                .padding(vertical = 18.dp)
+                .padding(bottom = 18.dp)
                 .imePadding(),
         ) {
             Text(
@@ -995,11 +1244,12 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit) {
                                             comments.add(
                                                 NetReelComment(
                                                     id = "local-${System.currentTimeMillis()}",
-                                                    username = "kamu",
+                                                    username = myUsername,
                                                     body = body,
                                                 ),
                                             )
                                             input = ""
+                                            onPosted() // bump the rail's comment count live
                                         }
                                         .onFailure {
                                             Toast.makeText(context, "Gagal: ${it.message}", Toast.LENGTH_SHORT).show()

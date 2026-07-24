@@ -152,6 +152,7 @@ fun AddStatusScreen(
     onClose: () -> Unit,
     onSelectUri: (Uri) -> Unit,
     onCaptureBitmap: (Bitmap) -> Unit,
+    onTextStory: () -> Unit = {},
 ) {
     BackHandler(onBack = onClose)
 
@@ -254,7 +255,10 @@ fun AddStatusScreen(
                 actionButtons.forEach { action ->
                     item {
                         ActionButton(action) {
-                            if (action.label == "Galeri") openSystemPicker()
+                            when (action.label) {
+                                "Galeri" -> openSystemPicker()
+                                "Teks" -> onTextStory()
+                            }
                         }
                     }
                 }

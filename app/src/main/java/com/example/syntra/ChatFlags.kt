@@ -13,8 +13,21 @@ object ChatFlags {
     private const val PREFS = "syntra_settings"
     private const val KEY_ARCHIVED = "archived_ids"
     private const val KEY_PINNED = "pinned_ids"
+    private const val KEY_WATCHED_OWN_STORY = "watched_own_story_ids"
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    // Stories a user watches on their OWN status. The backend never records an
+    // author viewing their own story (it must not inflate the view count), so it
+    // always returns viewed=false for them. We remember it here so the ring stays
+    // dimmed across refreshes — a local-only "seen" mark, no public effect.
+    fun watchedOwnStories(context: Context): Set<String> =
+        prefs(context).getStringSet(KEY_WATCHED_OWN_STORY, emptySet()) ?: emptySet()
+
+    fun markOwnStoryWatched(context: Context, storyId: String) {
+        val next = watchedOwnStories(context) + storyId
+        prefs(context).edit().putStringSet(KEY_WATCHED_OWN_STORY, next).apply()
+    }
 
     fun archived(context: Context): Set<String> =
         prefs(context).getStringSet(KEY_ARCHIVED, emptySet()) ?: emptySet()

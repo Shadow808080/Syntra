@@ -2,6 +2,7 @@ package com.example.syntra
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -58,6 +59,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -191,49 +193,92 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val email = SessionStore.signedInEmail(context).orEmpty()
-    var displayName by remember { mutableStateOf(ProfileStore.displayName(context, email)) }
-    var avatarUrl by remember { mutableStateOf(ProfileStore.avatarUrl(context)) }
-    var saved by remember { mutableStateOf(false) }
-    var savingName by remember { mutableStateOf(false) }
-    var uploading by remember { mutableStateOf(false) }
-    var showPicker by remember { mutableStateOf(false) }
 
-    /** Uploads the new photo, then deletes the old one from storage. */
-    fun changeAvatar(bytes: ByteArray) {
-        if (!ApiConfig.ENABLED) {
-            Toast.makeText(context, "Backend belum dikonfigurasi.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        uploading = true
-        val previousId = ProfileStore.avatarMediaId(context)
-        scope.launch {
-            runCatching {
-                // 1) upload photo → media id, 2) attach it to my account.
-                val (mediaId, _) = SyntraClient.uploadMediaFull("image", "jpg", "image/jpeg", bytes, 512, 512)
-                val me = SyntraClient.updateProfile(avatarMediaId = mediaId)
-                mediaId to (me.avatarMediaId ?: "")
-            }.onSuccess { (mediaId, url) ->
-                // Cache the server-provided URL locally for instant display.
-                ProfileStore.setAvatar(context, url, mediaId)
-                avatarUrl = url
-                // Remove the replaced photo from storage. No-op until the backend
-                // ships DELETE /media/{id}; harmless (and silent) if it 404s.
-                if (!previousId.isNullOrBlank() && previousId != mediaId) {
-                    runCatching { SyntraClient.deleteMedia(previousId) }
-                }
-                Toast.makeText(context, "Foto profil diperbarui.", Toast.LENGTH_SHORT).show()
-            }.onFailure {
-                Toast.makeText(context, "Gagal memperbarui foto: ${it.message}", Toast.LENGTH_LONG).show()
-            }
-            uploading = false
+    // Originals — the baseline we compare against to know if anything is dirty.
+    val origName = remember { ProfileStore.displayName(context, email) }
+    val origUsername = remember { ProfileStore.username(context, email) }
+    val origAvatarUrl = remember { ProfileStore.avatarUrl(context) }
+
+    var displayName by remember { mutableStateOf(origName) }
+    var username by remember { mutableStateOf(origUsername) }
+    // A newly-picked photo is HELD locally until Save — nothing hits the server
+    // until the user commits. preview shows it immediately.
+    var pendingBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var pendingPreview by remember { mutableStateOf<ImageBitmap?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    var showPicker by remember { mutableStateOf(false) }
+    var showBackConfirm by remember { mutableStateOf(false) }
+
+    // Pull the real username from the server once, so the field isn't just the
+    // email prefix on first open.
+    LaunchedEffect(Unit) {
+        if (ApiConfig.ENABLED) runCatching { SyntraClient.getMyProfile() }.getOrNull()?.let { me ->
+            if (me.username.isNotBlank() && username == origUsername) username = me.username
         }
     }
 
-    // Goes through the permission gate; capturing without CAMERA granted crashes.
+    val dirty = displayName.trim() != origName ||
+        username.trim() != origUsername ||
+        pendingBytes != null
+
+    fun holdPhoto(bytes: ByteArray) {
+        pendingBytes = bytes
+        pendingPreview = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+    }
+
+    fun save() {
+        val name = displayName.trim()
+        val uname = username.trim()
+        if (name.isBlank()) {
+            Toast.makeText(context, "Nama tidak boleh kosong.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Persist locally first so the rest of the app updates instantly.
+        ProfileStore.setDisplayName(context, name)
+        ProfileStore.setUsername(context, uname)
+        if (!ApiConfig.ENABLED) { onClose(); return }
+        saving = true
+        val previousMediaId = ProfileStore.avatarMediaId(context)
+        scope.launch {
+            runCatching {
+                var mediaId: String? = null
+                var newUrl: String? = null
+                // 1) upload the held photo (if any) → media id
+                pendingBytes?.let { bytes ->
+                    val (mid, _) = SyntraClient.uploadMediaFull("image", "jpg", "image/jpeg", bytes, 512, 512)
+                    mediaId = mid
+                }
+                // 2) commit everything in one PATCH
+                val me = SyntraClient.updateProfile(
+                    displayName = name,
+                    avatarMediaId = mediaId,
+                    username = uname.ifBlank { null },
+                )
+                if (mediaId != null) newUrl = me.avatarMediaId
+                mediaId to newUrl
+            }.onSuccess { (mediaId, newUrl) ->
+                if (mediaId != null && !newUrl.isNullOrBlank()) {
+                    ProfileStore.setAvatar(context, newUrl, mediaId)
+                    // clean up the old photo from storage (silent if it 404s)
+                    if (!previousMediaId.isNullOrBlank() && previousMediaId != mediaId) {
+                        runCatching { SyntraClient.deleteMedia(previousMediaId) }
+                    }
+                }
+                saving = false
+                Toast.makeText(context, "Profil diperbarui.", Toast.LENGTH_SHORT).show()
+                onClose() // auto-return to Settings
+            }.onFailure {
+                saving = false
+                Toast.makeText(context, "Gagal menyimpan: ${it.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // Camera / gallery just HOLD the photo — no upload here.
     val camera = rememberCameraCapture { bitmap ->
         val out = java.io.ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
-        changeAvatar(out.toByteArray())
+        holdPhoto(out.toByteArray())
     }
     val gallery = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
@@ -242,11 +287,14 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
             val bytes = withContext(Dispatchers.IO) {
                 runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
             }
-            if (bytes != null) changeAvatar(bytes)
+            if (bytes != null) holdPhoto(bytes)
         }
     }
 
-    SettingsSubScreen("Profil", onClose) {
+    // Back = confirm if there are unsaved changes.
+    val onBack = { if (dirty) showBackConfirm = true else onClose() }
+
+    SettingsSubScreen("Profil", onBack) {
         Column(modifier = Modifier.verticalScroll(rememberScrollState()).imePadding()) {
             Box(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp),
@@ -257,43 +305,36 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
                         modifier = Modifier
                             .size(104.dp)
                             .clip(CircleShape)
-                            .background(
-                                Brush.linearGradient(listOf(Color(0xFF7C4DFF), Color(0xFF3B68F5))),
-                            )
+                            .background(Brush.linearGradient(listOf(Color(0xFF7C4DFF), Color(0xFF3B68F5))))
                             .clickable(
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
                             ) { showPicker = true },
                         contentAlignment = Alignment.Center,
                     ) {
-                        val url = avatarUrl
-                        if (url != null) {
-                            AsyncImage(
+                        val preview = pendingPreview
+                        val url = origAvatarUrl
+                        when {
+                            preview != null -> Image(
+                                bitmap = preview,
+                                contentDescription = "Foto profil",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                            url != null -> AsyncImage(
                                 model = url,
                                 contentDescription = "Foto profil",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize(),
                             )
-                        } else {
-                            Text(
+                            else -> Text(
                                 text = displayName.firstOrNull()?.uppercase() ?: "S",
                                 color = Color.White,
                                 fontSize = 42.sp,
                                 fontWeight = FontWeight.Bold,
                             )
                         }
-                        if (uploading) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color.Black.copy(alpha = 0.45f)),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                CircularProgressIndicator(color = Color.White, strokeWidth = 2.5.dp)
-                            }
-                        }
                     }
-                    // Camera badge, bottom-right.
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
@@ -306,36 +347,15 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
                             ) { showPicker = true },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.PhotoCamera,
-                            contentDescription = "Ganti foto",
-                            tint = Color.White,
-                            modifier = Modifier.size(17.dp),
-                        )
+                        Icon(Icons.Filled.PhotoCamera, "Ganti foto", tint = Color.White, modifier = Modifier.size(17.dp))
                     }
                 }
             }
             Card {
-                Text("Nama tampilan", color = NexusTextSecondary, fontSize = 12.sp)
-                Spacer(Modifier.height(8.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
-                        .border(1.dp, NexusStroke, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 14.dp, vertical = 13.dp),
-                ) {
-                    if (displayName.isEmpty()) {
-                        Text("Nama kamu", color = NexusTextSecondary, fontSize = 15.sp)
-                    }
-                    BasicTextField(
-                        value = displayName,
-                        onValueChange = { displayName = it; saved = false },
-                        singleLine = true,
-                        textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
-                        cursorBrush = SolidColor(NexusAccentSoft),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                ProfileField("Nama tampilan", displayName, "Nama kamu") { displayName = it }
+                Spacer(Modifier.height(16.dp))
+                ProfileField("Nama pengguna", username, "username") { v ->
+                    username = v.filterNot { it.isWhitespace() }.lowercase()
                 }
                 Spacer(Modifier.height(16.dp))
                 Text("Email", color = NexusTextSecondary, fontSize = 12.sp)
@@ -345,37 +365,11 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
             Spacer(Modifier.height(10.dp))
             Box(modifier = Modifier.padding(horizontal = 16.dp)) {
                 PrimaryAction(
-                    text = when {
-                        savingName -> "Menyimpan…"
-                        saved -> "Tersimpan"
-                        else -> "Simpan"
-                    },
-                    enabled = displayName.isNotBlank() && !savingName,
-                ) {
-                    val name = displayName.trim()
-                    ProfileStore.setDisplayName(context, name)
-                    if (ApiConfig.ENABLED) {
-                        savingName = true
-                        scope.launch {
-                            runCatching { SyntraClient.updateProfile(displayName = name) }
-                                .onSuccess {
-                                    saved = true
-                                    Toast.makeText(context, "Profil diperbarui.", Toast.LENGTH_SHORT).show()
-                                }
-                                .onFailure {
-                                    Toast.makeText(context, "Gagal menyimpan: ${it.message}", Toast.LENGTH_SHORT).show()
-                                }
-                            savingName = false
-                        }
-                    } else {
-                        saved = true
-                        Toast.makeText(context, "Nama tampilan disimpan.", Toast.LENGTH_SHORT).show()
-                    }
-                }
+                    text = if (saving) "Menyimpan…" else "Simpan",
+                    enabled = dirty && displayName.isNotBlank() && !saving,
+                ) { save() }
             }
-            Note(
-                "Foto & nama kini disimpan di akunmu dan terlihat oleh pengguna lain.",
-            )
+            Note("Foto, nama & username disimpan di akunmu dan terlihat oleh pengguna lain.")
         }
     }
 
@@ -384,12 +378,92 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
             onCamera = { showPicker = false; camera.launch() },
             onGallery = {
                 showPicker = false
-                gallery.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                )
+                gallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             },
             onDismiss = { showPicker = false },
         )
+    }
+
+    if (showBackConfirm) {
+        ConfirmDiscardDialog(
+            onKeepEditing = { showBackConfirm = false },
+            onDiscard = { showBackConfirm = false; onClose() },
+            onSave = { showBackConfirm = false; save() },
+        )
+    }
+}
+
+/** Labeled text field used across the profile editor. */
+@Composable
+private fun ProfileField(label: String, value: String, placeholder: String, onChange: (String) -> Unit) {
+    Text(label, color = NexusTextSecondary, fontSize = 12.sp)
+    Spacer(Modifier.height(8.dp))
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+            .border(1.dp, NexusStroke, RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 13.dp),
+    ) {
+        if (value.isEmpty()) Text(placeholder, color = NexusTextSecondary, fontSize = 15.sp)
+        BasicTextField(
+            value = value,
+            onValueChange = onChange,
+            singleLine = true,
+            textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
+            cursorBrush = SolidColor(NexusAccentSoft),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/** Asked when leaving the profile editor with unsaved changes. */
+@Composable
+private fun ConfirmDiscardDialog(onKeepEditing: () -> Unit, onDiscard: () -> Unit, onSave: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onKeepEditing,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(36.dp)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(NexusSurface)
+                .border(1.dp, NexusStroke, RoundedCornerShape(20.dp))
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
+                .padding(22.dp),
+        ) {
+            Text("Simpan perubahan?", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text("Kamu punya perubahan yang belum disimpan.", color = NexusTextSecondary, fontSize = 13.sp, lineHeight = 18.sp)
+            Spacer(Modifier.height(20.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f).height(46.dp)
+                        .clip(RoundedCornerShape(23.dp))
+                        .background(Color.White.copy(alpha = 0.06f))
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDiscard),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Buang", color = Color(0xFFFF6B6B), fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                Box(
+                    modifier = Modifier
+                        .weight(1f).height(46.dp)
+                        .clip(RoundedCornerShape(23.dp))
+                        .background(NexusAccent)
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onSave),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Simpan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+            }
+        }
     }
 }
 
@@ -404,6 +478,7 @@ fun ProfileSettingsScreen(onClose: () -> Unit) {
 object ProfileStore {
     private const val PREFS = "syntra_settings"
     private const val KEY_NAME = "display_name"
+    private const val KEY_USERNAME = "username"
     private const val KEY_AVATAR_URL = "avatar_url"
     private const val KEY_AVATAR_MEDIA = "avatar_media_id"
 
@@ -415,6 +490,13 @@ object ProfileStore {
 
     fun setDisplayName(context: Context, value: String) {
         prefs(context).edit().putString(KEY_NAME, value).apply()
+    }
+
+    fun username(context: Context, fallbackEmail: String): String =
+        prefs(context).getString(KEY_USERNAME, null) ?: fallbackEmail.substringBefore('@')
+
+    fun setUsername(context: Context, value: String) {
+        prefs(context).edit().putString(KEY_USERNAME, value).apply()
     }
 
     fun avatarUrl(context: Context): String? = prefs(context).getString(KEY_AVATAR_URL, null)

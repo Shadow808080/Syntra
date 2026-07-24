@@ -17,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -32,6 +33,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -49,8 +51,10 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
@@ -70,6 +74,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -79,6 +84,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -88,6 +94,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
@@ -98,6 +105,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
 import com.example.syntra.net.NetMessage
@@ -135,7 +143,15 @@ private data class Message(
     val media: String? = null,
     /** True once deleted-for-everyone — rendered as a greyed "deleted" tombstone. */
     val isDeleted: Boolean = false,
+    /** Set when this is a reply to a story — a small blurred thumbnail is shown. */
+    val storyReplyUrl: String? = null,
+    /** Id of the message this one replies to (WhatsApp-style quote), if any. */
+    val replyToId: String? = null,
 )
+
+/** Marker prefix for a story reply: "STORYREPLY<0x1>url<0x1>text". */
+private const val STORY_REPLY_MARKER = "STORYREPLY"
+private val STORY_REPLY_SEP = ''
 
 /** Marks a message that only exists on this device until the server confirms it. */
 private const val LOCAL_ID_PREFIX = "local-"
@@ -146,17 +162,32 @@ private fun NetMessage.toUi(): Message {
     // Older messages were sent with the media URL as the body; keep rendering
     // those as media instead of printing the link as text.
     val legacyUrl = body.takeIf { it.isMediaUrl() }
+
+    // Story reply: "STORYREPLY<sep>url<sep>text" → thumbnail + text.
+    var storyUrl: String? = null
+    var displayBody = body
+    if (!isDeleted && body.startsWith(STORY_REPLY_MARKER + STORY_REPLY_SEP)) {
+        val parts = body.removePrefix(STORY_REPLY_MARKER + STORY_REPLY_SEP)
+            .split(STORY_REPLY_SEP, limit = 2)
+        if (parts.size == 2) {
+            storyUrl = parts[0]
+            displayBody = parts[1]
+        }
+    }
+
     return Message(
         id = id,
         text = when {
             isDeleted -> "Pesan ini dihapus"
             legacyUrl != null -> ""
-            else -> body
+            else -> displayBody
         },
         fromMe = senderId == SyntraClient.myUserId,
         time = formatClock(createdAt),
         media = if (isDeleted) null else attachment ?: legacyUrl,
         isDeleted = isDeleted,
+        storyReplyUrl = storyUrl,
+        replyToId = replyToId,
     )
 }
 
@@ -200,6 +231,8 @@ fun ChatDetailScreen(
     // (not mutating in place) is what drives recomposition.
     val reactions = remember(conversation) { mutableStateMapOf<String, Map<String, String>>() }
     var input by remember { mutableStateOf("") }
+    // The message being replied to (swipe right on a bubble), null when not replying.
+    var replyingTo by remember(conversation) { mutableStateOf<Message?>(null) }
     var peerTyping by remember { mutableStateOf(false) }
     // Live online state for the header; seeded from the list, then kept current
     // by presence.update so it changes without leaving the chat.
@@ -225,6 +258,7 @@ fun ChatDetailScreen(
     }
     var confirmClear by remember(conversation) { mutableStateOf(false) }
     var pendingMessage by remember(conversation) { mutableStateOf<Message?>(null) }
+    var fullscreenImage by remember(conversation) { mutableStateOf<String?>(null) }
     // Overflow-menu actions.
     var showReport by remember(conversation) { mutableStateOf(false) }
     var confirmBlock by remember(conversation) { mutableStateOf(false) }
@@ -246,6 +280,7 @@ fun ChatDetailScreen(
 
     // Composer extras: emoji panel, attachments, voice notes.
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     val fieldFocus = remember { FocusRequester() }
     var showEmoji by remember { mutableStateOf(false) }
     var showAttach by remember { mutableStateOf(false) }
@@ -280,12 +315,17 @@ fun ChatDetailScreen(
         }
     }
 
-    // After landing, keep the newest message in view — but only when the user is
-    // already near the bottom, so it doesn't yank them while reading history.
+    // After landing, keep the newest message in view. Always scroll for my own
+    // sent messages; for incoming ones, only when I'm already near the bottom so
+    // it doesn't yank me while reading history.
     LaunchedEffect(messages.size) {
         if (!landed || messages.isEmpty()) return@LaunchedEffect
-        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (last >= messages.size - 2) listState.animateScrollToItem(messages.size)
+        val lastIndex = messages.lastIndex
+        val mineIsNewest = messages.lastOrNull()?.fromMe == true
+        val visibleLast = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (mineIsNewest || visibleLast >= lastIndex - 2) {
+            listState.animateScrollToItem(lastIndex)
+        }
     }
 
     // --- Backend: history, realtime, read receipts -------------------------
@@ -293,6 +333,9 @@ fun ChatDetailScreen(
         LaunchedEffect(conversation.id) {
             runCatching {
                 SyntraClient.subscribe(listOf("conversation:${conversation.id}"))
+                // Ask for the peer's live presence so the checkmarks (1 tick offline,
+                // 2 ticks online) are correct from the moment the chat opens.
+                conversation.counterpartId?.let { SyntraClient.presenceQuery(listOf(it)) }
                 // History comes back newest-first; the UI renders oldest-first.
                 val history = SyntraClient.getMessages(conversation.id).reversed()
                 messages.clear()
@@ -341,9 +384,12 @@ fun ChatDetailScreen(
                     }
                 }
 
-                override fun onReadReceipt(conversationId: String, messageId: String) {
-                    // The peer read up to here: flip our ✓✓ to blue live, no refresh.
+                override fun onReadReceipt(conversationId: String, userId: String, messageId: String) {
+                    // Only the PEER reading flips my ✓✓ to blue. My own read receipts
+                    // (synced across my devices) must NOT touch this — that was the bug
+                    // making sent messages instantly blue.
                     if (conversationId != conversation.id) return
+                    if (userId == SyntraClient.myUserId) return
                     if (counterpartLastReadId == null || messageId > counterpartLastReadId!!) {
                         counterpartLastReadId = messageId
                     }
@@ -477,7 +523,17 @@ fun ChatDetailScreen(
                 // stays empty instead of leaking a URL into the conversation.
                 val sent = SyntraClient.sendMessageRest(conversation.id, "", listOf(mediaId))
                 val i = messages.indexOfFirst { it.id == ref }
-                if (i >= 0) messages[i] = sent.toUi()
+                if (i >= 0) {
+                    val authoritative = sent.toUi()
+                    // The immediate send response may not have resolved the attachment
+                    // URL yet — keep the one we already uploaded so the bubble isn't
+                    // blank until a refresh.
+                    messages[i] = if (authoritative.media.isNullOrBlank() && url.isNotBlank()) {
+                        authoritative.copy(media = url)
+                    } else {
+                        authoritative
+                    }
+                }
             }.onFailure {
                 Toast.makeText(context, "Gagal mengirim: ${it.message}", Toast.LENGTH_LONG).show()
             }
@@ -539,13 +595,27 @@ fun ChatDetailScreen(
     fun send() {
         val text = input.trim()
         if (text.isEmpty()) return
+        val replyId = replyingTo?.id
         // Optimistic message: a client id now, replaced by the server id on ack.
         val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
-        messages.add(Message(ref, text, fromMe = true, time = "now"))
+        messages.add(Message(ref, text, fromMe = true, time = "now", replyToId = replyId))
         input = ""
+        replyingTo = null
         if (ApiConfig.ENABLED) {
             SyntraClient.typingStop(conversation.id)
-            SyntraClient.messageSend(conversation.id, text, ref)
+            if (replyId != null) {
+                // Replies go over REST so the reply_to_id is carried; swap the
+                // optimistic bubble for the authoritative one on success.
+                scope.launch {
+                    runCatching { SyntraClient.sendMessageRest(conversation.id, text, replyToId = replyId) }
+                        .onSuccess { sent ->
+                            val i = messages.indexOfFirst { it.id == ref }
+                            if (i >= 0) messages[i] = sent.toUi()
+                        }
+                }
+            } else {
+                SyntraClient.messageSend(conversation.id, text, ref)
+            }
         }
     }
 
@@ -575,11 +645,10 @@ fun ChatDetailScreen(
             },
         )
 
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -590,20 +659,107 @@ fun ChatDetailScreen(
                     reactions = aggregateReactions(reactions[msg.id]),
                     outgoingColor = chatTheme.bubble,
                     onLongPress = { pendingMessage = msg },
+                    onImageClick = { fullscreenImage = it },
+                    onReply = { replyingTo = msg },
+                    quoted = msg.replyToId?.let { rid -> messages.firstOrNull { it.id == rid } },
                     state = when {
                         msg.id.startsWith(LOCAL_ID_PREFIX) -> DeliveryState.SENDING
                         // UUIDv7 sorts by time, so a plain comparison answers
                         // "did they read this yet?" without any receipt table.
                         counterpartLastReadId != null && msg.id <= counterpartLastReadId!! ->
                             DeliveryState.READ
+                        // Peer online = the message reached their device (2 ticks);
+                        // offline = only sent to the server (1 tick).
+                        peerOnline -> DeliveryState.DELIVERED
                         else -> DeliveryState.SENT
                     },
                 )
             }
         }
 
+            // Jump-to-bottom button — appears once you scroll up away from the
+            // newest message. Tapping it animates back to the last message.
+            val showJump by remember {
+                derivedStateOf {
+                    val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                    messages.isNotEmpty() && last < messages.size - 1
+                }
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = showJump,
+                enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(),
+                exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .background(NexusSurfaceElevated, CircleShape)
+                        .border(1.dp, NexusStroke, CircleShape)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { scope.launch { listState.animateScrollToItem(messages.lastIndex.coerceAtLeast(0)) } },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.KeyboardArrowDown,
+                        contentDescription = "Ke pesan terbaru",
+                        tint = NexusTextPrimary,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+            }
+        }
+
         if (recording) {
             RecordingBar(seconds = recordSeconds, onCancel = { cancelRecording() })
+        }
+
+        // Reply banner above the composer — shows which message you're replying to.
+        replyingTo?.let { q ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(NexusSurface)
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier.width(3.dp).height(34.dp).clip(RoundedCornerShape(2.dp)).background(NexusAccentSoft),
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (q.fromMe) "Membalas dirimu" else "Membalas ${conversation.name}",
+                        color = NexusAccentSoft,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = when {
+                            q.media != null && q.media.isAudioUrl() -> "🎤 Pesan suara"
+                            q.media != null -> "📷 Foto"
+                            else -> q.text
+                        },
+                        color = NexusTextSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Batal balas",
+                    tint = NexusTextSecondary,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { replyingTo = null },
+                )
+            }
         }
 
         MessageInputBar(
@@ -613,13 +769,21 @@ fun ChatDetailScreen(
             onToggleEmoji = {
                 showEmoji = !showEmoji
                 if (showEmoji) {
-                    // Opening emoji: drop the soft keyboard so both don't fight.
+                    // Opening emoji: drop the soft keyboard AND release field focus.
+                    // Clearing focus is what makes the reverse work — a later tap on
+                    // the field is then a real focus change that retracts this panel.
                     keyboard?.hide()
+                    focusManager.clearFocus()
                 } else {
                     // Back to keyboard: refocus the field and raise it.
                     fieldFocus.requestFocus()
                     keyboard?.show()
                 }
+            },
+            onFieldFocused = {
+                // Box tapped: keyboard takes over, emoji panel closes, icon → emoji.
+                showEmoji = false
+                keyboard?.show()
             },
             onAttach = { showAttach = true },
             onStartRecording = { startRecording() },
@@ -783,14 +947,38 @@ fun ChatDetailScreen(
         )
     }
 
+    // Fullscreen photo viewer — tap a chat photo to see it at screen size.
+    fullscreenImage?.let { url ->
+        androidx.activity.compose.BackHandler { fullscreenImage = null }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { fullscreenImage = null },
+            contentAlignment = Alignment.Center,
+        ) {
+            AsyncImage(
+                model = url,
+                contentDescription = "Foto layar penuh",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+
     if (showProfile) {
-        ProfileUserScreen(
-            conversation = conversation,
-            onBack = { showProfile = false },
-            onCall = { startCall(video = false) },
-            onVideo = { startCall(video = true) },
-            onSearch = { showProfile = false }, // back to the conversation
-        )
+        // TikTok-style profile for the person you're chatting with (their shorts,
+        // follower counts, etc.). Falls back to the counterpart id when no username.
+        val handle = conversation.counterpartUsername
+            ?: conversation.counterpartId
+        if (handle != null) {
+            ProfileScreen(username = handle, onClose = { showProfile = false })
+        } else {
+            showProfile = false
+        }
     }
 
     // Full-screen call overlay (voice or video), on top of everything else.
@@ -1089,6 +1277,9 @@ private fun MessageBubble(
     state: DeliveryState,
     outgoingColor: Color,
     onLongPress: () -> Unit,
+    onImageClick: (String) -> Unit = {},
+    onReply: () -> Unit = {},
+    quoted: Message? = null,
     reactions: Map<String, Int> = emptyMap(),
 ) {
     val bubbleColor = if (msg.fromMe) outgoingColor else NexusSurfaceElevated
@@ -1106,9 +1297,26 @@ private fun MessageBubble(
         appear.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium))
     }
 
+    // Swipe-right-to-reply: drag the row, snap back, and fire onReply past a threshold.
+    val swipeX = remember { Animatable(0f) }
+    val swipeScope = rememberCoroutineScope()
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { androidx.compose.ui.unit.IntOffset(swipeX.value.toInt(), 0) }
+                .pointerInput(msg.id) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            if (swipeX.value > 120f) onReply()
+                            swipeScope.launch { swipeX.animateTo(0f) }
+                        },
+                    ) { change, dragAmount ->
+                        change.consume()
+                        // Only allow dragging to the right, capped so it feels elastic.
+                        swipeScope.launch { swipeX.snapTo((swipeX.value + dragAmount).coerceIn(0f, 160f)) }
+                    }
+                },
             verticalAlignment = Alignment.Bottom,
         ) {
             if (msg.fromMe) Spacer(Modifier.weight(1f))
@@ -1120,7 +1328,7 @@ private fun MessageBubble(
                         alpha = appear.value
                         transformOrigin = TransformOrigin(if (msg.fromMe) 1f else 0f, 1f)
                     }
-                    .widthIn(max = 260.dp)
+                    .widthIn(max = 280.dp)
                     .background(bubbleColor, shape)
                     .combinedClickable(
                         indication = null,
@@ -1128,20 +1336,103 @@ private fun MessageBubble(
                         onClick = {},
                         onLongClick = onLongPress,
                     )
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
+                // Quoted message (WhatsApp-style): a small placeholder of the message
+                // this one replies to, shown above the body.
+                quoted?.let { q ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 4.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color.White.copy(alpha = 0.12f))
+                            .padding(start = 6.dp, end = 8.dp, top = 5.dp, bottom = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier
+                                .width(3.dp)
+                                .height(30.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(NexusAccentSoft),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (q.fromMe) "Kamu" else "Membalas",
+                                color = NexusAccentSoft,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = when {
+                                    q.media != null && q.media.isAudioUrl() -> "🎤 Pesan suara"
+                                    q.media != null -> "📷 Foto"
+                                    else -> q.text
+                                },
+                                color = textColor.copy(alpha = 0.8f),
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+                // Story reply: a small blurred thumbnail of the story, above the text,
+                // so it's clear which story this replies to (bubble-height sized).
+                msg.storyReplyUrl?.let { url ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .padding(bottom = 4.dp)
+                            // Tap the reply preview to open the story again (full screen).
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { onImageClick(url) },
+                    ) {
+                        AsyncImage(
+                            model = url,
+                            contentDescription = "Story dibalas",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(width = 30.dp, height = 42.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .blur(3.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Membalas story",
+                            color = textColor.copy(alpha = 0.75f),
+                            fontSize = 11.sp,
+                            fontStyle = FontStyle.Italic,
+                        )
+                    }
+                }
                 // Attachments come back as ready URLs; a caption may sit under them.
                 val media = msg.media
                 when {
                     media != null && media.isAudioUrl() -> AudioBubble(media, textColor)
-                    media != null -> AsyncImage(
-                        model = media,
-                        contentDescription = "Foto",
-                        contentScale = ContentScale.Crop,
+                    media != null -> Box(
                         modifier = Modifier
                             .size(width = 220.dp, height = 260.dp)
-                            .clip(RoundedCornerShape(12.dp)),
-                    )
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { onImageClick(media) },
+                    ) {
+                        // Shimmer behind the photo so the bubble never shows an empty
+                        // grey box while it loads.
+                        com.example.syntra.ShimmerFill(Modifier.matchParentSize())
+                        SubcomposeAsyncImage(
+                            model = media,
+                            contentDescription = "Foto",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.matchParentSize(),
+                        )
+                    }
                     else -> Text(
                         text = msg.text,
                         color = if (msg.isDeleted) textColor.copy(alpha = 0.6f) else textColor,
@@ -1154,19 +1445,22 @@ private fun MessageBubble(
                     Spacer(Modifier.height(6.dp))
                     Text(text = msg.text, color = textColor, fontSize = 15.sp, lineHeight = 20.sp)
                 }
-            }
-            // Timestamp pinned to the far right of the row, outside the bubble.
-            if (msg.fromMe) Spacer(Modifier.width(6.dp)) else Spacer(Modifier.weight(1f))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(bottom = 2.dp),
-            ) {
-                Text(text = msg.time, color = NexusTextSecondary, fontSize = 10.sp)
-                if (msg.fromMe) {
-                    Spacer(Modifier.width(3.dp))
-                    DeliveryTicks(state, NexusTextSecondary)
+                // Time + delivery ticks INSIDE the bubble, bottom-right — WhatsApp style.
+                // Colour adapts: muted-white on the accent bubble, grey on the surface one.
+                val metaColor = if (msg.fromMe) Color.White.copy(alpha = 0.72f) else NexusTextSecondary
+                Spacer(Modifier.height(2.dp))
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(text = msg.time, color = metaColor, fontSize = 10.sp)
+                    if (msg.fromMe) {
+                        Spacer(Modifier.width(4.dp))
+                        DeliveryTicks(state, metaColor)
+                    }
                 }
             }
+            if (!msg.fromMe) Spacer(Modifier.weight(1f))
         }
         // Reaction chips sit just under the bubble, on the same side.
         if (reactions.isNotEmpty()) {
@@ -1274,8 +1568,14 @@ private fun AudioBubble(url: String, tint: Color) {
     }
 }
 
-/** Where a sent message got to: still local, on the server, or read by the peer. */
-private enum class DeliveryState { SENDING, SENT, READ }
+/**
+ * Where a sent message got to:
+ *  - SENDING   : still local (clock)
+ *  - SENT      : on the server, peer offline (1 tick)
+ *  - DELIVERED : peer online, reached their device (2 grey ticks)
+ *  - READ      : peer read it (2 blue ticks)
+ */
+private enum class DeliveryState { SENDING, SENT, DELIVERED, READ }
 
 @Composable
 private fun DeliveryTicks(state: DeliveryState, base: Color) {
@@ -1289,6 +1589,12 @@ private fun DeliveryTicks(state: DeliveryState, base: Color) {
         DeliveryState.SENT -> Icon(
             imageVector = Icons.Filled.Done,
             contentDescription = "Terkirim",
+            tint = base.copy(alpha = 0.7f),
+            modifier = Modifier.size(13.dp),
+        )
+        DeliveryState.DELIVERED -> Icon(
+            imageVector = Icons.Filled.DoneAll,
+            contentDescription = "Sampai",
             tint = base.copy(alpha = 0.7f),
             modifier = Modifier.size(13.dp),
         )
@@ -1311,6 +1617,7 @@ private fun MessageInputBar(
     emojiOpen: Boolean,
     focusRequester: FocusRequester,
     onToggleEmoji: () -> Unit,
+    onFieldFocused: () -> Unit,
     onAttach: () -> Unit,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
@@ -1370,8 +1677,10 @@ private fun MessageInputBar(
                         .fillMaxWidth()
                         .focusRequester(focusRequester)
                         .onFocusEvent {
-                            // Tapping the field to type should retract the emoji panel.
-                            if (it.isFocused && emojiOpen) onToggleEmoji()
+                            // Tapping the input box: switch to the system keyboard and
+                            // flip the icon back to emoji. Handled by a dedicated
+                            // callback (not the toggle) so it never re-opens the panel.
+                            if (it.isFocused && emojiOpen) onFieldFocused()
                         },
                 )
             }
