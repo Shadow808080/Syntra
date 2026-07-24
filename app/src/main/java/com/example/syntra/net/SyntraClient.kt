@@ -116,14 +116,24 @@ object SyntraClient {
         )
     }
 
-    /** `POST /api/v1/auth/register`. */
-    suspend fun register(email: String, password: String, username: String) = withContext(Dispatchers.IO) {
+    /**
+     * `POST /api/v1/auth/register`. The endpoint also accepts `display_name`
+     * (api.md §1), so we send it here — this survives the email-confirmation
+     * case where no session exists yet to PATCH the profile afterwards.
+     */
+    suspend fun register(
+        email: String,
+        password: String,
+        username: String,
+        displayName: String? = null,
+    ) = withContext(Dispatchers.IO) {
         authRequest(
             path = "/api/v1/auth/register",
             payload = JSONObject()
                 .put("email", email)
                 .put("password", password)
-                .put("username", username),
+                .put("username", username)
+                .apply { if (!displayName.isNullOrBlank()) put("display_name", displayName) },
             failureMessage = "Pendaftaran gagal",
         )
     }

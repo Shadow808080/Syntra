@@ -34,6 +34,38 @@ ditutup" di app sudah akurat.
 
 ---
 
+## 🔴 0. Auth via nomor HP — dibutuhkan (login & daftar)
+
+Kami menambah **opsi login "Email / Nomor HP"** dan **kolom Nomor HP di halaman
+daftar**. Sisi UI **sudah siap**, tapi jalur nomor HP masih ditandai *"segera
+hadir"* dan **dinonaktifkan**, karena backend belum mendukungnya:
+
+- `POST /auth/login` hanya menerima `{ email, password }` — tak ada cara login
+  dengan nomor HP.
+- `POST /auth/register` menerima `email/password/username/display_name/date_of_birth`
+  — **tak ada field `phone`**. (Kami mengirimnya pun akan diabaikan diam-diam.)
+- Skema DB sudah punya `users.phone_e164` (unik, nullable) dan
+  `discoverable_by_phone` di `erd.md`, tapi **tak ada endpoint** yang menyetel
+  atau memakainya.
+
+Yang kami butuhkan supaya jalur ini bisa diaktifkan tanpa ubah UI lagi:
+
+1. **Daftar dengan nomor HP** — terima `phone` (format E.164, mis. `+62812...`)
+   di `POST /auth/register`, simpan ke `phone_e164`. Kalau perlu verifikasi OTP,
+   balas `pending_confirmation`-style + endpoint verifikasi.
+2. **Login dengan nomor HP** — izinkan `POST /auth/login` menerima **`phone`**
+   sebagai ganti `email` (atau field `identifier` yang menerima keduanya). Balasan
+   sama persis seperti sekarang.
+3. Idealnya `PATCH /users/me` juga menerima `phone` agar pengguna email bisa
+   menambah nomornya belakangan (opsional, tahap dua).
+
+Begitu ini ada, kami tinggal melepas gerbang "segera hadir" — tidak perlu
+perubahan tata letak.
+
+**Catatan kecil (sudah kami manfaatkan):** `register` kini menerima `display_name`
+langsung, jadi app **berhenti** memanggil `PATCH /users/me` terpisah setelah
+daftar. Terima kasih.
+
 ## 🔴 1. Hapus pesan belum ada
 
 ```

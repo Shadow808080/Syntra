@@ -29,8 +29,10 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mail
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -73,6 +75,9 @@ import kotlinx.coroutines.launch
 
 /** Which pane of the auth flow is showing. */
 private enum class AuthMode { WELCOME, LOGIN, REGISTER }
+
+/** How the user identifies themselves when logging in. */
+private enum class LoginMethod { EMAIL, PHONE }
 
 private val ErrorRed = Color(0xFFFF6B6B)
 private val OkGreen = Color(0xFF23C55E)
@@ -197,11 +202,16 @@ private fun CredentialsPane(
 
     var fullName by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
+    var loginMethod by remember { mutableStateOf(LoginMethod.EMAIL) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    // Phone auth isn't wired on the backend yet, so that path stays inert.
+    val emailFlow = register || loginMethod == LoginMethod.EMAIL
 
     fun validate(): String? {
         if (register && fullName.isBlank()) return "Isi nama lengkap kamu."
@@ -222,6 +232,10 @@ private fun CredentialsPane(
     }
 
     fun submit() {
+        if (!emailFlow) {
+            error = "Login dengan nomor HP segera hadir. Untuk sekarang, gunakan email."
+            return
+        }
         error = validate()
         if (error != null) return
         busy = true
@@ -232,11 +246,10 @@ private fun CredentialsPane(
                     SessionStore.markSignedIn(context, email.trim())
                 } else {
                     if (register) {
-                        SyntraClient.register(email.trim(), password, username.trim())
-                        // Register only takes email/password/username; set the
-                        // display name straight after, while the session is fresh.
-                        // Non-fatal: a failure here shouldn't block sign-in.
-                        runCatching { SyntraClient.updateProfile(displayName = fullName.trim()) }
+                        // Backend takes display_name straight in register (api.md §1),
+                        // so no follow-up PATCH is needed. Phone is collected but not
+                        // sent — the server has no field for it yet.
+                        SyntraClient.register(email.trim(), password, username.trim(), fullName.trim())
                     } else {
                         SyntraClient.loginWith(email.trim(), password)
                     }
@@ -297,7 +310,16 @@ private fun CredentialsPane(
             fontSize = 14.sp,
             lineHeight = 20.sp,
         )
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(24.dp))
+
+        // Login can be by email or phone; register always uses email.
+        if (!register) {
+            LoginMethodToggle(
+                selected = loginMethod,
+                onSelect = { loginMethod = it; error = null },
+            )
+            Spacer(Modifier.height(22.dp))
+        }
 
         if (register) {
             AuthField(
@@ -320,26 +342,57 @@ private fun CredentialsPane(
             )
             Spacer(Modifier.height(16.dp))
         }
-        AuthField(
-            label = "Email",
-            value = email,
-            onValueChange = { email = it; error = null },
-            placeholder = "nama@email.com",
-            icon = Icons.Filled.Mail,
-            keyboardType = KeyboardType.Email,
-        )
-        Spacer(Modifier.height(16.dp))
-        AuthField(
-            label = "Kata sandi",
-            value = password,
-            onValueChange = { password = it; error = null },
-            placeholder = "Minimal 6 karakter",
-            icon = Icons.Filled.Lock,
-            keyboardType = KeyboardType.Password,
-            isPassword = true,
-            imeAction = if (register) ImeAction.Next else ImeAction.Done,
-            onImeAction = { if (!register) submit() },
-        )
+
+        if (emailFlow) {
+            AuthField(
+                label = "Email",
+                value = email,
+                onValueChange = { email = it; error = null },
+                placeholder = "nama@email.com",
+                icon = Icons.Filled.Mail,
+                keyboardType = KeyboardType.Email,
+            )
+        } else {
+            // Phone login: the field is shown for readiness but stays inert.
+            AuthField(
+                label = "Nomor HP",
+                value = phone,
+                onValueChange = { phone = it.filter { c -> c.isDigit() || c == '+' } },
+                placeholder = "mis. 0812xxxxxxx",
+                icon = Icons.Filled.Phone,
+                keyboardType = KeyboardType.Phone,
+            )
+            Spacer(Modifier.height(12.dp))
+            InfoBanner("Login dengan nomor HP segera hadir. Untuk sekarang, silakan masuk memakai email.")
+        }
+
+        if (register) {
+            Spacer(Modifier.height(16.dp))
+            AuthField(
+                label = "Nomor HP (opsional)",
+                value = phone,
+                onValueChange = { phone = it.filter { c -> c.isDigit() || c == '+' }; error = null },
+                placeholder = "mis. 0812xxxxxxx",
+                icon = Icons.Filled.Phone,
+                keyboardType = KeyboardType.Phone,
+                helper = "Segera hadir — belum disimpan untuk saat ini.",
+            )
+        }
+
+        if (emailFlow) {
+            Spacer(Modifier.height(16.dp))
+            AuthField(
+                label = "Kata sandi",
+                value = password,
+                onValueChange = { password = it; error = null },
+                placeholder = "Minimal 6 karakter",
+                icon = Icons.Filled.Lock,
+                keyboardType = KeyboardType.Password,
+                isPassword = true,
+                imeAction = if (register) ImeAction.Next else ImeAction.Done,
+                onImeAction = { if (!register) submit() },
+            )
+        }
         if (register) {
             Spacer(Modifier.height(16.dp))
             AuthField(
@@ -373,6 +426,7 @@ private fun CredentialsPane(
         PrimaryButton(
             text = if (register) "Daftar" else "Masuk",
             busy = busy,
+            enabled = emailFlow,
             onClick = { submit() },
         )
 
@@ -561,17 +615,23 @@ private fun AuthField(
 }
 
 @Composable
-private fun PrimaryButton(text: String, busy: Boolean = false, onClick: () -> Unit) {
+private fun PrimaryButton(
+    text: String,
+    busy: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(54.dp)
             .background(
-                Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)),
+                if (enabled) Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent))
+                else SolidColor(Color.White.copy(alpha = 0.08f)),
                 RoundedCornerShape(27.dp),
             )
             .clickable(
-                enabled = !busy,
+                enabled = enabled && !busy,
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onClick,
@@ -585,8 +645,86 @@ private fun PrimaryButton(text: String, busy: Boolean = false, onClick: () -> Un
                 modifier = Modifier.size(22.dp),
             )
         } else {
-            Text(text, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                text,
+                color = if (enabled) Color.White else NexusTextSecondary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
+    }
+}
+
+/** Email / phone segmented switch on the login pane. */
+@Composable
+private fun LoginMethodToggle(selected: LoginMethod, onSelect: (LoginMethod) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(16.dp))
+            .border(1.dp, NexusStroke, RoundedCornerShape(16.dp))
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        ToggleSegment("Email", selected == LoginMethod.EMAIL, Modifier.weight(1f)) {
+            onSelect(LoginMethod.EMAIL)
+        }
+        ToggleSegment("Nomor HP", selected == LoginMethod.PHONE, Modifier.weight(1f)) {
+            onSelect(LoginMethod.PHONE)
+        }
+    }
+}
+
+@Composable
+private fun ToggleSegment(
+    text: String,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .height(42.dp)
+            .then(
+                if (selected) {
+                    Modifier.background(
+                        Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)),
+                        RoundedCornerShape(12.dp),
+                    )
+                } else {
+                    Modifier
+                },
+            )
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            color = if (selected) Color.White else NexusTextSecondary,
+            fontSize = 14.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+        )
+    }
+}
+
+/** Small accent-tinted note used for "coming soon" and similar hints. */
+@Composable
+private fun InfoBanner(text: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NexusAccent.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+            .border(1.dp, NexusAccent.copy(alpha = 0.30f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Info, null, tint = NexusAccentSoft, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(text, color = NexusTextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
     }
 }
 
