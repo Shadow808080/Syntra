@@ -116,6 +116,7 @@ import com.example.syntra.net.NetMessage
 import com.example.syntra.net.NetPresence
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
+import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
@@ -1613,6 +1614,7 @@ private object VoiceBus {
 @Composable
 private fun AudioBubble(url: String, tint: Color) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     // Unique identity for this bubble instance, used to arbitrate the single-play bus.
     val token = remember { Any() }
     var playing by remember(url) { mutableStateOf(false) }
@@ -1662,34 +1664,46 @@ private fun AudioBubble(url: String, tint: Color) {
                     // never blocks; show a spinner until the audio is actually ready.
                     VoiceBus.active = token
                     loading = true
-                    player.setAudioAttributes(
-                        android.media.AudioAttributes.Builder()
-                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build(),
-                    )
-                    player.setDataSource(context, android.net.Uri.parse(url))
-                    player.setOnPreparedListener { mp ->
-                        loading = false
-                        prepared = true
-                        durationMs = runCatching { mp.duration }.getOrDefault(0)
-                        mp.start()
-                        playing = true
+                    // Cache-once: resolve to the local cached file (download the first
+                    // time), then play from disk. Keyed by URL, so the same voice note
+                    // shares ONE cache everywhere and replays cost no egress. Streams
+                    // straight from the URL if caching fails.
+                    scope.launch {
+                        val src = if (url.startsWith("http")) VideoCache.resolve(context, url) else url
+                        runCatching {
+                            player.setAudioAttributes(
+                                android.media.AudioAttributes.Builder()
+                                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                                    .build(),
+                            )
+                            player.setDataSource(context, android.net.Uri.parse(src))
+                            player.setOnPreparedListener { mp ->
+                                loading = false
+                                prepared = true
+                                durationMs = runCatching { mp.duration }.getOrDefault(0)
+                                mp.start()
+                                playing = true
+                            }
+                            player.setOnCompletionListener { mp ->
+                                playing = false
+                                progress = 0f
+                                runCatching { mp.seekTo(0) }
+                            }
+                            player.setOnErrorListener { mp, _, _ ->
+                                loading = false; playing = false; prepared = false
+                                // Reset so a later tap can start a clean prepare instead
+                                // of hitting IllegalStateException on the dead player.
+                                runCatching { mp.reset() }
+                                Toast.makeText(context, "Tidak bisa memutar suara.", Toast.LENGTH_SHORT).show()
+                                true
+                            }
+                            player.prepareAsync()
+                        }.onFailure {
+                            loading = false
+                            Toast.makeText(context, "Tidak bisa memutar suara.", Toast.LENGTH_SHORT).show()
+                        }
                     }
-                    player.setOnCompletionListener { mp ->
-                        playing = false
-                        progress = 0f
-                        runCatching { mp.seekTo(0) }
-                    }
-                    player.setOnErrorListener { mp, _, _ ->
-                        loading = false; playing = false; prepared = false
-                        // Reset so a later tap can start a clean prepare instead of
-                        // hitting IllegalStateException on the dead player.
-                        runCatching { mp.reset() }
-                        Toast.makeText(context, "Tidak bisa memutar suara.", Toast.LENGTH_SHORT).show()
-                        true
-                    }
-                    player.prepareAsync()
                 }
             }
         }.onFailure {
