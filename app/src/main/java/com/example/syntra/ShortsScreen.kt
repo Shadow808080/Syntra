@@ -77,6 +77,16 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -140,6 +150,10 @@ fun ShortsScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Auto-advance to the next reel when a clip finishes (toggle in Settings). Re-read
+    // whenever the tab comes back so a change in Settings takes effect immediately.
+    var autoScroll by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true)) }
+    LaunchedEffect(visible) { if (visible) autoScroll = SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true) }
     val reels = remember { mutableStateListOf<NetReel>() }
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
@@ -406,6 +420,14 @@ fun ShortsScreen(
                             onOpenProfile = {
                                 if (reel.creatorUsername.isNotBlank()) openProfileUser = reel.creatorUsername
                             },
+                            autoScroll = autoScroll,
+                            onVideoEnded = {
+                                // Auto-advance only when there's a next reel; the last
+                                // one just stops (its own player already replayed once).
+                                if (autoScroll && page < displayReels.lastIndex) {
+                                    scope.launch { pager.animateScrollToPage(page + 1) }
+                                }
+                            },
                         )
                     }
                 }
@@ -566,13 +588,33 @@ private fun ReelPage(
     /** Non-null only when the signed-in user owns this reel. */
     onDelete: (() -> Unit)? = null,
     onOpenProfile: () -> Unit = {},
+    /** When true, the clip plays once and [onVideoEnded] advances to the next reel. */
+    autoScroll: Boolean = false,
+    onVideoEnded: () -> Unit = {},
 ) {
     // Tap-to-pause, per reel. Reset when the reel scrolls off so coming back plays.
     var paused by remember { mutableStateOf(false) }
     LaunchedEffect(active) { if (!active) paused = false }
 
+    // Scrubber state, per reel. `seekReq` is bumped to a fresh Int on every drag so
+    // the same target twice still triggers a seek; `scrubbing` freezes the bar (and
+    // pauses playback) while the finger is down.
+    var posMs by remember(reel.id) { mutableIntStateOf(0) }
+    var durMs by remember(reel.id) { mutableIntStateOf(0) }
+    var seekReq by remember(reel.id) { mutableStateOf<Int?>(null) }
+    var scrubbing by remember(reel.id) { mutableStateOf(false) }
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        ReelVideo(url = reel.mediaUrl, playing = active && !paused, modifier = Modifier.fillMaxSize())
+        ReelVideo(
+            url = reel.mediaUrl,
+            playing = active && !paused && !scrubbing,
+            modifier = Modifier.fillMaxSize(),
+            loop = !autoScroll,
+            seekToMs = seekReq,
+            onDuration = { durMs = it },
+            onPosition = { if (!scrubbing) posMs = it },
+            onEnded = onVideoEnded,
+        )
 
         // Tap layer toggles pause — but only over the upper video area. The
         // bottom strip (caption, username, action rail) is left out so tapping
@@ -616,31 +658,140 @@ private fun ReelPage(
                 ),
         )
 
-        Row(
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.navigationBars),
-            verticalAlignment = Alignment.Bottom,
         ) {
-            ReelCaption(
-                reel = reel,
-                onOpenProfile = onOpenProfile,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 20.dp, end = 12.dp, bottom = 22.dp),
-            )
-            ReelActions(
-                reel = reel,
-                onLike = onLike,
-                onComment = onComment,
-                onShare = onShare,
-                onDelete = onDelete,
-                onOpenProfile = onOpenProfile,
-                modifier = Modifier.padding(end = 12.dp, bottom = 22.dp),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                ReelCaption(
+                    reel = reel,
+                    onOpenProfile = onOpenProfile,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 20.dp, end = 12.dp, bottom = 14.dp),
+                )
+                ReelActions(
+                    reel = reel,
+                    onLike = onLike,
+                    onComment = onComment,
+                    onShare = onShare,
+                    onDelete = onDelete,
+                    onOpenProfile = onOpenProfile,
+                    modifier = Modifier.padding(end = 12.dp, bottom = 14.dp),
+                )
+            }
+            // Scrubber pill — drag to jump anywhere in the clip. Sits at the very
+            // bottom, full width, and swells while dragging (modern short-video feel).
+            ReelScrubber(
+                positionMs = posMs,
+                durationMs = durMs,
+                onScrubStart = { scrubbing = true },
+                onScrub = { ms -> posMs = ms; seekReq = ms },
+                onScrubEnd = { scrubbing = false },
+                modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
             )
         }
     }
+}
+
+/**
+ * Draggable progress pill for a reel — jump anywhere in the clip by sliding it.
+ *
+ * Idle it's a thin, unobtrusive line; touch it and the whole bar swells with a
+ * round thumb and a time readout, the way modern short-video apps do it. Tapping
+ * anywhere on the track also seeks there. Reports seeks up via [onScrub]; the
+ * caller pauses playback between [onScrubStart] and [onScrubEnd].
+ */
+@Composable
+private fun ReelScrubber(
+    positionMs: Int,
+    durationMs: Int,
+    onScrubStart: () -> Unit,
+    onScrub: (Int) -> Unit,
+    onScrubEnd: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (durationMs <= 0) {
+        // No known duration yet (still preparing) — reserve nothing.
+        Spacer(modifier.fillMaxWidth().height(10.dp))
+        return
+    }
+    val density = LocalDensity.current
+    var trackW by remember { mutableStateOf(1) }
+    // While the finger is down we drive the bar from the drag, not playback.
+    var dragFrac by remember { mutableStateOf<Float?>(null) }
+    val dragging = dragFrac != null
+    val frac = (dragFrac ?: (positionMs.toFloat() / durationMs)).coerceIn(0f, 1f)
+
+    val barHeight by animateDpAsState(if (dragging) 7.dp else 3.dp, label = "scrubH")
+    val thumb by animateDpAsState(if (dragging) 16.dp else 0.dp, label = "scrubThumb")
+
+    fun seekTo(x: Float) {
+        val f = (x / trackW.toFloat()).coerceIn(0f, 1f)
+        dragFrac = f
+        onScrub((f * durationMs).toInt())
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        // Time readout, only while scrubbing.
+        if (dragging) {
+            Text(
+                text = "${formatClock((frac * durationMs).toInt())} / ${formatClock(durationMs)}",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
+            )
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(26.dp) // generous touch target
+                .onSizeChanged { trackW = it.width.coerceAtLeast(1) }
+                .pointerInput(durationMs) {
+                    detectTapGestures { offset -> onScrubStart(); seekTo(offset.x); onScrubEnd(); dragFrac = null }
+                }
+                .pointerInput(durationMs) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { offset -> onScrubStart(); seekTo(offset.x) },
+                        onDragEnd = { onScrubEnd(); dragFrac = null },
+                        onDragCancel = { onScrubEnd(); dragFrac = null },
+                    ) { change, _ -> change.consume(); seekTo(change.position.x) }
+                },
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            // Track (dim) + filled portion (white), both fully-rounded pills.
+            Box(
+                Modifier.fillMaxWidth().height(barHeight)
+                    .clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.32f)),
+            )
+            Box(
+                Modifier.fillMaxWidth(frac).height(barHeight)
+                    .clip(RoundedCornerShape(50)).background(Color.White),
+            )
+            // Thumb — appears only while dragging.
+            if (thumb > 0.dp) {
+                Box(
+                    Modifier
+                        .offset { IntOffset((frac * trackW - with(density) { thumb.toPx() } / 2f).roundToInt(), 0) }
+                        .size(thumb)
+                        .clip(CircleShape)
+                        .background(Color.White),
+                )
+            }
+        }
+    }
+}
+
+/** mm:ss for the scrubber readout. */
+private fun formatClock(ms: Int): String {
+    val total = (ms / 1000).coerceAtLeast(0)
+    return "%d:%02d".format(total / 60, total % 60)
 }
 
 /**
@@ -652,7 +803,21 @@ private fun ReelPage(
  * A TextureView composites like an ordinary view, so it stays inside its page.
  */
 @Composable
-private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifier) {
+private fun ReelVideo(
+    url: String,
+    playing: Boolean,
+    modifier: Modifier = Modifier,
+    /** Loop forever (true) vs play once then fire [onEnded] (used for auto-scroll). */
+    loop: Boolean = true,
+    /** When this changes to a non-null value, seek there (ms). Drives the scrubber. */
+    seekToMs: Int? = null,
+    /** Reports total duration (ms) once the video is prepared; 0 until then. */
+    onDuration: (Int) -> Unit = {},
+    /** Reports the current playback position (ms) a few times a second. */
+    onPosition: (Int) -> Unit = {},
+    /** Fired once the clip reaches its end (only when [loop] is false). */
+    onEnded: () -> Unit = {},
+) {
     if (url.isBlank()) {
         Box(modifier.background(Color.Black))
         return
@@ -671,6 +836,11 @@ private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifi
     var surface by remember(url) { mutableStateOf<Surface?>(null) }
     var source by remember(url) { mutableStateOf<String?>(null) }
     var started by remember(url) { mutableStateOf(false) }
+    // Latest callbacks/flags captured so the one-shot prepare below always sees
+    // current values without re-running (which would re-create the player).
+    val loopLatest by rememberUpdatedState(loop)
+    val onEndedLatest by rememberUpdatedState(onEnded)
+    val onDurationLatest by rememberUpdatedState(onDuration)
 
     // Download-once: play from the local cached file, or stream (and fall back)
     // if the miss can't be filled. Immutable media urls make this safe forever —
@@ -686,12 +856,38 @@ private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifi
         runCatching {
             player.setSurface(s)
             player.setDataSource(src)
-            player.isLooping = true
+            player.isLooping = loopLatest
             player.setOnVideoSizeChangedListener { _, vw, vh -> videoW = vw; videoH = vh }
-            player.setOnPreparedListener { ready = true }
+            player.setOnPreparedListener {
+                ready = true
+                onDurationLatest(runCatching { it.duration }.getOrDefault(0))
+            }
             player.setOnErrorListener { _, _, _ -> failed = true; true }
+            // Only fires when NOT looping — that's the "video finished" signal the
+            // feed uses to auto-advance to the next reel.
+            player.setOnCompletionListener { if (!loopLatest) onEndedLatest() }
             player.prepareAsync()
         }.onFailure { failed = true }
+    }
+
+    // Keep looping in sync if the setting flips while a reel is on screen.
+    LaunchedEffect(loop, ready) {
+        if (ready) runCatching { player.isLooping = loop }
+    }
+
+    // Seek when the scrubber asks. Position updates below reflect it immediately.
+    LaunchedEffect(seekToMs) {
+        val ms = seekToMs ?: return@LaunchedEffect
+        if (ready) runCatching { player.seekTo(ms) }
+    }
+
+    // Feed the scrubber: sample the real playback position while it plays.
+    LaunchedEffect(ready, playing) {
+        if (!ready) return@LaunchedEffect
+        while (true) {
+            if (playing) onPosition(runCatching { player.currentPosition }.getOrDefault(0))
+            delay(200)
+        }
     }
 
     DisposableEffect(url) {
@@ -771,6 +967,7 @@ fun ReelViewer(reels: List<NetReel>, startIndex: Int, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     val items = remember { mutableStateListOf<NetReel>().apply { addAll(reels) } }
     var commentsFor by remember { mutableStateOf<NetReel?>(null) }
+    val autoScroll = remember { SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true) }
 
     if (items.isEmpty()) { onClose(); return }
     val pager = rememberPagerState(
@@ -802,6 +999,12 @@ fun ReelViewer(reels: List<NetReel>, startIndex: Int, onClose: () -> Unit) {
                 onLike = { toggleLike(reel) },
                 onComment = { commentsFor = reel },
                 onShare = { Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show() },
+                autoScroll = autoScroll,
+                onVideoEnded = {
+                    if (autoScroll && page < items.lastIndex) {
+                        scope.launch { pager.animateScrollToPage(page + 1) }
+                    }
+                },
             )
         }
         // Back button over the viewer.
