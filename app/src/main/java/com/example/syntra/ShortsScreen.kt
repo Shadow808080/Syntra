@@ -386,6 +386,17 @@ fun ShortsScreen(
             displayReels.isEmpty() -> FollowingEmpty()
 
             else -> {
+                // Auto-hide the bottom bar in the feed: moving to a later reel
+                // (scrolling down) hides it for an immersive view; going back up shows
+                // it. Reset to shown when leaving the tab.
+                var prevPage by remember { mutableStateOf(0) }
+                LaunchedEffect(pager.currentPage) {
+                    val p = pager.currentPage
+                    if (p > prevPage) BottomBarVisibility.visible = false
+                    else if (p < prevPage) BottomBarVisibility.visible = true
+                    prevPage = p
+                }
+                DisposableEffect(Unit) { onDispose { BottomBarVisibility.visible = true } }
                 // Count a view whenever a reel settles on screen.
                 LaunchedEffect(pager.currentPage, displayReels.size) {
                     displayReels.getOrNull(pager.currentPage)?.let { r ->

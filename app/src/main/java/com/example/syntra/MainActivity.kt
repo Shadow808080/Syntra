@@ -438,14 +438,25 @@ private fun MainTabs(onSignOut: () -> Unit) {
                     )
                 }
             }
-            if (!overlay) {
-                // Persistent music mini-player above the nav bar (renders only when a
-                // track is loaded). Tapping it opens the full now-playing screen.
-                MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
-                NexusBottomBar(
-                    selected = tabOrder[pager.currentPage],
-                    onSelect = { goTo(it) },
-                )
+            // Auto-hide on scroll (chat & shorts): the bar slides down when content
+            // scrolls down and back up when it scrolls up. Always visible on other
+            // tabs; reset to visible whenever the tab changes.
+            LaunchedEffect(pager.currentPage) { BottomBarVisibility.visible = true }
+            val barShown = !overlay && BottomBarVisibility.visible
+            androidx.compose.animation.AnimatedVisibility(
+                visible = barShown,
+                enter = androidx.compose.animation.slideInVertically(initialOffsetY = { it }),
+                exit = androidx.compose.animation.slideOutVertically(targetOffsetY = { it }),
+            ) {
+                Column {
+                    // Persistent music mini-player above the nav bar (renders only when
+                    // a track is loaded). Tapping it opens the full now-playing screen.
+                    MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
+                    NexusBottomBar(
+                        selected = tabOrder[pager.currentPage],
+                        onSelect = { goTo(it) },
+                    )
+                }
             }
         }
 

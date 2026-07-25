@@ -51,6 +51,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -971,7 +972,9 @@ fun ChatScreen(
                 modifier = Modifier.weight(1f),
             ) {
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .nestedScroll(rememberHideBottomBarOnScroll()),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 // First-load skeleton: shimmering placeholder rows instead of a

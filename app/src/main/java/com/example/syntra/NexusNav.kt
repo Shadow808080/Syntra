@@ -36,6 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,6 +56,37 @@ import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 
 enum class NexusTab { CHAT, MUSIC, SHORTS, ROOMS, CALLS }
+
+/**
+ * Whether the bottom navigation is currently shown. Scrolling content down hides
+ * it (more room to read/watch); scrolling up brings it back. Screens toggle this
+ * via [hideBottomBarOnScroll]; the host (MainActivity) reads it. Reset to true on
+ * tab change so a tab never opens with the bar hidden.
+ */
+object BottomBarVisibility {
+    var visible by androidx.compose.runtime.mutableStateOf(true)
+}
+
+/**
+ * A nested-scroll connection that hides the bottom bar when the user scrolls the
+ * content down and reveals it when they scroll up. A small threshold avoids the
+ * bar flickering on tiny movements.
+ */
+@Composable
+fun rememberHideBottomBarOnScroll(): androidx.compose.ui.input.nestedscroll.NestedScrollConnection =
+    androidx.compose.runtime.remember {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPreScroll(
+                available: androidx.compose.ui.geometry.Offset,
+                source: androidx.compose.ui.input.nestedscroll.NestedScrollSource,
+            ): androidx.compose.ui.geometry.Offset {
+                val dy = available.y
+                if (dy < -4f) BottomBarVisibility.visible = false   // finger up → content scrolls down
+                else if (dy > 4f) BottomBarVisibility.visible = true // finger down → content scrolls up
+                return androidx.compose.ui.geometry.Offset.Zero
+            }
+        }
+    }
 
 /**
  * Padding every top bar uses, so the app title lands on the same spot no matter
