@@ -12,6 +12,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -803,9 +804,17 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                 Spacer(Modifier.weight(1f))
                 PlayerIconButton(Icons.Filled.MoreVert, size = 40.dp, iconSize = 22.dp) { /* menu lanjutan */ }
             }
-            Spacer(Modifier.weight(1f))
-            ArtworkImage(url = track.artworkUrl, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)))
-            Spacer(Modifier.height(32.dp))
+            // Square cover, centred in the flexible middle so the controls below are
+            // always on screen (a fillMaxWidth-only image ate the whole height before).
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(vertical = 18.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                ArtworkImage(
+                    url = track.artworkUrl,
+                    modifier = Modifier.fillMaxWidth(0.88f).aspectRatio(1f).clip(RoundedCornerShape(18.dp)),
+                )
+            }
             // Title + artist + like.
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -862,8 +871,8 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                     tint = if (MusicPlayer.repeatOne) NexusAccentSoft else Color.White.copy(alpha = 0.7f),
                 ) { MusicPlayer.toggleRepeat() }
             }
-            Spacer(Modifier.weight(1f))
-            Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(20.dp))
+            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(12.dp))
         }
     }
 }
