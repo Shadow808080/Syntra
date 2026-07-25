@@ -128,7 +128,12 @@ object CallLog {
                     at = o.optLong("at"),
                     durationSec = o.optInt("dur"),
                 )
-            }.sortedByDescending { it.at }
+            }
+                // Guard the LazyColumn key: two calls logged in the same millisecond
+                // (or a double teardown) once produced entries with an identical id,
+                // which crashed the list with a duplicate-key error. De-dupe on load.
+                .distinctBy { it.id }
+                .sortedByDescending { it.at }
         }.getOrDefault(emptyList())
     }
 

@@ -412,7 +412,9 @@ private fun CallSession(d: CallDescriptor) {
             CallLog.add(
                 context,
                 CallEntry(
-                    id = "c-${System.currentTimeMillis()}",
+                    // Millis alone collided when two calls ended in the same ms; add a
+                    // random suffix so the call-log list keys are always unique.
+                    id = "c-${System.currentTimeMillis()}-${(0..999999).random()}",
                     peerName = d.peerName,
                     peerId = d.peerId,
                     video = videoLatest,
