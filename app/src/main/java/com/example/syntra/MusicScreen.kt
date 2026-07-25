@@ -1,0 +1,826 @@
+package com.example.syntra
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import com.example.syntra.net.MusicAlbum
+import com.example.syntra.net.MusicArtist
+import com.example.syntra.net.MusicBrowse
+import com.example.syntra.net.MusicClient
+import com.example.syntra.net.MusicPlayer
+import com.example.syntra.net.MusicPlaylist
+import com.example.syntra.net.MusicTrack
+import com.example.syntra.ui.theme.NexusAccent
+import com.example.syntra.ui.theme.NexusAccentSoft
+import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusStroke
+import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusTextPrimary
+import com.example.syntra.ui.theme.NexusTextSecondary
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+// ---------------------------------------------------------------------------
+// Music tab — a Spotify-like browse/search over the free Deezer catalogue.
+//
+// Data: net/MusicClient (Deezer). Playback: net/MusicPlayer (a 30-second preview
+// per track). The mini-player + now-playing screen live at the app root
+// (MainActivity) so music keeps playing across tabs.
+// ---------------------------------------------------------------------------
+
+/** What the detail overlay is showing, if anything. */
+private sealed interface MusicDetail {
+    data class Playlist(val item: MusicPlaylist) : MusicDetail
+    data class Album(val item: MusicAlbum) : MusicDetail
+    data class Artist(val item: MusicArtist) : MusicDetail
+}
+
+@Composable
+fun MusicScreen(
+    modifier: Modifier = Modifier,
+    visible: Boolean = true,
+    onOverlayChange: (Boolean) -> Unit = {},
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var browse by remember { mutableStateOf(MusicBrowse()) }
+    var loading by remember { mutableStateOf(true) }
+    var failed by remember { mutableStateOf(false) }
+    var searching by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var detail by remember { mutableStateOf<MusicDetail?>(null) }
+
+    // Load the charts once.
+    LaunchedEffect(Unit) {
+        runCatching { MusicClient.browse() }
+            .onSuccess { browse = it; failed = it.isEmpty }
+            .onFailure { failed = true }
+        loading = false
+    }
+
+    // A detail page counts as a full-screen overlay (hide the bottom bar).
+    LaunchedEffect(detail) { onOverlayChange(detail != null) }
+
+    Box(modifier = modifier.fillMaxSize().background(NexusBackground)) {
+        Column(Modifier.fillMaxSize()) {
+            MusicTopBar(
+                searching = searching,
+                query = query,
+                onQueryChange = { query = it },
+                onOpenSearch = { searching = true },
+                onCloseSearch = { searching = false; query = "" },
+            )
+
+            when {
+                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
+                }
+                searching -> MusicSearchBody(
+                    query = query,
+                    onPlay = { track, queue -> MusicPlayer.play(context, track, queue) },
+                    onOpenArtist = { detail = MusicDetail.Artist(it) },
+                    onOpenAlbum = { detail = MusicDetail.Album(it) },
+                )
+                failed -> MusicError { scope.launch {
+                    loading = true; failed = false
+                    runCatching { MusicClient.browse() }.onSuccess { browse = it; failed = it.isEmpty }.onFailure { failed = true }
+                    loading = false
+                } }
+                else -> MusicBrowseBody(
+                    browse = browse,
+                    onPlay = { track, queue -> MusicPlayer.play(context, track, queue) },
+                    onOpenPlaylist = { detail = MusicDetail.Playlist(it) },
+                    onOpenAlbum = { detail = MusicDetail.Album(it) },
+                    onOpenArtist = { detail = MusicDetail.Artist(it) },
+                )
+            }
+        }
+    }
+
+    // Detail overlay (playlist / album / artist track list).
+    detail?.let { d ->
+        MusicDetailScreen(
+            detail = d,
+            onBack = { detail = null },
+            onPlay = { track, queue -> MusicPlayer.play(context, track, queue) },
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top bar
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun MusicTopBar(
+    searching: Boolean,
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onOpenSearch: () -> Unit,
+    onCloseSearch: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(start = 20.dp, end = 14.dp, top = 18.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (searching) {
+            Box(
+                modifier = Modifier.size(40.dp).clickable(
+                    indication = null, interactionSource = remember { MutableInteractionSource() },
+                    onClick = onCloseSearch,
+                ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Tutup", tint = NexusTextPrimary, modifier = Modifier.size(23.dp))
+            }
+            Spacer(Modifier.width(4.dp))
+            Box(modifier = Modifier.weight(1f)) {
+                if (query.isEmpty()) Text("Cari lagu, artis, album…", color = NexusTextSecondary, fontSize = 16.sp)
+                val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+                LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+                BasicTextField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    singleLine = true,
+                    textStyle = TextStyle(color = NexusTextPrimary, fontSize = 16.sp),
+                    cursorBrush = SolidColor(NexusAccentSoft),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                )
+            }
+            if (query.isNotEmpty()) {
+                Box(
+                    modifier = Modifier.size(36.dp).clickable(
+                        indication = null, interactionSource = remember { MutableInteractionSource() },
+                    ) { onQueryChange("") },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.Close, "Bersihkan", tint = NexusTextSecondary, modifier = Modifier.size(20.dp)) }
+            }
+        } else {
+            Text("Musik", color = NexusTextPrimary, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.weight(1f))
+            Box(
+                modifier = Modifier.size(42.dp).clickable(
+                    indication = null, interactionSource = remember { MutableInteractionSource() },
+                    onClick = onOpenSearch,
+                ),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Filled.Search, "Cari", tint = NexusTextPrimary, modifier = Modifier.size(24.dp)) }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Browse body
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun MusicBrowseBody(
+    browse: MusicBrowse,
+    onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
+    onOpenPlaylist: (MusicPlaylist) -> Unit,
+    onOpenAlbum: (MusicAlbum) -> Unit,
+    onOpenArtist: (MusicArtist) -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = 6.dp, bottom = 150.dp),
+    ) {
+        if (browse.trending.isNotEmpty()) {
+            item { SectionHeader("Sedang tren") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(browse.trending, key = { it.id }) { t ->
+                        TrackCard(t) { onPlay(t, browse.trending) }
+                    }
+                }
+            }
+        }
+        if (browse.playlists.isNotEmpty()) {
+            item { SectionHeader("Playlist populer") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(browse.playlists, key = { it.id }) { p ->
+                        PlaylistCard(p) { onOpenPlaylist(p) }
+                    }
+                }
+            }
+        }
+        if (browse.artists.isNotEmpty()) {
+            item { SectionHeader("Artis teratas") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(browse.artists, key = { it.id }) { a ->
+                        ArtistCard(a) { onOpenArtist(a) }
+                    }
+                }
+            }
+        }
+        if (browse.albums.isNotEmpty()) {
+            item { SectionHeader("Album populer") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(browse.albums, key = { it.id }) { a ->
+                        AlbumCard(a) { onOpenAlbum(a) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Search body
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun MusicSearchBody(
+    query: String,
+    onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
+    onOpenArtist: (MusicArtist) -> Unit,
+    onOpenAlbum: (MusicAlbum) -> Unit,
+) {
+    val tracks = remember { mutableStateListOf<MusicTrack>() }
+    val artists = remember { mutableStateListOf<MusicArtist>() }
+    val albums = remember { mutableStateListOf<MusicAlbum>() }
+    var loading by remember { mutableStateOf(false) }
+
+    // Debounced search: wait for the user to stop typing before hitting the API.
+    LaunchedEffect(query) {
+        if (query.isBlank()) { tracks.clear(); artists.clear(); albums.clear(); loading = false; return@LaunchedEffect }
+        loading = true
+        delay(350)
+        runCatching { MusicClient.search(query) }.onSuccess { r ->
+            tracks.clear(); tracks.addAll(r.tracks)
+            artists.clear(); artists.addAll(r.artists)
+            albums.clear(); albums.addAll(r.albums)
+        }
+        loading = false
+    }
+
+    if (query.isBlank()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Cari lagu, artis, atau album", color = NexusTextSecondary, fontSize = 14.sp)
+        }
+        return
+    }
+    if (loading && tracks.isEmpty() && artists.isEmpty() && albums.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = 6.dp, bottom = 150.dp),
+    ) {
+        if (artists.isNotEmpty()) {
+            item { SectionHeader("Artis") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(artists, key = { it.id }) { a -> ArtistCard(a) { onOpenArtist(a) } }
+                }
+            }
+        }
+        if (tracks.isNotEmpty()) {
+            item { SectionHeader("Lagu") }
+            items(tracks, key = { it.id }) { t -> TrackRow(t) { onPlay(t, tracks) } }
+        }
+        if (albums.isNotEmpty()) {
+            item { SectionHeader("Album") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(albums, key = { it.id }) { a -> AlbumCard(a) { onOpenAlbum(a) } }
+                }
+            }
+        }
+        if (tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && !loading) {
+            item {
+                Box(Modifier.fillMaxWidth().padding(top = 60.dp), contentAlignment = Alignment.Center) {
+                    Text("Tak ada hasil untuk \"$query\"", color = NexusTextSecondary, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detail screen (playlist / album / artist → track list)
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun MusicDetailScreen(
+    detail: MusicDetail,
+    onBack: () -> Unit,
+    onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    val context = LocalContext.current
+    val tracks = remember(detail) { mutableStateListOf<MusicTrack>() }
+    var loading by remember(detail) { mutableStateOf(true) }
+
+    val title: String
+    val subtitle: String
+    val artwork: String?
+    val round: Boolean
+    when (detail) {
+        is MusicDetail.Playlist -> { title = detail.item.title; subtitle = detail.item.subtitle; artwork = detail.item.pictureUrl; round = false }
+        is MusicDetail.Album -> { title = detail.item.title; subtitle = detail.item.artist; artwork = detail.item.artworkUrl; round = false }
+        is MusicDetail.Artist -> { title = detail.item.name; subtitle = "Artis"; artwork = detail.item.pictureUrl; round = true }
+    }
+
+    LaunchedEffect(detail) {
+        loading = true
+        val list = runCatching {
+            when (detail) {
+                is MusicDetail.Playlist -> MusicClient.playlistTracks(detail.item.id)
+                is MusicDetail.Album -> MusicClient.albumTracks(detail.item.id)
+                is MusicDetail.Artist -> MusicClient.artistTopTracks(detail.item.id)
+            }
+        }.getOrDefault(emptyList())
+        tracks.clear(); tracks.addAll(list)
+        loading = false
+    }
+
+    Box(Modifier.fillMaxSize().background(NexusBackground)) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 150.dp),
+        ) {
+            item {
+                Column {
+                    // Top bar with a back button over the header.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .windowInsetsPadding(WindowInsets.statusBars)
+                            .padding(start = 12.dp, top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier.size(40.dp).clickable(
+                                indication = null, interactionSource = remember { MutableInteractionSource() },
+                                onClick = onBack,
+                            ),
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Kembali", tint = NexusTextPrimary, modifier = Modifier.size(23.dp)) }
+                    }
+                    // Big header art + title.
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        ArtworkImage(
+                            url = artwork,
+                            modifier = Modifier.size(180.dp).clip(RoundedCornerShape(if (round) 90.dp else 14.dp)),
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Text(title, color = NexusTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        if (subtitle.isNotBlank()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(subtitle, color = NexusTextSecondary, fontSize = 13.sp)
+                        }
+                        Spacer(Modifier.height(16.dp))
+                        // Play-all button.
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
+                                .clickable(
+                                    indication = null, interactionSource = remember { MutableInteractionSource() },
+                                ) { tracks.firstOrNull()?.let { onPlay(it, tracks.toList()) } }
+                                .padding(horizontal = 32.dp, vertical = 12.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Putar", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+            if (loading) {
+                item {
+                    Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
+                    }
+                }
+            } else {
+                items(tracks, key = { it.id }) { t -> TrackRow(t) { onPlay(t, tracks.toList()) } }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cards & rows
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        title,
+        color = NexusTextPrimary,
+        fontSize = 19.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 12.dp),
+    )
+}
+
+@Composable
+private fun TrackCard(track: MusicTrack, onClick: () -> Unit) {
+    val isCurrent = MusicPlayer.current?.id == track.id
+    Column(
+        modifier = Modifier
+            .width(140.dp)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
+    ) {
+        Box {
+            ArtworkImage(url = track.artworkUrl, modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)))
+            if (isCurrent) NowPlayingBadge(Modifier.align(Alignment.BottomEnd).padding(8.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(track.artist, color = NexusTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun PlaylistCard(p: MusicPlaylist, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .width(150.dp)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
+    ) {
+        ArtworkImage(url = p.pictureUrl, modifier = Modifier.size(150.dp).clip(RoundedCornerShape(12.dp)))
+        Spacer(Modifier.height(8.dp))
+        Text(p.title, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 17.sp)
+    }
+}
+
+@Composable
+private fun ArtistCard(a: MusicArtist, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .width(120.dp)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        ArtworkImage(url = a.pictureUrl, modifier = Modifier.size(120.dp).clip(CircleShape))
+        Spacer(Modifier.height(8.dp))
+        Text(a.name, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun AlbumCard(a: MusicAlbum, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .width(140.dp)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
+    ) {
+        ArtworkImage(url = a.artworkUrl, modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)))
+        Spacer(Modifier.height(8.dp))
+        Text(a.title, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(a.artist, color = NexusTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun TrackRow(track: MusicTrack, onClick: () -> Unit) {
+    val isCurrent = MusicPlayer.current?.id == track.id
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ArtworkImage(url = track.artworkUrl, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(2.dp))
+            Text(track.artist, color = NexusTextSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (isCurrent) NowPlayingBadge()
+    }
+}
+
+/** A small equaliser-ish dot marking the currently playing track. */
+@Composable
+private fun NowPlayingBadge(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.size(20.dp).background(NexusAccent, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            if (MusicPlayer.isPlaying) Icons.Filled.MusicNote else Icons.Filled.Pause,
+            null, tint = Color.White, modifier = Modifier.size(12.dp),
+        )
+    }
+}
+
+/** Artwork with a subtle placeholder while it loads / when absent. */
+@Composable
+private fun ArtworkImage(url: String?, modifier: Modifier = Modifier) {
+    Box(modifier = modifier.background(NexusSurface), contentAlignment = Alignment.Center) {
+        if (!url.isNullOrBlank()) {
+            AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize())
+        } else {
+            Icon(Icons.Filled.MusicNote, null, tint = NexusTextSecondary, modifier = Modifier.size(28.dp))
+        }
+    }
+}
+
+@Composable
+private fun MusicError(onRetry: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(40.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Icon(Icons.Filled.MusicNote, null, tint = NexusTextSecondary, modifier = Modifier.size(40.dp))
+        Spacer(Modifier.height(12.dp))
+        Text("Gagal memuat musik", color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        Text("Periksa koneksi lalu coba lagi.", color = NexusTextSecondary, fontSize = 13.sp)
+        Spacer(Modifier.height(18.dp))
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(NexusAccent)
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onRetry)
+                .padding(horizontal = 28.dp, vertical = 11.dp),
+        ) { Text("Coba lagi", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mini-player + Now-playing (mounted at the app root by MainActivity)
+// ---------------------------------------------------------------------------
+
+/** Compact player bar. Renders nothing when no track is loaded. Tap to expand. */
+@Composable
+fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
+    val track = MusicPlayer.current ?: return
+    val context = LocalContext.current
+
+    // Drive the progress bar while playing.
+    LaunchedEffect(MusicPlayer.isPlaying, track.id) {
+        while (MusicPlayer.isPlaying) { MusicPlayer.tick(); delay(200) }
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        // Thin progress line on top of the bar.
+        Box(Modifier.fillMaxWidth().height(2.dp).background(NexusStroke)) {
+            Box(Modifier.fillMaxWidth(MusicPlayer.progress).height(2.dp).background(NexusAccentSoft))
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF17171F))
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onExpand)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ArtworkImage(url = track.artworkUrl, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(track.title, color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(track.artist, color = NexusTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            PlayerIconButton(
+                icon = if (MusicPlayer.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                size = 40.dp, iconSize = 24.dp,
+            ) { MusicPlayer.togglePlayPause() }
+        }
+    }
+}
+
+/** Full-screen now-playing: big art, title, seek bar, transport controls. */
+@Composable
+fun NowPlayingScreen(onClose: () -> Unit) {
+    val track = MusicPlayer.current
+    if (track == null) { onClose(); return }
+    BackHandler(onBack = onClose)
+    val context = LocalContext.current
+
+    LaunchedEffect(MusicPlayer.isPlaying, track.id) {
+        while (MusicPlayer.isPlaying) { MusicPlayer.tick(); delay(200) }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF23202E), Color(0xFF0C0C12)))),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars).padding(horizontal = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            // Header: collapse button.
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier.size(40.dp).clickable(
+                        indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClose,
+                    ),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.Close, "Tutup", tint = Color.White, modifier = Modifier.size(24.dp)) }
+                Spacer(Modifier.weight(1f))
+                Text("SEDANG DIPUTAR", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.size(40.dp))
+            }
+            Spacer(Modifier.weight(1f))
+            ArtworkImage(url = track.artworkUrl, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                .let { it })
+            Spacer(Modifier.height(32.dp))
+            Text(track.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            Text(track.artist, color = Color.White.copy(alpha = 0.7f), fontSize = 15.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(24.dp))
+            // Seek bar.
+            NowPlayingSeekBar()
+            Spacer(Modifier.height(20.dp))
+            // Transport controls.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PlayerIconButton(Icons.Filled.SkipPrevious, size = 56.dp, iconSize = 34.dp, tint = if (MusicPlayer.hasPrevious) Color.White else Color.White.copy(alpha = 0.3f)) {
+                    MusicPlayer.previous(context)
+                }
+                Spacer(Modifier.width(24.dp))
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .background(Brush.linearGradient(listOf(NexusAccentSoft, NexusAccent)), CircleShape)
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { MusicPlayer.togglePlayPause() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (MusicPlayer.preparing) {
+                        CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
+                    } else {
+                        Icon(if (MusicPlayer.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Putar/Jeda",
+                            tint = Color.White, modifier = Modifier.size(38.dp))
+                    }
+                }
+                Spacer(Modifier.width(24.dp))
+                PlayerIconButton(Icons.Filled.SkipNext, size = 56.dp, iconSize = 34.dp, tint = if (MusicPlayer.hasNext) Color.White else Color.White.copy(alpha = 0.3f)) {
+                    MusicPlayer.next(context)
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun NowPlayingSeekBar() {
+    var width by remember { mutableStateOf(1) }
+    Column(Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(20.dp)
+                .onSizeChanged { width = it.width.coerceAtLeast(1) }
+                .pointerInput(Unit) {
+                    detectTapGestures { off -> MusicPlayer.seekToFraction(off.x / width) }
+                }
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures { change, _ ->
+                        change.consume(); MusicPlayer.seekToFraction(change.position.x / width)
+                    }
+                },
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.22f)))
+            Box(Modifier.fillMaxWidth(MusicPlayer.progress).height(4.dp).clip(RoundedCornerShape(50)).background(Color.White))
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(clock(MusicPlayer.positionMs), color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
+            Text(clock(MusicPlayer.durationMs), color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun PlayerIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    size: androidx.compose.ui.unit.Dp,
+    iconSize: androidx.compose.ui.unit.Dp,
+    tint: Color = Color.White,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier.size(size).clickable(
+            indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick,
+        ),
+        contentAlignment = Alignment.Center,
+    ) { Icon(icon, null, tint = tint, modifier = Modifier.size(iconSize)) }
+}
+
+private fun clock(ms: Int): String {
+    val s = (ms / 1000).coerceAtLeast(0)
+    return "%d:%02d".format(s / 60, s % 60)
+}

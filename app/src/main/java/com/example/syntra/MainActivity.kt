@@ -320,7 +320,7 @@ private fun MaintenanceScreen(onAgree: () -> Unit) {
 }
 
 /** Home tabs, in the same order as the bottom bar, so a swipe steps between them. */
-private val tabOrder = listOf(NexusTab.CHAT, NexusTab.SHORTS, NexusTab.ROOMS, NexusTab.CALLS)
+private val tabOrder = listOf(NexusTab.CHAT, NexusTab.MUSIC, NexusTab.SHORTS, NexusTab.ROOMS, NexusTab.CALLS)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -332,6 +332,9 @@ private fun MainTabs(onSignOut: () -> Unit) {
     var chatOverlay by remember { mutableStateOf(false) }
     var roomOverlay by remember { mutableStateOf(false) }
     var shortsOverlay by remember { mutableStateOf(false) }
+    var musicOverlay by remember { mutableStateOf(false) }
+    // The full-screen now-playing music view, opened by tapping the mini-player.
+    var showNowPlaying by remember { mutableStateOf(false) }
     // True while a full-screen call is up (not minimized) — used to pause Shorts.
     val callBusy = CallController.isBusy
 
@@ -396,7 +399,7 @@ private fun MainTabs(onSignOut: () -> Unit) {
     // One fixed bottom bar below the pager — it never slides with the pages, only
     // its highlight follows. It hides when a full-screen overlay is up so chat
     // detail / story viewer / voice room can cover the whole screen.
-    val overlay = chatOverlay || roomOverlay || shortsOverlay
+    val overlay = chatOverlay || roomOverlay || shortsOverlay || musicOverlay
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(
@@ -411,6 +414,11 @@ private fun MainTabs(onSignOut: () -> Unit) {
                         modifier = Modifier.fillMaxSize(),
                         onSignOut = onSignOut,
                         onOverlayChange = { chatOverlay = it },
+                    )
+                    NexusTab.MUSIC -> MusicScreen(
+                        modifier = Modifier.fillMaxSize(),
+                        visible = tabOrder[pager.currentPage] == NexusTab.MUSIC,
+                        onOverlayChange = { musicOverlay = it },
                     )
                     NexusTab.SHORTS -> ShortsScreen(
                     modifier = Modifier.fillMaxSize(),
@@ -431,12 +439,18 @@ private fun MainTabs(onSignOut: () -> Unit) {
                 }
             }
             if (!overlay) {
+                // Persistent music mini-player above the nav bar (renders only when a
+                // track is loaded). Tapping it opens the full now-playing screen.
+                MusicMiniPlayer(onExpand = { showNowPlaying = true })
                 NexusBottomBar(
                     selected = tabOrder[pager.currentPage],
                     onSelect = { goTo(it) },
                 )
             }
         }
+
+        // Full-screen now-playing, above the tabs (but below an active call).
+        if (showNowPlaying) NowPlayingScreen(onClose = { showNowPlaying = false })
 
         // The call (incoming or outgoing) is rendered above everything by CallHost:
         // full-screen, or a draggable floating window when minimized.

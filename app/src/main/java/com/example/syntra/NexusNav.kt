@@ -25,10 +25,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -52,7 +54,7 @@ import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 
-enum class NexusTab { CHAT, SHORTS, ROOMS, CALLS }
+enum class NexusTab { CHAT, MUSIC, SHORTS, ROOMS, CALLS }
 
 /**
  * Padding every top bar uses, so the app title lands on the same spot no matter
@@ -98,9 +100,11 @@ fun NexusBottomBar(
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Each tab takes an equal 1/4 slice so they span edge to edge — no
-            // empty gutters on the sides.
+            // Each tab takes an equal 1/5 slice so they span edge to edge — no
+            // empty gutters on the sides. Music sits next to Chat, which pushes
+            // Shorts to the visual centre.
             NavItem(NexusTab.CHAT, Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble, "Chat", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.MUSIC, Icons.Outlined.MusicNote, Icons.Filled.MusicNote, "Musik", selected, onSelect, Modifier.weight(1f))
             NavItem(NexusTab.SHORTS, Icons.Outlined.PlayCircle, Icons.Filled.PlayCircle, "Shorts", selected, onSelect, Modifier.weight(1f))
             NavItem(NexusTab.ROOMS, Icons.Outlined.Mic, Icons.Filled.Mic, "Rooms", selected, onSelect, Modifier.weight(1f))
             NavItem(NexusTab.CALLS, Icons.Outlined.Call, Icons.Filled.Call, "Calls", selected, onSelect, Modifier.weight(1f))
