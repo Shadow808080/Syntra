@@ -176,7 +176,13 @@ object MusicPlayer {
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build(),
             )
-            mp.setDataSource(track.previewUrl)
+            val src = track.previewUrl
+            if (src.startsWith("content://") || src.startsWith("file://")) {
+                // A local file the user picked from device storage.
+                mp.setDataSource(appCtx, android.net.Uri.parse(src))
+            } else {
+                mp.setDataSource(src)
+            }
             mp.setOnPreparedListener { p ->
                 preparing = false
                 durationMs = runCatching { p.duration }.getOrDefault(0)

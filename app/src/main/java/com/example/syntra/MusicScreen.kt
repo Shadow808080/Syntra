@@ -1,5 +1,6 @@
 package com.example.syntra
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
@@ -36,6 +37,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -138,6 +140,27 @@ fun MusicScreen(
     var query by remember { mutableStateOf("") }
     var detail by remember { mutableStateOf<MusicDetail?>(null) }
 
+    // The user's own audio, picked from device storage. Loaded once, then kept in
+    // sync as files are added/removed. These play through the same MusicPlayer.
+    val localTracks = remember { mutableStateListOf<MusicTrack>() }
+    LaunchedEffect(Unit) {
+        val saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.example.syntra.net.LocalMusicStore.list(context)
+        }
+        localTracks.clear(); localTracks.addAll(saved)
+    }
+    // OpenDocument (not GetContent) so the read grant can be persisted across restarts.
+    val pickAudio = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri != null) scope.launch {
+            val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.example.syntra.net.LocalMusicStore.add(context, uri)
+            }
+            localTracks.clear(); localTracks.addAll(updated)
+        }
+    }
+
     // Selecting any song plays it AND opens the dedicated now-playing page.
     val play: (MusicTrack, List<MusicTrack>) -> Unit = { track, queue ->
         MusicPlayer.play(context, track, queue)
@@ -182,7 +205,17 @@ fun MusicScreen(
                 } }
                 else -> MusicBrowseBody(
                     browse = browse,
+                    localTracks = localTracks,
                     onPlay = play,
+                    onAddLocal = { pickAudio.launch(arrayOf("audio/*")) },
+                    onRemoveLocal = { t ->
+                        scope.launch {
+                            val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                com.example.syntra.net.LocalMusicStore.remove(context, t.id)
+                            }
+                            localTracks.clear(); localTracks.addAll(updated)
+                        }
+                    },
                     onOpenPlaylist = { detail = MusicDetail.Playlist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
@@ -275,7 +308,10 @@ private fun MusicTopBar(
 @Composable
 private fun MusicBrowseBody(
     browse: MusicBrowse,
+    localTracks: List<MusicTrack>,
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
+    onAddLocal: () -> Unit,
+    onRemoveLocal: (MusicTrack) -> Unit,
     onOpenPlaylist: (MusicPlaylist) -> Unit,
     onOpenAlbum: (MusicAlbum) -> Unit,
     onOpenArtist: (MusicArtist) -> Unit,
@@ -284,6 +320,21 @@ private fun MusicBrowseBody(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 6.dp, bottom = 150.dp),
     ) {
+        // Device music — the user's own files, always first so "add from storage"
+        // is right at the top of the tab.
+        item { LocalMusicHeader(onAddLocal) }
+        if (localTracks.isEmpty()) {
+            item { LocalMusicEmpty(onAddLocal) }
+        } else {
+            items(localTracks, key = { "local_${it.id}" }) { t ->
+                LocalTrackRow(
+                    track = t,
+                    onClick = { onPlay(t, localTracks) },
+                    onRemove = { onRemoveLocal(t) },
+                )
+            }
+        }
+
         if (browse.trending.isNotEmpty()) {
             item { SectionHeader("Sedang tren") }
             item {
@@ -544,6 +595,87 @@ private fun SectionHeader(title: String) {
         fontWeight = FontWeight.Bold,
         modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 12.dp),
     )
+}
+
+/** "Musik dari perangkat" section header with an add-from-storage button. */
+@Composable
+private fun LocalMusicHeader(onAdd: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 20.dp, end = 14.dp, top = 20.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Musik dari perangkat", color = NexusTextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.weight(1f))
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(NexusAccent.copy(alpha = 0.16f))
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onAdd)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Add, null, tint = NexusAccentSoft, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(5.dp))
+            Text("Tambah", color = NexusAccentSoft, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+/** Empty state for the device-music section — a big tappable card. */
+@Composable
+private fun LocalMusicEmpty(onAdd: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(NexusSurface)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onAdd)
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.size(46.dp).clip(RoundedCornerShape(10.dp)).background(NexusAccent.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Filled.Add, null, tint = NexusAccentSoft, modifier = Modifier.size(24.dp)) }
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Tambahkan lagu dari penyimpanan", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(2.dp))
+            Text("Putar file musik yang tersimpan di perangkatmu", color = NexusTextSecondary, fontSize = 12.sp)
+        }
+    }
+}
+
+/** A device-music row: artwork · title/artist · remove. */
+@Composable
+private fun LocalTrackRow(track: MusicTrack, onClick: () -> Unit, onRemove: () -> Unit) {
+    val isCurrent = MusicPlayer.current?.id == track.id
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ArtworkImage(url = track.artworkUrl, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(2.dp))
+            Text(track.artist, color = NexusTextSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (isCurrent) { NowPlayingBadge(); Spacer(Modifier.width(4.dp)) }
+        Box(
+            modifier = Modifier.size(40.dp).clickable(
+                indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onRemove,
+            ),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Filled.Close, "Hapus dari daftar", tint = NexusTextSecondary, modifier = Modifier.size(18.dp)) }
+    }
 }
 
 @Composable
