@@ -57,6 +57,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -88,6 +89,7 @@ import com.example.syntra.ui.theme.NexusTextSecondary
 import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 // ---------------------------------------------------------------------------
@@ -248,22 +250,24 @@ private fun CallSession(d: CallDescriptor) {
     } else {
         arrayOf(Manifest.permission.RECORD_AUDIO)
     }
-    var launchAfterPermission by remember { mutableStateOf(false) }
+    // A scope tied to THIS call session (not to any state key). connectNow runs here
+    // so it can't be cancelled mid-flight. The old code launched it from a
+    // LaunchedEffect keyed on a boolean that connectNow itself reset — flipping the
+    // key mid-connect cancelled answer_call/start_call halfway, which is exactly why
+    // "Terima" looked dead AND why a cancelled outgoing call never sent leaveCall
+    // (its callId was never assigned), leaving the callee's screen stuck ringing.
+    val callScope = rememberCoroutineScope()
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { result ->
         val micOk = result[Manifest.permission.RECORD_AUDIO] != false
         if (micOk) {
-            launchAfterPermission = true
+            callScope.launch { connectNow() }
         } else {
             statusLine = "Izin mikrofon ditolak"
             Toast.makeText(context, statusLine, Toast.LENGTH_LONG).show()
             phase = CallPhase.ENDED
         }
-    }
-
-    LaunchedEffect(launchAfterPermission) {
-        if (launchAfterPermission) { launchAfterPermission = false; connectNow() }
     }
 
     // Proceed to connect — but only ASK for permissions we don't already have.
@@ -277,7 +281,7 @@ private fun CallSession(d: CallDescriptor) {
             PackageManager.PERMISSION_GRANTED
         val camOk = !isVideo || ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
-        if (micOk && camOk) launchAfterPermission = true // fires connectNow()
+        if (micOk && camOk) callScope.launch { connectNow() }
         else permLauncher.launch(permissions)
     }
 
