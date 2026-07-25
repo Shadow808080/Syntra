@@ -179,6 +179,16 @@ fun ShortsScreen(
     var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
     // Author whose profile is open (tapped their avatar), null = feed.
     var openProfileUser by remember { mutableStateOf<String?>(null) }
+    // A reel opened full-screen from a notification deep-link (comment reply etc.).
+    var deepLinkReel by remember { mutableStateOf<NetReel?>(null) }
+
+    // Notification tap → open that reel full-screen. Fetch it, then clear the request.
+    LaunchedEffect(ReelNavRequest.reelId) {
+        val rid = ReelNavRequest.reelId ?: return@LaunchedEffect
+        ReelNavRequest.reelId = null
+        runCatching { SyntraClient.getReel(rid) }.getOrNull()?.let { deepLinkReel = it }
+    }
+    LaunchedEffect(deepLinkReel) { onOverlayChange(deepLinkReel != null) }
 
     // Upload progress card (top of the Shorts feed). Shown while a reel uploads.
     var uploadCardVisible by remember { mutableStateOf(false) }
@@ -514,6 +524,12 @@ fun ShortsScreen(
         // feed (as a sibling it wasn't rendering full-screen).
         openProfileUser?.let { uname ->
             ProfileScreen(username = uname, onClose = { openProfileUser = null })
+        }
+
+        // A reel opened from a notification — full-screen viewer, with comments a tap
+        // away, so tapping "budi membalas komentar kamu" lands right on the post.
+        deepLinkReel?.let { reel ->
+            ReelViewer(reels = listOf(reel), startIndex = 0, onClose = { deepLinkReel = null })
         }
     }
 

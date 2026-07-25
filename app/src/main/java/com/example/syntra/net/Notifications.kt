@@ -24,7 +24,10 @@ object Notifications {
 
     const val MESSAGES_CHANNEL = "syntra_messages"
     const val SERVICE_CHANNEL = "syntra_service"
-    const val SOCIAL_CHANNEL = "syntra_social"
+    // v2: IMPORTANCE_HIGH so activity notifications pop up as a heads-up banner.
+    // A new id is required because Android freezes a channel's importance after it
+    // is first created — the old "syntra_social" would stay DEFAULT forever.
+    const val SOCIAL_CHANNEL = "syntra_social_v2"
     const val SERVICE_NOTIFICATION_ID = 1001
 
     /** Creates the notification channels once; safe to call repeatedly. */
@@ -49,10 +52,12 @@ object Notifications {
                 NotificationChannel(
                     SOCIAL_CHANNEL,
                     "Aktivitas",
-                    NotificationManager.IMPORTANCE_DEFAULT,
+                    // HIGH = pop on screen (heads-up) with sound, like a chat message.
+                    NotificationManager.IMPORTANCE_HIGH,
                 ).apply {
                     description = "Balasan komentar, suka, pengikut baru"
                     enableVibration(true)
+                    enableLights(true)
                 },
             )
         }
@@ -149,6 +154,8 @@ object Notifications {
         actorName: String = "",
         actorUsername: String = "",
         avatar: Bitmap? = null,
+        /** The reel this activity relates to; tapping the notification opens it. */
+        reelId: String? = null,
     ) {
         ensureChannels(context)
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
@@ -184,15 +191,28 @@ object Notifications {
             .setContentTitle(who)
             .setContentText(action)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_ALL) // sound + vibrate → heads-up
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
             .setAutoCancel(true)
-            .setContentIntent(openAppIntent(context, null))
+            .setContentIntent(openReelIntent(context, reelId))
             .build()
 
         // A distinct id per type so a reply and a like don't overwrite each other,
         // but repeats of the same type collapse instead of stacking endlessly.
         val id = 3000 + (type.hashCode() and 0x0FFF)
         runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+    }
+
+    /** Opens the app straight into a specific reel (deep-link from a notification). */
+    private fun openReelIntent(context: Context, reelId: String?): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (!reelId.isNullOrBlank()) putExtra("open_reel", reelId)
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        // Unique request code per reel so distinct reels get distinct intents.
+        return PendingIntent.getActivity(context, ("reel" + (reelId ?: "")).hashCode(), intent, flags)
     }
 
     private fun openAppIntent(context: Context, conversationId: String?): PendingIntent {

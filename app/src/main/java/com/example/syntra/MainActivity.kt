@@ -49,6 +49,15 @@ object ChatNavRequest {
     var conversationId by mutableStateOf<String?>(null)
 }
 
+/**
+ * A pending "open this reel" request, set when the user taps an activity
+ * notification (e.g. a comment reply). Shorts observes it, fetches the reel, and
+ * opens it full-screen, then clears it.
+ */
+object ReelNavRequest {
+    var reelId by mutableStateOf<String?>(null)
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -111,6 +120,8 @@ class MainActivity : ComponentActivity() {
     private fun handleNavIntent(intent: Intent?) {
         val cid = intent?.getStringExtra("open_conversation")
         if (!cid.isNullOrBlank()) ChatNavRequest.conversationId = cid
+        val rid = intent?.getStringExtra("open_reel")
+        if (!rid.isNullOrBlank()) ReelNavRequest.reelId = rid
     }
 
     // NOTE: we deliberately do NOT disconnect the socket in onDestroy anymore. The
@@ -345,6 +356,11 @@ private fun MainTabs(onSignOut: () -> Unit) {
     // tab so ChatScreen (which watches the same request) can surface that chat.
     LaunchedEffect(ChatNavRequest.conversationId) {
         if (ChatNavRequest.conversationId != null) goTo(NexusTab.CHAT)
+    }
+    // A tapped activity notification asks to open a specific reel: jump to SHORTS,
+    // which watches the same request and opens that reel full-screen.
+    LaunchedEffect(ReelNavRequest.reelId) {
+        if (ReelNavRequest.reelId != null) goTo(NexusTab.SHORTS)
     }
 
     // Listen for incoming calls anywhere in the app and hand them to CallController,

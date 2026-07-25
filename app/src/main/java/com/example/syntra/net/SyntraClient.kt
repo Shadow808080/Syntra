@@ -86,6 +86,9 @@ interface SocketListener {
         actorName: String = "",
         actorUsername: String = "",
         actorAvatarUrl: String? = null,
+        /** subject_type / subject_id — e.g. the reel a comment reply is on. */
+        subjectType: String = "",
+        subjectId: String = "",
     ) {}
 
     /**
@@ -559,6 +562,10 @@ object SyntraClient {
 
     suspend fun getReels(): List<NetReel> =
         (getData("/api/v1/reels") as JSONArray).mapObjects { it.toReel() }
+
+    /** A single reel by id — used to deep-link from a notification into its post. */
+    suspend fun getReel(reelId: String): NetReel =
+        (getData("/api/v1/reels/$reelId") as JSONObject).toReel()
 
     /** My own uploaded shorts — for the profile grid. */
     suspend fun getMyReels(): List<NetReel> =
@@ -1086,6 +1093,8 @@ object SyntraClient {
                             d.optString("actor_name"),
                             d.optString("actor_username"),
                             d.optString("actor_avatar_url", "").ifBlank { null },
+                            d.optString("subject_type"),
+                            d.optString("subject_id"),
                         )
                     }
                 }

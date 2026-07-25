@@ -74,13 +74,16 @@ class ChatConnectionService : Service() {
             actorName: String,
             actorUsername: String,
             actorAvatarUrl: String?,
+            subjectType: String,
+            subjectId: String,
         ) {
             if (AppForeground.inShorts) return
             // Fetch + circle-crop the actor's photo (best effort), then post a rich
-            // notification — their name, what they did, and their avatar.
+            // notification — name, action, avatar, and a deep-link to the reel.
+            val reelId = subjectId.takeIf { subjectType == "reel" && it.isNotBlank() }
             scope.launch {
                 val bmp = loadAvatar(actorAvatarUrl)
-                Notifications.showSocial(applicationContext, kind, actorName, actorUsername, bmp)
+                Notifications.showSocial(applicationContext, kind, actorName, actorUsername, bmp, reelId)
             }
         }
     }
