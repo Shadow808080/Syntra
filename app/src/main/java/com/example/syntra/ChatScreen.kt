@@ -142,6 +142,7 @@ import com.example.syntra.net.NetStoryGroup
 import com.example.syntra.net.NetStoryViewer
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
+import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusTextSecondary
 import com.example.syntra.ui.theme.SyntraTheme
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
@@ -922,7 +923,6 @@ fun ChatScreen(
                     query = ""
                 },
                 onScan = { startScan() },
-                onDiscover = { showDiscover = true },
                 onMenuItem = { label ->
                     val picked = chats.filter { it.id in selection }
                     when (label) {
@@ -1052,29 +1052,56 @@ fun ChatScreen(
             }
         }
 
-        // Floating button: add a new story. A compact, fully-round pill — smaller
-        // and cleaner than a big rounded-square FAB.
-        Box(
+        // Floating action stack, bottom-right: "find people" sits ABOVE the camera.
+        // People-add moved here out of the header (it was one icon among four up top);
+        // as a secondary FAB it's neutral-toned so the gradient camera stays primary.
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 20.dp, bottom = 24.dp)
-                .size(48.dp)
-                .background(
-                    brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
-                    shape = CircleShape,
-                )
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                ) { showAddStatus = true },
-            contentAlignment = Alignment.Center,
+                .padding(end = 20.dp, bottom = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Icon(
-                imageVector = Icons.Filled.AddAPhoto,
-                contentDescription = "Tambah story",
-                tint = Color.White,
-                modifier = Modifier.size(23.dp),
-            )
+            // People+ (find people) — secondary FAB, above the camera.
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(NexusSurface, CircleShape)
+                    .border(1.dp, NexusStroke, CircleShape)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { showDiscover = true },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PersonAddAlt,
+                    contentDescription = "Cari orang",
+                    tint = NexusAccentSoft,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            // Camera (add story) — primary FAB.
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(
+                        brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
+                        shape = CircleShape,
+                    )
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { showAddStatus = true },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.AddAPhoto,
+                    contentDescription = "Tambah story",
+                    tint = Color.White,
+                    modifier = Modifier.size(23.dp),
+                )
+            }
         }
 
         // Full-screen story viewer (WhatsApp-status style)
@@ -1280,7 +1307,6 @@ private fun NexusHeader(
     onStartSearch: () -> Unit,
     onStopSearch: () -> Unit,
     onScan: () -> Unit,
-    onDiscover: () -> Unit,
     onMenuItem: (String) -> Unit,
 ) {
     Row(
@@ -1352,8 +1378,8 @@ private fun NexusHeader(
         } else {
             SyntraTitle()
             Spacer(Modifier.weight(1f))
-            // Order: find-people · search · scan · overflow
-            HeaderIcon(Icons.Filled.PersonAddAlt, "Cari orang", size = 27.dp, onClick = onDiscover)
+            // Order: search · scan · overflow. "Find people" moved to a FAB above the
+            // camera (bottom-right), so it isn't crowded in with the top-bar icons.
             HeaderIcon(Icons.Filled.Search, "Search", size = 28.dp, onClick = onStartSearch)
             HeaderIcon(Icons.Outlined.QrCodeScanner, "Scan", size = 27.dp, onClick = onScan)
             Box {
@@ -1781,6 +1807,7 @@ private fun StoryVideo(
     // Keyed on the uri: without this the pooled VideoView keeps playing the previous
     // story's clip into the next segment, and its progress drives the wrong bar.
     key(uri) {
+        val context = LocalContext.current
         var player by remember { mutableStateOf<MediaPlayer?>(null) }
         // Pausing has to go through the VideoView, not the raw MediaPlayer: the view
         // owns the playback state and would happily restart underneath us.
@@ -1789,43 +1816,53 @@ private fun StoryVideo(
         var ready by remember { mutableStateOf(false) }
         var failed by remember { mutableStateOf(false) }
         val finished = remember { mutableStateOf(false) }
+        // Download-once: resolve a remote story video to its cached local file (keyed
+        // by URL, so the same clip shares ONE cache with the reel/profile viewers).
+        // Re-watching a story then costs no egress. A local uri passes straight through.
+        var playUri by remember { mutableStateOf<Uri?>(null) }
+        LaunchedEffect(uri) {
+            val s = uri.toString()
+            playUri = if (s.startsWith("http")) Uri.parse(VideoCache.resolve(context, s)) else uri
+        }
 
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
-            AndroidView(
-                factory = { ctx ->
-                    VideoView(ctx).apply {
-                        setOnPreparedListener { mp ->
-                            mp.isLooping = false
-                            durationMs = mp.duration
-                            player = mp
-                            ready = true
-                            start()
-                        }
-                        setOnErrorListener { _, _, _ ->
-                            failed = true
-                            // Don't strand the viewer on a clip that will never play.
-                            if (!finished.value) {
-                                finished.value = true
-                                onFinished()
+            playUri?.let { resolved ->
+                AndroidView(
+                    factory = { ctx ->
+                        VideoView(ctx).apply {
+                            setOnPreparedListener { mp ->
+                                mp.isLooping = false
+                                durationMs = mp.duration
+                                player = mp
+                                ready = true
+                                start()
                             }
-                            true
-                        }
-                        setOnCompletionListener {
-                            onProgress(1f)
-                            if (!finished.value) {
-                                finished.value = true
-                                onFinished()
+                            setOnErrorListener { _, _, _ ->
+                                failed = true
+                                // Don't strand the viewer on a clip that will never play.
+                                if (!finished.value) {
+                                    finished.value = true
+                                    onFinished()
+                                }
+                                true
                             }
+                            setOnCompletionListener {
+                                onProgress(1f)
+                                if (!finished.value) {
+                                    finished.value = true
+                                    onFinished()
+                                }
+                            }
+                            setVideoURI(resolved)
+                            view = this
                         }
-                        setVideoURI(uri)
-                        view = this
-                    }
-                },
-                // The uri is fixed for this key, so nothing to re-apply here.
-                update = {},
-                onRelease = { it.stopPlayback() },
-                modifier = Modifier.fillMaxSize(),
-            )
+                    },
+                    // The uri is fixed for this key, so nothing to re-apply here.
+                    update = {},
+                    onRelease = { it.stopPlayback() },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
 
             if (!ready) {
                 StoryBuffering(failed = failed)
