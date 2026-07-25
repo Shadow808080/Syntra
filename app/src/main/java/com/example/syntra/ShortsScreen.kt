@@ -23,8 +23,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -61,6 +63,8 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.ChatBubbleOutline
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
@@ -101,6 +105,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -116,6 +122,7 @@ import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.NetReel
 import com.example.syntra.net.NetReelComment
+import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusAccent
@@ -692,7 +699,9 @@ private fun ReelPage(
                 durationMs = durMs,
                 onScrubStart = { scrubbing = true },
                 onScrub = { ms -> posMs = ms; seekReq = ms },
-                onScrubEnd = { scrubbing = false },
+                // After releasing, stay PAUSED on the chosen frame (don't auto-resume
+                // and don't restart) — tap the video to continue from there.
+                onScrubEnd = { scrubbing = false; paused = true },
                 modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
             )
         }
@@ -875,10 +884,18 @@ private fun ReelVideo(
         if (ready) runCatching { player.isLooping = loop }
     }
 
-    // Seek when the scrubber asks. Position updates below reflect it immediately.
+    // Seek when the scrubber asks. SEEK_CLOSEST lands on the exact frame (not the
+    // nearest keyframe), so dragging shows a precise preview while paused instead of
+    // appearing to jump/restart. Position updates below reflect it immediately.
     LaunchedEffect(seekToMs) {
         val ms = seekToMs ?: return@LaunchedEffect
-        if (ready) runCatching { player.seekTo(ms) }
+        if (ready) runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                player.seekTo(ms.toLong(), MediaPlayer.SEEK_CLOSEST)
+            } else {
+                player.seekTo(ms)
+            }
+        }
     }
 
     // Feed the scrubber: sample the real playback position while it plays.
@@ -1679,13 +1696,79 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
     var loading by remember { mutableStateOf(true) }
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
-    // My own username for the optimistic comment (so it isn't shown as "kamu").
+    // Filter/sort of the list. Newest-first by default, like most comment UIs.
+    var newestFirst by remember { mutableStateOf(true) }
+    // Long-pressing my own comment offers to delete it. Usernames are unique, so
+    // matching mine identifies my comments; the backend still enforces ownership.
     val myUsername = ProfileStore.username(context, SessionStore.signedInEmail(context).orEmpty())
+    var pendingDelete by remember { mutableStateOf<NetReelComment?>(null) }
+    // The comment being replied to (null = a normal top-level comment).
+    var replyingTo by remember { mutableStateOf<NetReelComment?>(null) }
+    val focusRequester = remember { FocusRequester() }
 
-    LaunchedEffect(reel.id) {
+    suspend fun refresh() {
         runCatching { SyntraClient.getReelComments(reel.id) }
             .onSuccess { comments.clear(); comments.addAll(it) }
         loading = false
+    }
+
+    LaunchedEffect(reel.id) { refresh() }
+
+    // Realtime: the feed already subscribes to reel:<id>, so a comment from anyone
+    // else on this reel arrives here — re-pull the list so it shows up live with
+    // full author info (name, avatar, time). My own posts are handled optimistically
+    // + refreshed on send, so skip the echo of my own event to avoid a double fetch.
+    DisposableEffect(reel.id) {
+        val listener = object : SocketListener {
+            override fun onReelComment(reelId: String, userId: String, body: String) {
+                if (reelId != reel.id || userId == SyntraClient.myUserId) return
+                scope.launch { refresh() }
+            }
+        }
+        SyntraClient.addListener(listener)
+        onDispose { SyntraClient.removeListener(listener) }
+    }
+
+    // Group into top-level comments (sorted by the filter), each immediately
+    // followed by its replies (always chronological). Emitted as a flat list of
+    // (comment, isReply) so the LazyColumn can render replies indented under parents.
+    val display by remember {
+        derivedStateOf {
+            val replies = comments.filter { it.parentId != null }.groupBy { it.parentId }
+            val tops = comments.filter { it.parentId == null }
+            val sortedTops = if (newestFirst) tops.sortedByDescending { it.createdAt }
+            else tops.sortedBy { it.createdAt }
+            buildList {
+                for (t in sortedTops) {
+                    add(t to false)
+                    replies[t.id]?.sortedBy { it.createdAt }?.forEach { add(it to true) }
+                }
+            }
+        }
+    }
+
+    fun send() {
+        if (sending) return
+        val body = input.trim()
+        if (body.isEmpty()) return
+        // 1-level threading: a reply always attaches to the top-level ancestor, so
+        // replying to a reply still lands in the same thread (not a deeper level).
+        val parent = replyingTo?.let { it.parentId ?: it.id }
+        sending = true
+        input = ""
+        replyingTo = null
+        scope.launch {
+            runCatching { SyntraClient.postReelComment(reel.id, body, parent) }
+                .onSuccess {
+                    onPosted() // bump the rail's comment count live
+                    refresh()  // pull the server copy (correct name/time/id/parent)
+                }
+                .onFailure {
+                    input = body // restore so the text isn't lost
+                    Toast.makeText(context, "Gagal: ${it.message}", Toast.LENGTH_SHORT).show()
+                }
+            sending = false
+        }
     }
 
     // skipPartiallyExpanded = open at full height straight away, so the input
@@ -1695,54 +1778,116 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = Color(0xFF15151C),
+        dragHandle = { androidx.compose.material3.BottomSheetDefaults.DragHandle() },
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 18.dp)
+                // A bounded height + a weighted list (below) is what fixes the keyboard
+                // bug: when the IME opens, imePadding shrinks the CONTENT area, the
+                // comment list gives up the space, and the fixed-height input row rides
+                // just above the keyboard instead of being squeezed/resized.
+                .height((LocalConfiguration.current.screenHeightDp * 0.72f).dp)
+                .padding(bottom = 10.dp)
                 .imePadding(),
         ) {
-            Text(
-                "Komentar",
-                color = NexusTextPrimary,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 20.dp),
-            )
+            // Header: title + count, then filter chips.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Komentar",
+                    color = NexusTextPrimary,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.width(8.dp))
+                if (comments.isNotEmpty()) {
+                    Text(
+                        compactCount(comments.size),
+                        color = NexusTextSecondary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
             Spacer(Modifier.height(12.dp))
-            // Height follows the screen so the sheet fits small phones too.
-            val sheetHeight = (LocalConfiguration.current.screenHeightDp * 0.42f).dp
-            Box(modifier = Modifier.fillMaxWidth().height(sheetHeight)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CommentFilterChip("Terbaru", active = newestFirst) { newestFirst = true }
+                CommentFilterChip("Terlama", active = !newestFirst) { newestFirst = false }
+            }
+            Spacer(Modifier.height(6.dp))
+            androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+            // Weighted: the list takes all the space left between the header and the
+            // input row, and yields it back to the keyboard when the IME opens.
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 when {
                     loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
                     }
-                    comments.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("Belum ada komentar", color = NexusTextSecondary, fontSize = 13.sp)
+                    comments.isEmpty() -> Column(
+                        Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.ChatBubbleOutline, null,
+                            tint = NexusTextSecondary, modifier = Modifier.size(34.dp),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Text("Belum ada komentar", color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(4.dp))
+                        Text("Jadilah yang pertama berkomentar", color = NexusTextSecondary, fontSize = 12.sp)
                     }
-                    else -> LazyColumn(Modifier.fillMaxSize()) {
-                        items(comments) { c ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 20.dp, vertical = 8.dp),
-                            ) {
-                                Column {
-                                    Text(
-                                        "@" + c.username.ifBlank { "pengguna" },
-                                        color = NexusAccentSoft,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                    )
-                                    Spacer(Modifier.height(2.dp))
-                                    Text(c.body, color = NexusTextPrimary, fontSize = 14.sp)
-                                }
-                            }
+                    else -> LazyColumn(
+                        Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(vertical = 8.dp),
+                    ) {
+                        items(display, key = { it.first.id }) { (c, isReply) ->
+                            CommentRow(
+                                c = c,
+                                isReply = isReply,
+                                canDelete = c.username.isNotBlank() && c.username == myUsername,
+                                onLongPress = { pendingDelete = c },
+                                onReply = { replyingTo = c; focusRequester.requestFocus() },
+                            )
                         }
                     }
                 }
             }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
+            // "Replying to …" banner, shown only while composing a reply.
+            replyingTo?.let { r ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Membalas @${r.username.ifBlank { r.displayName }}",
+                        color = NexusAccentSoft,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Icon(
+                        Icons.Filled.Close, "Batal balas",
+                        tint = NexusTextSecondary,
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { replyingTo = null },
+                    )
+                }
+            }
+            // Input row.
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1754,7 +1899,10 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                 ) {
                     if (input.isEmpty()) {
-                        Text("Tambahkan komentar…", color = NexusTextSecondary, fontSize = 14.sp)
+                        Text(
+                            if (replyingTo != null) "Tulis balasan…" else "Tambahkan komentar…",
+                            color = NexusTextSecondary, fontSize = 14.sp,
+                        )
                     }
                     BasicTextField(
                         value = input,
@@ -1762,7 +1910,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                         singleLine = true,
                         textStyle = TextStyle(color = NexusTextPrimary, fontSize = 14.sp),
                         cursorBrush = SolidColor(NexusAccentSoft),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
                     )
                 }
                 if (input.isNotBlank()) {
@@ -1774,29 +1922,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                             .clickable(
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
-                            ) {
-                                if (sending) return@clickable
-                                val body = input.trim()
-                                sending = true
-                                scope.launch {
-                                    runCatching { SyntraClient.postReelComment(reel.id, body) }
-                                        .onSuccess {
-                                            comments.add(
-                                                NetReelComment(
-                                                    id = "local-${System.currentTimeMillis()}",
-                                                    username = myUsername,
-                                                    body = body,
-                                                ),
-                                            )
-                                            input = ""
-                                            onPosted() // bump the rail's comment count live
-                                        }
-                                        .onFailure {
-                                            Toast.makeText(context, "Gagal: ${it.message}", Toast.LENGTH_SHORT).show()
-                                        }
-                                    sending = false
-                                }
-                            },
+                            ) { send() },
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
@@ -1807,6 +1933,172 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                 }
             }
         }
+    }
+
+    // Confirm before deleting a comment.
+    pendingDelete?.let { c ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Hapus komentar?", fontWeight = FontWeight.Bold) },
+            text = { Text("Komentar ini akan dihapus permanen.") },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    pendingDelete = null
+                    scope.launch {
+                        runCatching { SyntraClient.deleteReelComment(reel.id, c.id) }
+                            .onSuccess { comments.removeAll { it.id == c.id } }
+                            .onFailure { Toast.makeText(context, "Gagal hapus: ${it.message}", Toast.LENGTH_SHORT).show() }
+                    }
+                }) { Text("Hapus", color = Color(0xFFFF5D5D), fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { pendingDelete = null }) {
+                    Text("Batal", color = NexusTextSecondary)
+                }
+            },
+            containerColor = Color(0xFF1E1E27),
+        )
+    }
+}
+
+/**
+ * One comment: avatar, name · time, body, then a "Balas" (reply) action. Replies
+ * ([isReply]) are indented and use a smaller avatar so a thread reads as a thread.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun CommentRow(
+    c: NetReelComment,
+    isReply: Boolean = false,
+    canDelete: Boolean = false,
+    onLongPress: () -> Unit = {},
+    onReply: () -> Unit = {},
+) {
+    val name = c.displayName.ifBlank { c.username }.ifBlank { "pengguna" }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            // Long-press my own comment to delete it.
+            .then(
+                if (canDelete) {
+                    Modifier.combinedClickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = {},
+                        onLongClick = onLongPress,
+                    )
+                } else {
+                    Modifier
+                },
+            )
+            .padding(start = if (isReply) 50.dp else 18.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
+    ) {
+        CommentAvatar(url = c.avatarUrl, name = name, size = if (isReply) 30.dp else 38.dp)
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = name,
+                    color = NexusTextPrimary,
+                    fontSize = if (isReply) 12.sp else 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                val rel = relativeCommentTime(c.createdAt)
+                if (rel.isNotBlank()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text("· $rel", color = NexusTextSecondary, fontSize = 11.sp, maxLines = 1)
+                }
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(c.body, color = NexusTextPrimary.copy(alpha = 0.92f), fontSize = 14.sp, lineHeight = 19.sp)
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "Balas",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onReply,
+                    ),
+            )
+        }
+    }
+}
+
+/** Round avatar with a colour-from-name fallback when there's no photo. */
+@Composable
+private fun CommentAvatar(url: String?, name: String, size: androidx.compose.ui.unit.Dp) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Brush.linearGradient(commentGradient(name.ifBlank { "?" }))),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (!url.isNullOrBlank()) {
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().clip(CircleShape),
+            )
+        } else {
+            Text(
+                name.firstOrNull()?.uppercase() ?: "?",
+                color = Color.White,
+                fontSize = (size.value * 0.42f).sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CommentFilterChip(label: String, active: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (active) NexusAccent.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.06f))
+            .border(1.dp, if (active) NexusAccent.copy(alpha = 0.5f) else Color.Transparent, RoundedCornerShape(50))
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    ) {
+        Text(
+            label,
+            color = if (active) NexusTextPrimary else NexusTextSecondary,
+            fontSize = 12.sp,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+        )
+    }
+}
+
+private val commentGradients = listOf(
+    listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5)),
+    listOf(Color(0xFF11998E), Color(0xFF38EF7D)),
+    listOf(Color(0xFFEE5A6F), Color(0xFFF29263)),
+    listOf(Color(0xFFDA22FF), Color(0xFF9733EE)),
+)
+
+private fun commentGradient(key: String): List<Color> =
+    commentGradients[(key.hashCode() and Int.MAX_VALUE) % commentGradients.size]
+
+/** ISO-8601 timestamp → short relative label (Indonesian). Empty if unparseable. */
+private fun relativeCommentTime(iso: String): String {
+    if (iso.isBlank()) return ""
+    val millis = runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrNull() ?: return ""
+    val m = (System.currentTimeMillis() - millis) / 60_000
+    return when {
+        m < 1 -> "baru saja"
+        m < 60 -> "${m}m"
+        m < 1440 -> "${m / 60}j"
+        m < 10080 -> "${m / 1440}h"
+        else -> "${m / 10080}mg"
     }
 }
 

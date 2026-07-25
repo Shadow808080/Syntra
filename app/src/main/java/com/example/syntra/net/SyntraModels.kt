@@ -164,9 +164,12 @@ data class NetReel(
 data class NetReelComment(
     val id: String,
     val username: String = "",
+    val displayName: String = "",
     val avatarUrl: String? = null,
     val body: String = "",
     val createdAt: String = "",
+    /** Non-null when this comment is a reply to another comment. */
+    val parentId: String? = null,
 )
 
 // Calls (audio & video) — docs/api.md §Calls. Audio/video ride LiveKit; the

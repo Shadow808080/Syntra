@@ -600,16 +600,26 @@ object SyntraClient {
                 id = it.getString("id"),
                 username = it.optString("author_username", "")
                     .ifBlank { creator?.optString("username").orEmpty() },
+                displayName = it.optString("author_name", "")
+                    .ifBlank { creator?.optString("display_name").orEmpty() },
                 avatarUrl = it.optString("author_avatar_url", "")
                     .ifBlank { creator?.optString("avatar_url").orEmpty() }
                     .ifBlank { null },
                 body = it.optString("body", ""),
                 createdAt = it.optString("created_at", ""),
+                parentId = it.optString("parent_comment_id", "").ifBlank { null },
             )
         }
 
-    suspend fun postReelComment(reelId: String, body: String) {
-        postData("/api/v1/reels/$reelId/comments", JSONObject().put("body", body))
+    suspend fun postReelComment(reelId: String, body: String, parentId: String? = null) {
+        val payload = JSONObject().put("body", body)
+        if (!parentId.isNullOrBlank()) payload.put("parent_id", parentId)
+        postData("/api/v1/reels/$reelId/comments", payload)
+    }
+
+    /** Deletes a comment (author only; the backend enforces ownership). */
+    suspend fun deleteReelComment(reelId: String, commentId: String) {
+        delete("/api/v1/reels/$reelId/comments/$commentId")
     }
 
     // -----------------------------------------------------------------------

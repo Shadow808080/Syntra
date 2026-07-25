@@ -94,7 +94,8 @@ fun NexusBottomBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(vertical = 8.dp),
+                // Slim, TikTok-style bar: tighter vertical padding keeps it compact.
+                .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Each tab takes an equal 1/4 slice so they span edge to edge — no
@@ -127,7 +128,7 @@ private fun NavItem(
         label = "nav-color",
     )
     val pillWidth by animateDpAsState(
-        targetValue = if (isSelected) 64.dp else 40.dp,
+        targetValue = if (isSelected) 52.dp else 34.dp,
         animationSpec = tween(220),
         label = "nav-pill",
     )
@@ -144,8 +145,8 @@ private fun NavItem(
         Box(
             modifier = Modifier
                 .width(pillWidth)
-                .height(34.dp)
-                .clip(RoundedCornerShape(17.dp))
+                .height(28.dp)
+                .clip(RoundedCornerShape(14.dp))
                 .background(if (isSelected) NexusAccent.copy(alpha = 0.16f) else Color.Transparent),
             contentAlignment = Alignment.Center,
         ) {
@@ -153,14 +154,14 @@ private fun NavItem(
                 imageVector = if (isSelected) iconActive else iconIdle,
                 contentDescription = label,
                 tint = color,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(20.dp),
             )
         }
-        Spacer(Modifier.height(5.dp))
+        Spacer(Modifier.height(2.dp))
         Text(
             text = label,
             color = color,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
         )
     }
