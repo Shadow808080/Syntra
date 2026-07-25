@@ -189,15 +189,17 @@ fun MusicScreen(
                 )
             }
         }
-    }
 
-    // Detail overlay (playlist / album / artist track list).
-    detail?.let { d ->
-        MusicDetailScreen(
-            detail = d,
-            onBack = { detail = null },
-            onPlay = play,
-        )
+        // Detail overlay (playlist / album / artist track list). MUST be inside this
+        // Box so it STACKS on top of the browse Column — as a top-level sibling of
+        // MusicScreen it wasn't reliably drawn over the browse (it looked "blocked").
+        detail?.let { d ->
+            MusicDetailScreen(
+                detail = d,
+                onBack = { detail = null },
+                onPlay = play,
+            )
+        }
     }
 }
 

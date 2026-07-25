@@ -845,6 +845,8 @@ private fun ReelVideo(
     var surface by remember(url) { mutableStateOf<Surface?>(null) }
     var source by remember(url) { mutableStateOf<String?>(null) }
     var started by remember(url) { mutableStateOf(false) }
+    // One-shot fallback: if a cached file fails, we drop it and stream the original.
+    var triedStream by remember(url) { mutableStateOf(false) }
     // Latest callbacks/flags captured so the one-shot prepare below always sees
     // current values without re-running (which would re-create the player).
     val loopLatest by rememberUpdatedState(loop)
@@ -856,11 +858,16 @@ private fun ReelVideo(
     // this is what stops the feed re-streaming the same clip on every scroll.
     LaunchedEffect(url) { source = VideoCache.resolve(context, url) }
 
-    // Bind surface + source to the player exactly once both are ready.
+    // Bind surface + source to the player.
     LaunchedEffect(surface, source) {
         val s = surface ?: return@LaunchedEffect
         val src = source ?: return@LaunchedEffect
-        if (started) return@LaunchedEffect
+        if (started) {
+            // Surface was destroyed + recreated (a layout change, or scrolling): the
+            // player kept a dead surface and rendered BLACK. Re-attach the new one.
+            runCatching { player.setSurface(s) }
+            return@LaunchedEffect
+        }
         started = true
         runCatching {
             player.setSurface(s)
@@ -871,7 +878,22 @@ private fun ReelVideo(
                 ready = true
                 onDurationLatest(runCatching { it.duration }.getOrDefault(0))
             }
-            player.setOnErrorListener { _, _, _ -> failed = true; true }
+            player.setOnErrorListener { _, _, _ ->
+                // A cached file that fails is almost always corrupt/partial (the reason
+                // reels went black): drop it so it re-downloads, and stream the original
+                // url once now as an immediate recovery.
+                if (src != url && !triedStream) {
+                    triedStream = true
+                    VideoCache.evict(context, url)
+                    ready = false
+                    runCatching { player.reset() }
+                    started = false
+                    source = url // re-runs this effect to prepare straight from network
+                } else {
+                    failed = true
+                }
+                true
+            }
             // Only fires when NOT looping — that's the "video finished" signal the
             // feed uses to auto-advance to the next reel.
             player.setOnCompletionListener { if (!loopLatest) onEndedLatest() }

@@ -104,10 +104,15 @@ object VideoCache {
             if (conn.responseCode !in 200..299) {
                 return false
             }
+            val expected = conn.contentLengthLong // -1 if unknown
             conn.inputStream.use { input ->
                 part.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
             }
-            if (part.length() <= 0) {
+            // Reject a truncated download: if the connection dropped mid-stream the
+            // copy still returns normally, and a half-written file cached as complete
+            // is exactly what made reels play BLACK with no error. Only trust the file
+            // when it fully matches the advertised length.
+            if (part.length() <= 0 || (expected > 0 && part.length() != expected)) {
                 part.delete()
                 return false
             }
@@ -126,6 +131,15 @@ object VideoCache {
         } finally {
             conn?.disconnect()
         }
+    }
+
+    /**
+     * Drop a cached file for [url] — call when playback fails, so a corrupt/partial
+     * entry (from an older build or a bad network) is re-fetched next time instead of
+     * playing black forever.
+     */
+    fun evict(context: Context, url: String) {
+        runCatching { File(dir(context), keyFor(url)).delete() }
     }
 
     /** Evict least-recently-used files until back under [MAX_BYTES]; never [keep]. */
