@@ -598,6 +598,8 @@ object SyntraClient {
             val creator = it.optJSONObject("creator")
             NetReelComment(
                 id = it.getString("id"),
+                authorId = it.optString("author_id", "")
+                    .ifBlank { creator?.optString("id").orEmpty() },
                 username = it.optString("author_username", "")
                     .ifBlank { creator?.optString("username").orEmpty() },
                 displayName = it.optString("author_name", "")

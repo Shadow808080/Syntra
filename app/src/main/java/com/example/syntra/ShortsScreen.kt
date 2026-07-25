@@ -1118,18 +1118,43 @@ fun ShimmerFill(modifier: Modifier = Modifier) {
 @Composable
 private fun ReelCaption(reel: NetReel, onOpenProfile: () -> Unit = {}, modifier: Modifier = Modifier) {
     val username = reel.creatorUsername.ifBlank { "pengguna" }
+    // My own reel reads "Postingan Anda" with a badge instead of @username, so it's
+    // obvious at a glance which clips in the feed are mine.
+    val isMine = reel.authorId.isNotBlank() && reel.authorId == SyntraClient.myUserId
     Column(modifier = modifier) {
-        Text(
-            text = "@$username",
-            color = Color.White,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onOpenProfile,
             ),
-        )
+        ) {
+            Text(
+                text = if (isMine) "Postingan Anda" else "@$username",
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            if (isMine) {
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .background(Color.White.copy(alpha = 0.18f), RoundedCornerShape(50))
+                        .padding(horizontal = 7.dp, vertical = 2.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.AccountCircle, null,
+                            tint = Color.White, modifier = Modifier.size(13.dp),
+                        )
+                        Spacer(Modifier.width(3.dp))
+                        Text("Anda", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
         if (reel.caption.isNotBlank()) {
             Spacer(Modifier.height(8.dp))
             // Collapsed to 2 lines with a "selengkapnya" affordance; tap the caption
@@ -1727,9 +1752,12 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
     var sending by remember { mutableStateOf(false) }
     // Filter/sort of the list. Newest-first by default, like most comment UIs.
     var newestFirst by remember { mutableStateOf(true) }
-    // Long-pressing my own comment offers to delete it. Usernames are unique, so
-    // matching mine identifies my comments; the backend still enforces ownership.
-    val myUsername = ProfileStore.username(context, SessionStore.signedInEmail(context).orEmpty())
+    // Who may delete a comment: its author (mine), OR the reel owner (any comment on
+    // their post). Matched by user id — the old username match failed when the local
+    // username was blank/differently-cased, so my own comment couldn't be deleted.
+    // The backend enforces the same rule.
+    val myId = SyntraClient.myUserId
+    val iOwnReel = reel.authorId.isNotBlank() && reel.authorId == myId
     var pendingDelete by remember { mutableStateOf<NetReelComment?>(null) }
     // The comment being replied to (null = a normal top-level comment).
     var replyingTo by remember { mutableStateOf<NetReelComment?>(null) }
@@ -1880,7 +1908,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                             CommentRow(
                                 c = c,
                                 isReply = isReply,
-                                canDelete = c.username.isNotBlank() && c.username == myUsername,
+                                canDelete = iOwnReel || (c.authorId.isNotBlank() && c.authorId == myId),
                                 onLongPress = { pendingDelete = c },
                                 onReply = { replyingTo = c; focusRequester.requestFocus() },
                             )

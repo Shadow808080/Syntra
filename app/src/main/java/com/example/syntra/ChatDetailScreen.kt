@@ -8,7 +8,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -74,6 +78,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
@@ -115,6 +120,7 @@ import com.example.syntra.net.ApiException
 import com.example.syntra.net.NetMessage
 import com.example.syntra.net.NetPresence
 import com.example.syntra.net.SocketListener
+import com.example.syntra.net.MessageCache
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusAccent
@@ -160,6 +166,9 @@ private val STORY_REPLY_SEP = ''
 
 /** Marks a message that only exists on this device until the server confirms it. */
 private const val LOCAL_ID_PREFIX = "local-"
+
+/** Server default message page size — a full page means there may be more to page. */
+private const val MESSAGE_PAGE_SIZE = 50
 
 /**
  * The greater of two nullable UUIDv7 ids. Ids sort lexicographically in time
@@ -246,6 +255,13 @@ fun ChatDetailScreen(
     // Reactions per message: messageId -> (userId -> emoji). Replacing the value
     // (not mutating in place) is what drives recomposition.
     val reactions = remember(conversation) { mutableStateMapOf<String, Map<String, String>>() }
+    // Lazy history: only the most recent page loads first; scrolling to the top
+    // fetches an older page (with a skeleton). [oldestId] is the pagination cursor;
+    // [hasMore] stops paging once the server returns a short page; [loadingOlder]
+    // gates the skeleton + prevents overlapping fetches.
+    var oldestId by remember(conversation) { mutableStateOf<String?>(null) }
+    var hasMore by remember(conversation) { mutableStateOf(true) }
+    var loadingOlder by remember(conversation) { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     // The message being replied to (swipe right on a bubble), null when not replying.
     var replyingTo by remember(conversation) { mutableStateOf<Message?>(null) }
@@ -391,22 +407,76 @@ fun ChatDetailScreen(
     // --- Backend: history, realtime, read receipts -------------------------
     if (ApiConfig.ENABLED) {
         LaunchedEffect(conversation.id) {
+            // 1) Instant paint from the on-device cache — no spinner, no download —
+            //    so reopening a chat you've already read shows immediately.
+            val cached = MessageCache.load(context, conversation.id) // oldest-first
+            if (cached.isNotEmpty()) {
+                messages.clear()
+                messages.addAll(cached.map { it.toUi() })
+                oldestId = cached.firstOrNull()?.id
+            }
             runCatching {
                 SyntraClient.subscribe(listOf("conversation:${conversation.id}"))
                 // Ask for the peer's live presence so the checkmarks (1 tick offline,
                 // 2 ticks online) are correct from the moment the chat opens.
                 conversation.counterpartId?.let { SyntraClient.presenceQuery(listOf(it)) }
-                // History comes back newest-first; the UI renders oldest-first.
-                val history = SyntraClient.getMessages(conversation.id).reversed()
-                messages.clear()
-                messages.addAll(history.map { it.toUi() })
-                history.lastOrNull()?.let { SyntraClient.messageRead(conversation.id, it.id) }
+                // 2) Sync the newest page from the server (newest-first → render oldest
+                //    -first). This is the "today" batch; older days load on scroll-up.
+                val page = SyntraClient.getMessages(conversation.id) // newest-first
+                val history = page.reversed()
+                if (history.isNotEmpty()) {
+                    MessageCache.merge(context, conversation.id, history)
+                    // Rebuild from the merged cache so cached + fresh reconcile cleanly
+                    // (keeps older cached messages that the newest page didn't include).
+                    val full = MessageCache.load(context, conversation.id)
+                    messages.clear()
+                    messages.addAll(full.map { it.toUi() })
+                    oldestId = full.firstOrNull()?.id
+                    history.lastOrNull()?.let { SyntraClient.messageRead(conversation.id, it.id) }
+                }
+                // A short first page means there's nothing older to fetch.
+                if (page.size < MESSAGE_PAGE_SIZE) hasMore = false
                 // Load existing reactions for the visible messages in one call.
                 runCatching { SyntraClient.getReactions(conversation.id, history.map { it.id }) }
                     .getOrNull()?.let { reactions.clear(); reactions.putAll(it) }
             }.onFailure {
-                Toast.makeText(context, "Gagal memuat pesan: ${it.message}", Toast.LENGTH_SHORT).show()
+                // Offline / error is fine when we already showed the cache.
+                if (cached.isEmpty()) {
+                    Toast.makeText(context, "Gagal memuat pesan: ${it.message}", Toast.LENGTH_SHORT).show()
+                }
             }
+        }
+
+        // Scroll-to-top → load the previous day/page of history, with a skeleton.
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.firstVisibleItemIndex }
+                .collect { first ->
+                    if (first <= 1 && hasMore && !loadingOlder && oldestId != null && messages.isNotEmpty()) {
+                        loadingOlder = true
+                        val cursor = oldestId
+                        runCatching { SyntraClient.getMessages(conversation.id, before = cursor) }
+                            .onSuccess { older ->
+                                if (older.isEmpty() || older.size < MESSAGE_PAGE_SIZE) hasMore = false
+                                if (older.isNotEmpty()) {
+                                    MessageCache.merge(context, conversation.id, older)
+                                    // Keep the user's scroll position: remember the first
+                                    // item, prepend the older batch, then restore anchor.
+                                    val anchorId = messages.firstOrNull()?.id
+                                    val ordered = older.reversed().map { it.toUi() } // oldest-first
+                                    val existing = messages.map { it.id }.toSet()
+                                    val toAdd = ordered.filter { it.id !in existing }
+                                    messages.addAll(0, toAdd)
+                                    oldestId = older.minByOrNull { it.id }?.id ?: oldestId
+                                    // Anchor: the previously-first message is now at
+                                    // index (toAdd.size) + 1 (date chip at 0).
+                                    if (anchorId != null) {
+                                        runCatching { listState.scrollToItem(toAdd.size + 1) }
+                                    }
+                                }
+                            }
+                        loadingOlder = false
+                    }
+                }
         }
         // Tell the notification layer which chat is open, so it won't notify for
         // the very conversation the user is reading (but still notifies for others).
@@ -498,6 +568,8 @@ fun ChatDetailScreen(
                         )
                     }
                     reactions.remove(messageId)
+                    // Reflect the deletion in the cache so it doesn't come back on reopen.
+                    MessageCache.remove(context, conversation.id, messageId)
                 }
 
                 override fun onMessageReaction(
@@ -738,8 +810,13 @@ fun ChatDetailScreen(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            // Skeleton while an older page loads (scroll-to-top). Sits above the
+            // history so it reads as "loading earlier messages".
+            if (loadingOlder) {
+                item(key = "skeleton") { MessagesSkeleton() }
+            }
             item { DateChip("Today") }
-            items(messages) { msg ->
+            items(messages, key = { it.id }) { msg ->
                 MessageBubble(
                     msg = msg,
                     reactions = aggregateReactions(reactions[msg.id]),
@@ -961,6 +1038,7 @@ fun ChatDetailScreen(
                                 )
                             }
                             reactions.remove(msg.id)
+                            MessageCache.remove(context, conversation.id, msg.id)
                         }
                         .onFailure {
                             val why = if ((it as? ApiException)?.code == "not_found") {
@@ -1350,6 +1428,43 @@ private fun DetailTopBar(
 // ---------------------------------------------------------------------------
 // Message list pieces
 // ---------------------------------------------------------------------------
+
+/**
+ * Placeholder shown while an older page of messages is fetched. A few shimmering
+ * bubbles — alternating sides — so scrolling up reads as "loading earlier chat"
+ * instead of a dead gap.
+ */
+@Composable
+private fun MessagesSkeleton() {
+    val transition = rememberInfiniteTransition(label = "msgSkeleton")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.75f,
+        animationSpec = infiniteRepeatable(tween(750), RepeatMode.Reverse),
+        label = "shimmer",
+    )
+    // width fractions + side per fake bubble (deterministic, so it doesn't jump).
+    val rows = listOf(0.55f to false, 0.42f to true, 0.68f to false, 0.5f to true)
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        rows.forEach { (frac, mine) ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(frac)
+                        .height(38.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(NexusSurface.copy(alpha = alpha)),
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun DateChip(label: String) {

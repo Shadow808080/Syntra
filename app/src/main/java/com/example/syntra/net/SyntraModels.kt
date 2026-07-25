@@ -163,6 +163,7 @@ data class NetReel(
 
 data class NetReelComment(
     val id: String,
+    val authorId: String = "",
     val username: String = "",
     val displayName: String = "",
     val avatarUrl: String? = null,
