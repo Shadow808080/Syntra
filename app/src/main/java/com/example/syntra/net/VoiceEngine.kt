@@ -56,6 +56,7 @@ object VoiceEngine {
         }
         setLoudspeaker(true)
 
+        MusicPlayer.pauseForExternalAudio() // a voice room takes over audio
         r.connect(url, token)
         room = r
 

@@ -1835,6 +1835,7 @@ private fun StoryVideo(
                                 durationMs = mp.duration
                                 player = mp
                                 ready = true
+                                com.example.syntra.net.MusicPlayer.pauseForExternalAudio()
                                 start()
                             }
                             setOnErrorListener { _, _, _ ->

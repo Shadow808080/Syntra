@@ -1,11 +1,13 @@
 package com.example.syntra
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -33,10 +36,17 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -57,6 +67,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -64,9 +75,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import kotlin.math.roundToInt
 import com.example.syntra.net.MusicAlbum
 import com.example.syntra.net.MusicArtist
 import com.example.syntra.net.MusicBrowse
@@ -99,6 +112,15 @@ private sealed interface MusicDetail {
     data class Artist(val item: MusicArtist) : MusicDetail
 }
 
+/**
+ * App-root music UI state. Lives outside the Music tab so the now-playing screen
+ * (mounted in MainActivity) can be opened from anywhere — tapping a song, or the
+ * mini-player — and collapsed back to the mini-player.
+ */
+object MusicUi {
+    var showNowPlaying by mutableStateOf(false)
+}
+
 @Composable
 fun MusicScreen(
     modifier: Modifier = Modifier,
@@ -114,6 +136,12 @@ fun MusicScreen(
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var detail by remember { mutableStateOf<MusicDetail?>(null) }
+
+    // Selecting any song plays it AND opens the dedicated now-playing page.
+    val play: (MusicTrack, List<MusicTrack>) -> Unit = { track, queue ->
+        MusicPlayer.play(context, track, queue)
+        MusicUi.showNowPlaying = true
+    }
 
     // Load the charts once.
     LaunchedEffect(Unit) {
@@ -142,7 +170,7 @@ fun MusicScreen(
                 }
                 searching -> MusicSearchBody(
                     query = query,
-                    onPlay = { track, queue -> MusicPlayer.play(context, track, queue) },
+                    onPlay = play,
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
                 )
@@ -153,7 +181,7 @@ fun MusicScreen(
                 } }
                 else -> MusicBrowseBody(
                     browse = browse,
-                    onPlay = { track, queue -> MusicPlayer.play(context, track, queue) },
+                    onPlay = play,
                     onOpenPlaylist = { detail = MusicDetail.Playlist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
@@ -167,7 +195,7 @@ fun MusicScreen(
         MusicDetailScreen(
             detail = d,
             onBack = { detail = null },
-            onPlay = { track, queue -> MusicPlayer.play(context, track, queue) },
+            onPlay = play,
         )
     }
 }
@@ -654,26 +682,55 @@ private fun MusicError(onRetry: () -> Unit) {
 // Mini-player + Now-playing (mounted at the app root by MainActivity)
 // ---------------------------------------------------------------------------
 
-/** Compact player bar. Renders nothing when no track is loaded. Tap to expand. */
+/**
+ * Compact player bar above the nav. Renders nothing when no track is loaded.
+ * Tap → expand to now-playing. Swipe left/right → dismiss AND stop the music.
+ */
 @Composable
 fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
     val track = MusicPlayer.current ?: return
-    val context = LocalContext.current
 
     // Drive the progress bar while playing.
     LaunchedEffect(MusicPlayer.isPlaying, track.id) {
         while (MusicPlayer.isPlaying) { MusicPlayer.tick(); delay(200) }
     }
 
-    Column(modifier = modifier.fillMaxWidth()) {
+    val scope = rememberCoroutineScope()
+    val offsetX = remember { Animatable(0f) }
+    var barWidth by remember { mutableStateOf(1) }
+    // A new track shouldn't inherit a half-finished drag.
+    LaunchedEffect(track.id) { offsetX.snapTo(0f) }
+
+    Column(
+        modifier = modifier.fillMaxWidth().onSizeChanged { barWidth = it.width.coerceAtLeast(1) },
+    ) {
         // Thin progress line on top of the bar.
         Box(Modifier.fillMaxWidth().height(2.dp).background(NexusStroke)) {
             Box(Modifier.fillMaxWidth(MusicPlayer.progress).height(2.dp).background(NexusAccentSoft))
         }
+        val dismissAt = barWidth * 0.32f
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .graphicsLayer { alpha = 1f - (kotlin.math.abs(offsetX.value) / barWidth).coerceIn(0f, 1f) }
                 .background(Color(0xFF17171F))
+                .pointerInput(track.id) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            if (kotlin.math.abs(offsetX.value) > dismissAt) {
+                                // Fling off-screen, then STOP the music (not pause).
+                                val target = if (offsetX.value > 0) barWidth.toFloat() else -barWidth.toFloat()
+                                scope.launch { offsetX.animateTo(target); MusicPlayer.stop() }
+                            } else {
+                                scope.launch { offsetX.animateTo(0f) }
+                            }
+                        },
+                    ) { change, dragAmount ->
+                        change.consume()
+                        scope.launch { offsetX.snapTo(offsetX.value + dragAmount) }
+                    }
+                }
                 .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onExpand)
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -693,63 +750,94 @@ fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
     }
 }
 
-/** Full-screen now-playing: big art, title, seek bar, transport controls. */
+/**
+ * Full-screen now-playing, Spotify-style: big art, title, like, seek bar, shuffle/
+ * repeat + transport. Swipe DOWN (or the chevron) collapses back to the mini-player.
+ */
 @Composable
 fun NowPlayingScreen(onClose: () -> Unit) {
     val track = MusicPlayer.current
     if (track == null) { onClose(); return }
     BackHandler(onBack = onClose)
     val context = LocalContext.current
+    var liked by remember(track.id) { mutableStateOf(false) }
 
     LaunchedEffect(MusicPlayer.isPlaying, track.id) {
         while (MusicPlayer.isPlaying) { MusicPlayer.tick(); delay(200) }
     }
 
+    // Swipe-down-to-collapse: drag the whole sheet down; past a threshold it
+    // dismisses to the mini-player (music keeps playing), otherwise it springs back.
+    val scope = rememberCoroutineScope()
+    val offsetY = remember { Animatable(0f) }
+    var sheetHeight by remember { mutableStateOf(1) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Color(0xFF23202E), Color(0xFF0C0C12)))),
+            .onSizeChanged { sheetHeight = it.height.coerceAtLeast(1) }
+            .offset { IntOffset(0, offsetY.value.roundToInt()) }
+            .background(Brush.verticalGradient(listOf(Color(0xFF23202E), Color(0xFF0C0C12))))
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragEnd = {
+                        if (offsetY.value > sheetHeight * 0.18f) onClose()
+                        else scope.launch { offsetY.animateTo(0f) }
+                    },
+                ) { change, dragAmount ->
+                    change.consume()
+                    // Only downward drags collapse; clamp at the top.
+                    scope.launch { offsetY.snapTo((offsetY.value + dragAmount).coerceAtLeast(0f)) }
+                }
+            },
     ) {
         Column(
             modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars).padding(horizontal = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // Header: collapse button.
+            // Header: collapse chevron · label · more.
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier.size(40.dp).clickable(
-                        indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClose,
-                    ),
-                    contentAlignment = Alignment.Center,
-                ) { Icon(Icons.Filled.Close, "Tutup", tint = Color.White, modifier = Modifier.size(24.dp)) }
+                PlayerIconButton(Icons.Filled.KeyboardArrowDown, size = 40.dp, iconSize = 28.dp) { onClose() }
                 Spacer(Modifier.weight(1f))
                 Text("SEDANG DIPUTAR", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
-                Spacer(Modifier.size(40.dp))
+                PlayerIconButton(Icons.Filled.MoreVert, size = 40.dp, iconSize = 22.dp) { /* menu lanjutan */ }
             }
             Spacer(Modifier.weight(1f))
-            ArtworkImage(url = track.artworkUrl, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-                .let { it })
+            ArtworkImage(url = track.artworkUrl, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)))
             Spacer(Modifier.height(32.dp))
-            Text(track.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(6.dp))
-            Text(track.artist, color = Color.White.copy(alpha = 0.7f), fontSize = 15.sp,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(24.dp))
-            // Seek bar.
+            // Title + artist + like.
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(track.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(6.dp))
+                    Text(track.artist, color = Color.White.copy(alpha = 0.7f), fontSize = 15.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                PlayerIconButton(
+                    icon = if (liked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                    size = 44.dp, iconSize = 26.dp,
+                    tint = if (liked) NexusAccentSoft else Color.White,
+                ) { liked = !liked }
+            }
+            Spacer(Modifier.height(18.dp))
             NowPlayingSeekBar()
-            Spacer(Modifier.height(20.dp))
-            // Transport controls.
+            Spacer(Modifier.height(14.dp))
+            // Controls: shuffle · prev · play · next · repeat.
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PlayerIconButton(Icons.Filled.SkipPrevious, size = 56.dp, iconSize = 34.dp, tint = if (MusicPlayer.hasPrevious) Color.White else Color.White.copy(alpha = 0.3f)) {
+                PlayerIconButton(Icons.Filled.Shuffle, size = 46.dp, iconSize = 24.dp,
+                    tint = if (MusicPlayer.shuffle) NexusAccentSoft else Color.White.copy(alpha = 0.7f)) {
+                    MusicPlayer.toggleShuffle()
+                }
+                PlayerIconButton(Icons.Filled.SkipPrevious, size = 52.dp, iconSize = 34.dp,
+                    tint = if (MusicPlayer.hasPrevious) Color.White else Color.White.copy(alpha = 0.3f)) {
                     MusicPlayer.previous(context)
                 }
-                Spacer(Modifier.width(24.dp))
                 Box(
                     modifier = Modifier
                         .size(72.dp)
@@ -764,10 +852,15 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                             tint = Color.White, modifier = Modifier.size(38.dp))
                     }
                 }
-                Spacer(Modifier.width(24.dp))
-                PlayerIconButton(Icons.Filled.SkipNext, size = 56.dp, iconSize = 34.dp, tint = if (MusicPlayer.hasNext) Color.White else Color.White.copy(alpha = 0.3f)) {
+                PlayerIconButton(Icons.Filled.SkipNext, size = 52.dp, iconSize = 34.dp,
+                    tint = if (MusicPlayer.hasNext || MusicPlayer.shuffle) Color.White else Color.White.copy(alpha = 0.3f)) {
                     MusicPlayer.next(context)
                 }
+                PlayerIconButton(
+                    icon = if (MusicPlayer.repeatOne) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                    size = 46.dp, iconSize = 24.dp,
+                    tint = if (MusicPlayer.repeatOne) NexusAccentSoft else Color.White.copy(alpha = 0.7f),
+                ) { MusicPlayer.toggleRepeat() }
             }
             Spacer(Modifier.weight(1f))
             Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(20.dp))

@@ -37,8 +37,18 @@ object MusicPlayer {
     var durationMs by mutableStateOf(0)
         private set
 
+    /** Shuffle auto-advance / skip-next through the queue. */
+    var shuffle by mutableStateOf(false)
+        private set
+    /** Repeat the current track when it ends. */
+    var repeatOne by mutableStateOf(false)
+        private set
+
     val hasNext: Boolean get() = queue.isNotEmpty() && index < queue.lastIndex
     val hasPrevious: Boolean get() = queue.isNotEmpty() && index > 0
+
+    fun toggleShuffle() { shuffle = !shuffle }
+    fun toggleRepeat() { repeatOne = !repeatOne }
 
     /**
      * Plays [track], setting [queue] as the surrounding list so next/previous
@@ -55,6 +65,16 @@ object MusicPlayer {
         start(context, track)
     }
 
+    /**
+     * Pause because another audio source is starting — a reel/story video, a voice
+     * note, or a call. Music does not auto-resume afterwards (the user taps play), so
+     * the two never talk over each other. No-op if nothing is playing.
+     */
+    fun pauseForExternalAudio() {
+        val p = player ?: return
+        if (isPlaying) { runCatching { p.pause() }; isPlaying = false }
+    }
+
     fun togglePlayPause() {
         val p = player ?: return
         runCatching {
@@ -67,9 +87,19 @@ object MusicPlayer {
     }
 
     fun next(context: Context) {
-        if (!hasNext) return
-        index++
+        if (queue.isEmpty()) return
+        index = if (shuffle && queue.size > 1) randomOtherIndex() else {
+            if (!hasNext) return
+            index + 1
+        }
         start(context, queue[index])
+    }
+
+    private fun randomOtherIndex(): Int {
+        if (queue.size <= 1) return index
+        var n = index
+        while (n == index) n = (queue.indices).random()
+        return n
     }
 
     fun previous(context: Context) {
@@ -154,8 +184,14 @@ object MusicPlayer {
                 isPlaying = true
             }
             mp.setOnCompletionListener {
-                // Auto-advance through the queue; stop cleanly at the end.
-                if (hasNext) next(appCtx) else { isPlaying = false; progress = 1f }
+                when {
+                    // Repeat the same track.
+                    repeatOne -> { seekTo(0); player?.start(); isPlaying = true }
+                    // Shuffle or sequential advance; stop cleanly at the very end.
+                    shuffle && queue.size > 1 -> next(appCtx)
+                    hasNext -> next(appCtx)
+                    else -> { isPlaying = false; progress = 1f }
+                }
             }
             mp.setOnErrorListener { p, _, _ ->
                 preparing = false; isPlaying = false

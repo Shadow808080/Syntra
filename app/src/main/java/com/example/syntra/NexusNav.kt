@@ -158,7 +158,7 @@ private fun NavItem(
                 imageVector = if (isSelected) iconActive else iconIdle,
                 contentDescription = label,
                 tint = color,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(24.dp),
             )
         }
         Spacer(Modifier.height(2.dp))

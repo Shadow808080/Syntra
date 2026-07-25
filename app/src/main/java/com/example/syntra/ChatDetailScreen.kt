@@ -1658,7 +1658,7 @@ private fun AudioBubble(url: String, tint: Color) {
             when {
                 loading -> Unit // still buffering — ignore extra taps
                 playing -> { player.pause(); playing = false }
-                prepared -> { VoiceBus.active = token; player.start(); playing = true }
+                prepared -> { com.example.syntra.net.MusicPlayer.pauseForExternalAudio(); VoiceBus.active = token; player.start(); playing = true }
                 else -> {
                     // First play: prepare OFF the main thread (prepareAsync) so the UI
                     // never blocks; show a spinner until the audio is actually ready.
@@ -1682,6 +1682,7 @@ private fun AudioBubble(url: String, tint: Color) {
                                 loading = false
                                 prepared = true
                                 durationMs = runCatching { mp.duration }.getOrDefault(0)
+                                com.example.syntra.net.MusicPlayer.pauseForExternalAudio()
                                 mp.start()
                                 playing = true
                             }

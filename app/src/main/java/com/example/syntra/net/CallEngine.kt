@@ -75,6 +75,7 @@ object CallEngine {
         scope = cs
         cs.launch { r.events.collect { onEvent(it) } }
 
+        MusicPlayer.pauseForExternalAudio() // a call takes over audio
         r.connect(url, token)
         connected = true
 

@@ -333,8 +333,6 @@ private fun MainTabs(onSignOut: () -> Unit) {
     var roomOverlay by remember { mutableStateOf(false) }
     var shortsOverlay by remember { mutableStateOf(false) }
     var musicOverlay by remember { mutableStateOf(false) }
-    // The full-screen now-playing music view, opened by tapping the mini-player.
-    var showNowPlaying by remember { mutableStateOf(false) }
     // True while a full-screen call is up (not minimized) — used to pause Shorts.
     val callBusy = CallController.isBusy
 
@@ -441,7 +439,7 @@ private fun MainTabs(onSignOut: () -> Unit) {
             if (!overlay) {
                 // Persistent music mini-player above the nav bar (renders only when a
                 // track is loaded). Tapping it opens the full now-playing screen.
-                MusicMiniPlayer(onExpand = { showNowPlaying = true })
+                MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
                 NexusBottomBar(
                     selected = tabOrder[pager.currentPage],
                     onSelect = { goTo(it) },
@@ -450,7 +448,7 @@ private fun MainTabs(onSignOut: () -> Unit) {
         }
 
         // Full-screen now-playing, above the tabs (but below an active call).
-        if (showNowPlaying) NowPlayingScreen(onClose = { showNowPlaying = false })
+        if (MusicUi.showNowPlaying) NowPlayingScreen(onClose = { MusicUi.showNowPlaying = false })
 
         // The call (incoming or outgoing) is rendered above everything by CallHost:
         // full-screen, or a draggable floating window when minimized.

@@ -969,6 +969,7 @@ private fun ReelVideo(
     // Play/pause follows the current page and the tap-to-pause toggle.
     LaunchedEffect(playing, ready) {
         if (!ready) return@LaunchedEffect
+        if (playing) com.example.syntra.net.MusicPlayer.pauseForExternalAudio() // don't talk over music
         runCatching { if (playing) player.start() else player.pause() }
     }
 }
