@@ -2,9 +2,11 @@ package com.example.syntra
 
 import android.content.Context
 import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,12 +36,18 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallMissed
 import androidx.compose.material.icons.automirrored.filled.CallReceived
+import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -49,6 +57,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -65,10 +74,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.NexusAccent
@@ -152,6 +163,22 @@ object CallLog {
             .edit().putString(KEY, arr.toString()).apply()
     }
 
+    /** Removes a single call from the log (the long-press "Hapus" action). */
+    fun remove(context: Context, id: String) {
+        val kept = all(context).filterNot { it.id == id }
+        val arr = JSONArray()
+        kept.forEach { e ->
+            arr.put(
+                JSONObject()
+                    .put("id", e.id).put("name", e.peerName).put("peer_id", e.peerId)
+                    .put("video", e.video).put("dir", e.direction.name)
+                    .put("at", e.at).put("dur", e.durationSec),
+            )
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY, arr.toString()).apply()
+    }
+
     fun clear(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY).apply()
     }
@@ -175,10 +202,17 @@ fun CallsScreen(
     val history = remember { mutableStateListOf<CallEntry>() }
     // People you could call, taken from the real conversation list.
     val contacts = remember { mutableStateListOf<Pair<String, String>>() }
+    // peerId -> profile photo url / username, so the call log shows real avatars and
+    // "Kirim pesan" can open the right chat — like a phone app's recents.
+    val avatars = remember { mutableStateMapOf<String, String>() }
+    val usernames = remember { mutableStateMapOf<String, String>() }
     var filter by remember { mutableStateOf(0) } // 0 = semua, 1 = tak terjawab
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var showNewCall by remember { mutableStateOf(false) }
+    // Long-press "Info" opens a call-detail sheet; "Kirim pesan" opens a chat.
+    var detailEntry by remember { mutableStateOf<CallEntry?>(null) }
+    var openChat by remember { mutableStateOf<Conversation?>(null) }
 
     // A call placed or received anywhere in the app appends to the log; re-read it
     // whenever this tab comes back — or the moment a call finishes — so the history
@@ -198,10 +232,12 @@ fun CallsScreen(
         if (ApiConfig.ENABLED) {
             runCatching { SyntraClient.getConversations() }
                 .onSuccess { list ->
-                    contacts.addAll(
-                        list.filter { it.type == "direct" }
-                            .mapNotNull { c -> c.counterpartId?.let { c.title to it } },
-                    )
+                    list.filter { it.type == "direct" }.forEach { c ->
+                        val pid = c.counterpartId ?: return@forEach
+                        contacts.add(c.title to pid)
+                        c.avatarMediaId?.takeIf { it.isNotBlank() }?.let { avatars[pid] = it }
+                        c.counterpartUsername?.takeIf { it.isNotBlank() }?.let { usernames[pid] = it }
+                    }
                 }
         }
     }
@@ -225,6 +261,26 @@ fun CallsScreen(
                 CallController.startOutgoing(convId, name, peerId, video)
             }
         }
+    }
+
+    fun messagePeer(entry: CallEntry) {
+        if (!ApiConfig.ENABLED || entry.peerId.isBlank()) return
+        scope.launch {
+            val convId = runCatching { SyntraClient.createDirect(entry.peerId) }.getOrNull() ?: return@launch
+            openChat = Conversation(
+                id = convId,
+                name = entry.peerName.ifBlank { "Tanpa nama" },
+                message = "",
+                time = "",
+                counterpartId = entry.peerId,
+                counterpartUsername = usernames[entry.peerId],
+            )
+        }
+    }
+
+    fun deleteEntry(entry: CallEntry) {
+        CallLog.remove(context, entry.id)
+        history.removeAll { it.id == entry.id }
     }
 
     val byFilter = if (filter == 1) history.filter { it.direction == CallDirection.MISSED } else history
@@ -318,8 +374,16 @@ fun CallsScreen(
                     items(shown, key = { it.id }) { entry ->
                         CallRow(
                             entry = entry,
-                            onCall = { placeCall(entry.peerName, entry.peerId, false) },
+                            avatarUrl = avatars[entry.peerId],
+                            // Tap the row → call back with the same kind as the entry
+                            // (a video call → video; a voice call → voice), the way a
+                            // phone app's recents behaves.
+                            onCallBack = { placeCall(entry.peerName, entry.peerId, entry.video) },
+                            onVoice = { placeCall(entry.peerName, entry.peerId, false) },
                             onVideo = { placeCall(entry.peerName, entry.peerId, true) },
+                            onMessage = { messagePeer(entry) },
+                            onInfo = { detailEntry = entry },
+                            onDelete = { deleteEntry(entry) },
                         )
                     }
                     if (query.isBlank()) {
@@ -375,6 +439,24 @@ fun CallsScreen(
                 onCall = { name, id -> showNewCall = false; placeCall(name, id, false) },
                 onVideo = { name, id -> showNewCall = false; placeCall(name, id, true) },
             )
+        }
+
+        // Call-detail sheet (opened from the row's "Info panggilan").
+        detailEntry?.let { entry ->
+            CallDetailSheet(
+                entry = entry,
+                avatarUrl = avatars[entry.peerId],
+                onDismiss = { detailEntry = null },
+                onVoice = { detailEntry = null; placeCall(entry.peerName, entry.peerId, false) },
+                onVideo = { detailEntry = null; placeCall(entry.peerName, entry.peerId, true) },
+                onMessage = { detailEntry = null; messagePeer(entry) },
+                onDelete = { detailEntry = null; deleteEntry(entry) },
+            )
+        }
+
+        // "Kirim pesan" opens the chat full-screen over the calls list.
+        openChat?.let { convo ->
+            ChatDetailScreen(conversation = convo, onBack = { openChat = null })
         }
 
         // The call itself is rendered by CallHost at the app root (floats over all
@@ -464,6 +546,99 @@ private fun NewCallSheet(
     }
 }
 
+/** iOS/Google-Phone-style call detail: who, the exact call, and quick actions. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CallDetailSheet(
+    entry: CallEntry,
+    avatarUrl: String?,
+    onDismiss: () -> Unit,
+    onVoice: () -> Unit,
+    onVideo: () -> Unit,
+    onMessage: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = NexusSurface,
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            CallAvatar(avatarUrl = avatarUrl, name = entry.peerName, peerId = entry.peerId, size = 84.dp)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                entry.peerName.ifBlank { "Tanpa nama" },
+                color = NexusTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(6.dp))
+            val meta = buildString {
+                append(if (entry.video) "Video · " else "Suara · ")
+                append(directionLabel(entry.direction))
+                if (entry.durationSec > 0) append(" · " + durationText(entry.durationSec))
+            }
+            Text(meta, color = NexusTextSecondary, fontSize = 13.sp)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                java.text.SimpleDateFormat("EEEE, d MMM yyyy • HH.mm", java.util.Locale("id")).format(entry.at),
+                color = NexusTextSecondary, fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(22.dp))
+            // Action row: Suara · Video · Pesan.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                DetailAction(Icons.Filled.Call, "Suara", onVoice)
+                DetailAction(Icons.Filled.Videocam, "Video", onVideo)
+                DetailAction(Icons.AutoMirrored.Filled.Message, "Pesan", onMessage)
+            }
+            Spacer(Modifier.height(20.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onDelete,
+                    )
+                    .padding(vertical = 14.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Delete, null, tint = Color(0xFFFF5D5D), modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Hapus dari riwayat", color = Color(0xFFFF5D5D), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailAction(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable(
+            indication = null,
+            interactionSource = remember { MutableInteractionSource() },
+            onClick = onClick,
+        ),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .background(Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, label, tint = Color.White, modifier = Modifier.size(24.dp)) }
+        Spacer(Modifier.height(8.dp))
+        Text(label, color = NexusTextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
 @Composable
 private fun CallIconButton(icon: ImageVector, cd: String, onClick: () -> Unit) {
     Box(
@@ -495,65 +670,151 @@ private val callGradients = listOf(
 private fun callGradient(key: String): List<Color> =
     callGradients[(key.hashCode() and Int.MAX_VALUE) % callGradients.size]
 
-private fun relativeCallTime(at: Long): String {
-    val minutes = (System.currentTimeMillis() - at) / 60_000
+/** Phone-app style timestamp: clock today, "Kemarin", day name this week, else date. */
+private fun phoneCallTime(at: Long): String {
+    val now = java.util.Calendar.getInstance()
+    val then = java.util.Calendar.getInstance().apply { timeInMillis = at }
+    fun sameDay(a: java.util.Calendar, b: java.util.Calendar) =
+        a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR) &&
+            a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR)
+    val yesterday = (now.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_YEAR, -1) }
     return when {
-        minutes < 1 -> "Baru saja"
-        minutes < 60 -> "$minutes menit lalu"
-        minutes < 1440 -> "${minutes / 60} jam lalu"
-        minutes < 2880 -> "Kemarin"
-        else -> "${minutes / 1440} hari lalu"
+        sameDay(now, then) -> java.text.SimpleDateFormat("HH.mm", java.util.Locale("id")).format(at)
+        sameDay(yesterday, then) -> "Kemarin"
+        (now.timeInMillis - at) < 7L * 24 * 3600_000 ->
+            java.text.SimpleDateFormat("EEEE", java.util.Locale("id")).format(at)
+        else -> java.text.SimpleDateFormat("d MMM", java.util.Locale("id")).format(at)
     }
+}
+
+private fun directionLabel(d: CallDirection): String = when (d) {
+    CallDirection.OUTGOING -> "Keluar"
+    CallDirection.INCOMING -> "Masuk"
+    CallDirection.MISSED -> "Tak terjawab"
 }
 
 private fun durationText(seconds: Int): String = when {
     seconds <= 0 -> ""
-    seconds < 60 -> " · ${seconds}d"
-    else -> " · ${seconds / 60}m ${seconds % 60}d"
+    seconds < 60 -> "${seconds}d"
+    else -> "${seconds / 60}m ${seconds % 60}d"
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun CallRow(entry: CallEntry, onCall: () -> Unit, onVideo: () -> Unit) {
+private fun CallRow(
+    entry: CallEntry,
+    avatarUrl: String?,
+    onCallBack: () -> Unit,
+    onVoice: () -> Unit,
+    onVideo: () -> Unit,
+    onMessage: () -> Unit,
+    onInfo: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val (icon, tint) = when (entry.direction) {
         CallDirection.OUTGOING -> Icons.AutoMirrored.Filled.CallMade to NexusOnline
         CallDirection.INCOMING -> Icons.AutoMirrored.Filled.CallReceived to NexusAccentSoft
         CallDirection.MISSED -> Icons.AutoMirrored.Filled.CallMissed to Color(0xFFFF5D5D)
     }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        GradientAvatar(
-            gradient = callGradient(entry.peerId.ifBlank { entry.peerName }),
-            initial = entry.peerName.firstOrNull()?.toString() ?: "?",
-            size = 48.dp,
-        )
-        Spacer(Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = entry.peerName.ifBlank { "Tanpa nama" },
-                color = if (entry.direction == CallDirection.MISSED) Color(0xFFFF8A8A) else NexusTextPrimary,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(3.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, tint = tint, modifier = Modifier.size(14.dp))
-                Spacer(Modifier.width(5.dp))
-                Text(
-                    text = relativeCallTime(entry.at) + durationText(entry.durationSec),
-                    color = NexusTextSecondary,
-                    fontSize = 12.sp,
+    var menuOpen by remember { mutableStateOf(false) }
+
+    Box {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                // Tap → call back; long-press → the context menu (Panggil, Pesan,
+                // Info, Hapus) — the phone-app gesture set.
+                .combinedClickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onCallBack,
+                    onLongClick = { menuOpen = true },
                 )
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CallAvatar(avatarUrl = avatarUrl, name = entry.peerName, peerId = entry.peerId, size = 50.dp)
+            Spacer(Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = entry.peerName.ifBlank { "Tanpa nama" },
+                    color = if (entry.direction == CallDirection.MISSED) Color(0xFFFF8A8A) else NexusTextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(icon, null, tint = tint, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(5.dp))
+                    if (entry.video) {
+                        Icon(Icons.Filled.Videocam, null, tint = NexusTextSecondary, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    val dur = durationText(entry.durationSec)
+                    Text(
+                        text = directionLabel(entry.direction) +
+                            (if (dur.isNotBlank()) " · $dur" else "") +
+                            " · " + phoneCallTime(entry.at),
+                        color = NexusTextSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
+            CallActionIcon(if (entry.video) Icons.Filled.Videocam else Icons.Filled.Call, onClick = onCallBack)
         }
-        CallActionIcon(if (entry.video) Icons.Filled.Videocam else Icons.Filled.Call) {
-            if (entry.video) onVideo() else onCall()
+
+        // Long-press context menu.
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text("Panggil suara") },
+                leadingIcon = { Icon(Icons.Filled.Call, null, modifier = Modifier.size(20.dp)) },
+                onClick = { menuOpen = false; onVoice() },
+            )
+            DropdownMenuItem(
+                text = { Text("Panggil video") },
+                leadingIcon = { Icon(Icons.Filled.Videocam, null, modifier = Modifier.size(20.dp)) },
+                onClick = { menuOpen = false; onVideo() },
+            )
+            DropdownMenuItem(
+                text = { Text("Kirim pesan") },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.Message, null, modifier = Modifier.size(20.dp)) },
+                onClick = { menuOpen = false; onMessage() },
+            )
+            DropdownMenuItem(
+                text = { Text("Info panggilan") },
+                leadingIcon = { Icon(Icons.Filled.Info, null, modifier = Modifier.size(20.dp)) },
+                onClick = { menuOpen = false; onInfo() },
+            )
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("Hapus dari riwayat", color = Color(0xFFFF5D5D)) },
+                leadingIcon = { Icon(Icons.Filled.Delete, null, tint = Color(0xFFFF5D5D), modifier = Modifier.size(20.dp)) },
+                onClick = { menuOpen = false; onDelete() },
+            )
         }
+    }
+}
+
+/** Avatar that shows the contact's photo when we have one, else a gradient initial. */
+@Composable
+private fun CallAvatar(avatarUrl: String?, name: String, peerId: String, size: androidx.compose.ui.unit.Dp) {
+    if (!avatarUrl.isNullOrBlank()) {
+        AsyncImage(
+            model = avatarUrl,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.size(size).clip(CircleShape).background(NexusSurface),
+        )
+    } else {
+        GradientAvatar(
+            gradient = callGradient(peerId.ifBlank { name }),
+            initial = name.firstOrNull()?.toString() ?: "?",
+            size = size,
+        )
     }
 }
 
