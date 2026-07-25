@@ -529,7 +529,12 @@ fun ShortsScreen(
         // A reel opened from a notification — full-screen viewer, with comments a tap
         // away, so tapping "budi membalas komentar kamu" lands right on the post.
         deepLinkReel?.let { reel ->
-            ReelViewer(reels = listOf(reel), startIndex = 0, onClose = { deepLinkReel = null })
+            ReelViewer(
+                reels = listOf(reel),
+                startIndex = 0,
+                onClose = { deepLinkReel = null },
+                openCommentsOnStart = true,
+            )
         }
     }
 
@@ -1034,7 +1039,13 @@ private fun ReelVideo(
  * as swipeable pages (like the Shorts feed), starting at [startIndex].
  */
 @Composable
-fun ReelViewer(reels: List<NetReel>, startIndex: Int, onClose: () -> Unit) {
+fun ReelViewer(
+    reels: List<NetReel>,
+    startIndex: Int,
+    onClose: () -> Unit,
+    /** Open the comments sheet immediately — used when arriving from a reply notif. */
+    openCommentsOnStart: Boolean = false,
+) {
     androidx.activity.compose.BackHandler(onBack = onClose)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1043,6 +1054,11 @@ fun ReelViewer(reels: List<NetReel>, startIndex: Int, onClose: () -> Unit) {
     val autoScroll = remember { SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true) }
 
     if (items.isEmpty()) { onClose(); return }
+    // Land with comments open so the reply that triggered the notification is right
+    // there, not one tap away.
+    LaunchedEffect(Unit) {
+        if (openCommentsOnStart) items.getOrNull(startIndex.coerceIn(0, items.lastIndex))?.let { commentsFor = it }
+    }
     val pager = rememberPagerState(
         initialPage = startIndex.coerceIn(0, items.lastIndex),
         pageCount = { items.size },
@@ -2031,7 +2047,12 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                     pendingDelete = null
                     scope.launch {
                         runCatching { SyntraClient.deleteReelComment(reel.id, c.id) }
-                            .onSuccess { comments.removeAll { it.id == c.id } }
+                            .onSuccess {
+                                // Deleting a top-level comment removes its replies too
+                                // (the server cascades); drop the comment AND anything
+                                // whose parent is it, so the UI matches immediately.
+                                comments.removeAll { it.id == c.id || it.parentId == c.id }
+                            }
                             .onFailure { Toast.makeText(context, "Gagal hapus: ${it.message}", Toast.LENGTH_SHORT).show() }
                     }
                 }) { Text("Hapus", color = Color(0xFFFF5D5D), fontWeight = FontWeight.SemiBold) }

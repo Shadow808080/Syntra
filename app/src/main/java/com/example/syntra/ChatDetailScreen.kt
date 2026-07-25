@@ -1764,8 +1764,15 @@ private fun String.isAudioUrl(): Boolean =
  * it claims the bus; every other bubble watches the bus and pauses itself. This is
  * what stops two clips overlapping into noise.
  */
-private object VoiceBus {
+object VoiceBus {
     var active by mutableStateOf<Any?>(null)
+
+    /**
+     * Stop whatever voice note is playing. Clearing the active token makes every
+     * bubble's "someone else took the bus" effect pause itself — used when the app
+     * goes to the background so a voice note doesn't keep playing.
+     */
+    fun pauseActive() { active = null }
 }
 
 /** Voice note bubble with a play/pause button. */

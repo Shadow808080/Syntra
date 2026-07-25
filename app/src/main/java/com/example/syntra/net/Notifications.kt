@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
@@ -238,6 +240,13 @@ object Notifications {
 object AppForeground {
     @Volatile
     var isForeground: Boolean = false
+
+    /**
+     * Compose-observable foreground flag. Screens read this so playback pauses when
+     * the app leaves the foreground — e.g. a Shorts video stops when you background
+     * the app, not just when you switch tabs.
+     */
+    var isForegroundState by androidx.compose.runtime.mutableStateOf(true)
 
     /** The conversation the user currently has open, or null. Set by the chat screen. */
     @Volatile

@@ -32,6 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
@@ -100,12 +102,26 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         // App is on screen → suppress message notifications (the user sees updates live).
         com.example.syntra.net.AppForeground.isForeground = true
+        com.example.syntra.net.AppForeground.isForegroundState = true
     }
 
     override fun onStop() {
         super.onStop()
         // App went to the background → let the foreground service post notifications.
         com.example.syntra.net.AppForeground.isForeground = false
+        // Pause all media when the app is no longer on screen: music, and — via the
+        // foreground flag the feed observes — Shorts video and voice notes. Nothing
+        // keeps playing behind other apps.
+        com.example.syntra.net.AppForeground.isForegroundState = false
+        com.example.syntra.net.MusicPlayer.pauseForExternalAudio()
+        com.example.syntra.VoiceBus.pauseActive()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // App closed/swiped away → fully release audio so nothing lingers.
+        com.example.syntra.net.MusicPlayer.stop()
+        com.example.syntra.VoiceBus.pauseActive()
     }
 
     // A notification tapped while the app is already running delivers a NEW intent
@@ -416,13 +432,16 @@ private fun MainTabs(onSignOut: () -> Unit) {
     // detail / story viewer / voice room can cover the whole screen.
     val overlay = chatOverlay || roomOverlay || shortsOverlay || musicOverlay || callsOverlay
     Box(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        // The pager fills the WHOLE box and never resizes when the bottom bar shows/
+        // hides — the bar is an overlay that slides over it. Resizing the pager (with
+        // five kept-alive tabs + a video surface) on every scroll was the jank.
+        Box(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(
                 state = pager,
                 userScrollEnabled = !overlay,
                 // Keep all four tabs alive so swiping back doesn't reload/reconnect.
                 beyondViewportPageCount = tabOrder.size,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxSize(),
             ) { page ->
                 when (tabOrder[page]) {
                     NexusTab.CHAT -> ChatScreen(
@@ -438,8 +457,10 @@ private fun MainTabs(onSignOut: () -> Unit) {
                     NexusTab.SHORTS -> ShortsScreen(
                     modifier = Modifier.fillMaxSize(),
                     // Kept alive off-screen by the pager, so it must stop its video
-                    // (and audio) whenever it isn't the tab actually being shown.
-                    visible = tabOrder[pager.currentPage] == NexusTab.SHORTS && !callBusy,
+                    // (and audio) whenever it isn't the tab actually being shown — and
+                    // also when the whole app is backgrounded (isForegroundState).
+                    visible = tabOrder[pager.currentPage] == NexusTab.SHORTS && !callBusy &&
+                        com.example.syntra.net.AppForeground.isForegroundState,
                     onOverlayChange = { shortsOverlay = it },
                 )
                     NexusTab.ROOMS -> RoomsScreen(
@@ -454,25 +475,32 @@ private fun MainTabs(onSignOut: () -> Unit) {
                     )
                 }
             }
-            // Auto-hide on scroll (chat & shorts): the bar slides down when content
-            // scrolls down and back up when it scrolls up. Always visible on other
-            // tabs; reset to visible whenever the tab changes.
-            LaunchedEffect(pager.currentPage) { BottomBarVisibility.visible = true }
-            val barShown = !overlay && BottomBarVisibility.visible
-            androidx.compose.animation.AnimatedVisibility(
-                visible = barShown,
-                enter = androidx.compose.animation.slideInVertically(initialOffsetY = { it }),
-                exit = androidx.compose.animation.slideOutVertically(targetOffsetY = { it }),
+        }
+
+        // Auto-hide on scroll (chat & shorts): the bar slides down when content
+        // scrolls down, back up when it scrolls up. Reset to visible on tab change.
+        LaunchedEffect(pager.currentPage) { BottomBarVisibility.visible = true }
+        if (!overlay) {
+            var barHeightPx by remember { mutableStateOf(0) }
+            // Smooth: only the bar's translationY animates (no relayout of content).
+            val translate by androidx.compose.animation.core.animateFloatAsState(
+                targetValue = if (BottomBarVisibility.visible) 0f else barHeightPx.toFloat(),
+                animationSpec = androidx.compose.animation.core.tween(220),
+                label = "bottomBarSlide",
+            )
+            Column(
+                modifier = Modifier
+                    .align(androidx.compose.ui.Alignment.BottomCenter)
+                    .onSizeChanged { barHeightPx = it.height }
+                    .graphicsLayer { translationY = translate },
             ) {
-                Column {
-                    // Persistent music mini-player above the nav bar (renders only when
-                    // a track is loaded). Tapping it opens the full now-playing screen.
-                    MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
-                    NexusBottomBar(
-                        selected = tabOrder[pager.currentPage],
-                        onSelect = { goTo(it) },
-                    )
-                }
+                // Persistent music mini-player above the nav bar (renders only when a
+                // track is loaded). Tapping it opens the full now-playing screen.
+                MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
+                NexusBottomBar(
+                    selected = tabOrder[pager.currentPage],
+                    onSelect = { goTo(it) },
+                )
             }
         }
 

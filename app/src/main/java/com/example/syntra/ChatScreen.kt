@@ -975,7 +975,9 @@ fun ChatScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .nestedScroll(rememberHideBottomBarOnScroll()),
-                contentPadding = PaddingValues(bottom = 24.dp),
+                // Clears the floating bottom bar (which now overlays content) so the
+                // last chat isn't hidden behind it.
+                contentPadding = PaddingValues(bottom = 96.dp),
             ) {
                 // First-load skeleton: shimmering placeholder rows instead of a
                 // blank screen (or a heavy spinner) while chats stream in.
