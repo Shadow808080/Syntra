@@ -69,9 +69,19 @@ class ChatConnectionService : Service() {
         // foreground, so a user on ANY other screen (chat, music, calls…) never
         // learned their comment got a reply. Now it always notifies, except while
         // the user is actually on Shorts, where the reply is already visible live.
-        override fun onNotification(kind: String) {
+        override fun onNotification(
+            kind: String,
+            actorName: String,
+            actorUsername: String,
+            actorAvatarUrl: String?,
+        ) {
             if (AppForeground.inShorts) return
-            Notifications.showSocial(applicationContext, kind)
+            // Fetch + circle-crop the actor's photo (best effort), then post a rich
+            // notification — their name, what they did, and their avatar.
+            scope.launch {
+                val bmp = loadAvatar(actorAvatarUrl)
+                Notifications.showSocial(applicationContext, kind, actorName, actorUsername, bmp)
+            }
         }
     }
 

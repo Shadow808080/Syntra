@@ -76,7 +76,17 @@ interface SocketListener {
     /** My request to join an invite-only room was approved/rejected. */
     fun onRoomJoinDecided(roomId: String, approved: Boolean) {}
     /** A new in-app notification arrived. */
-    fun onNotification(kind: String) {}
+    /**
+     * A new in-app notification. [kind] is the type (comment/like/follow…);
+     * [actorName]/[actorUsername]/[actorAvatarUrl] identify who did it, so a rich
+     * system notification ("budi membalas komentar kamu" + their photo) can be shown.
+     */
+    fun onNotification(
+        kind: String,
+        actorName: String = "",
+        actorUsername: String = "",
+        actorAvatarUrl: String? = null,
+    ) {}
 
     /**
      * A call started in one of my conversations — show the incoming/ongoing UI.
@@ -1070,7 +1080,14 @@ object SyntraClient {
                     dispatch { it.onRoomJoinDecided(d.optString("room_id"), approved) }
                 }
                 "notification.new" -> (data as? JSONObject)?.let { d ->
-                    dispatch { it.onNotification(d.optString("type")) }
+                    dispatch {
+                        it.onNotification(
+                            d.optString("type"),
+                            d.optString("actor_name"),
+                            d.optString("actor_username"),
+                            d.optString("actor_avatar_url", "").ifBlank { null },
+                        )
+                    }
                 }
                 "call.incoming" -> (data as? JSONObject)?.let { d ->
                     dispatch {

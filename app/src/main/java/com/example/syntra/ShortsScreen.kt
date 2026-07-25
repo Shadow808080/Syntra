@@ -1909,6 +1909,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                                 c = c,
                                 isReply = isReply,
                                 canDelete = iOwnReel || (c.authorId.isNotBlank() && c.authorId == myId),
+                                isMine = c.authorId.isNotBlank() && c.authorId == myId,
                                 onLongPress = { pendingDelete = c },
                                 onReply = { replyingTo = c; focusRequester.requestFocus() },
                             )
@@ -2028,10 +2029,11 @@ private fun CommentRow(
     c: NetReelComment,
     isReply: Boolean = false,
     canDelete: Boolean = false,
+    isMine: Boolean = false,
     onLongPress: () -> Unit = {},
     onReply: () -> Unit = {},
 ) {
-    val name = c.displayName.ifBlank { c.username }.ifBlank { "pengguna" }
+    val name = if (isMine) "Komentar Anda" else c.displayName.ifBlank { c.username }.ifBlank { "pengguna" }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2086,13 +2088,26 @@ private fun CommentRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = name,
-                    color = NexusTextPrimary,
+                    // My own comment reads in the accent colour, like the "you" chip.
+                    color = if (isMine) NexusAccentSoft else NexusTextPrimary,
                     fontSize = if (isReply) 12.sp else 13.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
+                if (isMine) {
+                    // A small pill badge, same idea as "Anda" on your own Shorts.
+                    Spacer(Modifier.width(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .background(NexusAccent.copy(alpha = 0.18f), RoundedCornerShape(50))
+                            .border(1.dp, NexusAccent.copy(alpha = 0.4f), RoundedCornerShape(50))
+                            .padding(horizontal = 7.dp, vertical = 1.dp),
+                    ) {
+                        Text("Anda", color = NexusAccentSoft, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
                 val rel = relativeCommentTime(c.createdAt)
                 if (rel.isNotBlank()) {
                     Spacer(Modifier.width(8.dp))

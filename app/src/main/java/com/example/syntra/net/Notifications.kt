@@ -143,25 +143,47 @@ object Notifications {
      * design: the realtime event carries only a type, which is enough to tell the
      * user something happened and pull them back into the app.
      */
-    fun showSocial(context: Context, type: String) {
+    fun showSocial(
+        context: Context,
+        type: String,
+        actorName: String = "",
+        actorUsername: String = "",
+        avatar: Bitmap? = null,
+    ) {
         ensureChannels(context)
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
 
-        val (title, body) = when (type) {
-            "comment" -> "Balasan komentar" to "Seseorang membalas komentar kamu"
-            "like" -> "Suka baru" to "Seseorang menyukai konten kamu"
-            "follow" -> "Pengikut baru" to "Seseorang mulai mengikuti kamu"
-            "mention" -> "Kamu disebut" to "Seseorang menyebut kamu di komentar"
-            "story_reply" -> "Balasan story" to "Seseorang membalas story kamu"
-            "room_live" -> "Room dimulai" to "Sebuah room yang kamu ikuti sedang live"
-            else -> "Aktivitas baru" to "Ada aktivitas baru di Syntra"
+        // Prefer a real name; fall back to @username, then a neutral "Seseorang".
+        val who = actorName.ifBlank { actorUsername.takeIf { it.isNotBlank() }?.let { "@$it" } ?: "Seseorang" }
+        val (title, action) = when (type) {
+            "comment" -> "Balasan komentar" to "$who membalas komentar kamu"
+            "like" -> "Suka baru" to "$who menyukai konten kamu"
+            "follow" -> "Pengikut baru" to "$who mulai mengikuti kamu"
+            "mention" -> "Kamu disebut" to "$who menyebut kamu di komentar"
+            "story_reply" -> "Balasan story" to "$who membalas story kamu"
+            "room_live" -> "Room dimulai" to "$who memulai sebuah room"
+            else -> "Aktivitas baru" to "$who berinteraksi dengan kamu"
         }
+
+        // MessagingStyle so the launcher renders the actor's photo as the person icon
+        // and the name as the title — the same "someone messaged you" look, which
+        // reads as a chat/comment reply. Falls back to plain text without a photo.
+        val me = Person.Builder().setName("Kamu").build()
+        val actor = Person.Builder()
+            .setName(who)
+            .apply { if (avatar != null) setIcon(IconCompat.createWithBitmap(avatar)) }
+            .build()
+        val style = NotificationCompat.MessagingStyle(me)
+            .setConversationTitle(title)
+            .addMessage(action, System.currentTimeMillis(), actor)
 
         val notification = NotificationCompat.Builder(context, SOCIAL_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setStyle(style)
+            .apply { if (avatar != null) setLargeIcon(avatar) }
+            .setContentTitle(who)
+            .setContentText(action)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
             .setAutoCancel(true)
             .setContentIntent(openAppIntent(context, null))
