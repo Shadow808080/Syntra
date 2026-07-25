@@ -15,8 +15,10 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -30,6 +32,7 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -59,7 +62,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -125,6 +130,7 @@ import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusOnline
 import com.example.syntra.ui.theme.NexusRing
 import com.example.syntra.ui.theme.NexusStroke
+import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import coil.compose.AsyncImage
@@ -199,10 +205,12 @@ data class Conversation(
     val counterpartId: String? = null,
     // Username of the other participant, when known — needed to block them.
     val counterpartUsername: String? = null,
-    // Newest message the peer has read; drives the ✓✓ indicator.
+    // Newest message the peer has read; drives the blue ✓✓ indicator.
     val counterpartLastReadId: String? = null,
-    // Id of the last message — compared with counterpartLastReadId to know if my
-    // last sent message has been read (blue ✓✓) or just delivered (grey).
+    // Newest message that reached the peer's device; drives grey ✓✓ vs a single ✓.
+    val counterpartLastDeliveredId: String? = null,
+    // Id of the last message — compared with the two marks above to decide whether
+    // my last sent message is only sent (✓), delivered (✓✓), or read (blue ✓✓).
     val lastMessageId: String? = null,
     // Real profile photo of the counterpart / group, when the server knows one.
     val avatarUrl: String? = null,
@@ -310,11 +318,24 @@ private fun NetConversation.toUi() = Conversation(
     counterpartId = counterpartId,
     counterpartUsername = counterpartUsername,
     counterpartLastReadId = counterpartLastReadId,
+    counterpartLastDeliveredId = counterpartLastDeliveredId,
     lastMessageId = lastMessageId,
     // Only a real URL is usable; a bare media id stays null and falls back to
     // the letter tile until the photo is resolved (see resolveAvatars).
     avatarUrl = avatarMediaId?.takeIf { it.startsWith("http") },
 )
+
+/**
+ * The newer of two nullable UUIDv7 ids. Ids sort lexicographically in time order,
+ * so plain string comparison picks the newer; nulls lose. Used to advance the
+ * read/delivered marks on a chat row without ever moving them backwards.
+ */
+private fun maxUuid(a: String?, b: String?): String? = when {
+    a == null -> b
+    b == null -> a
+    a >= b -> a
+    else -> b
+}
 
 /** Null when the group carries no media — an empty ring would be a lie. */
 private fun NetStoryGroup.toUi(): ActivePerson? {
@@ -335,10 +356,28 @@ private fun NetStoryGroup.toUi(): ActivePerson? {
 }
 
 private fun previewFallback(type: String): String = when (type) {
-    "image" -> "📷 Foto"
-    "video" -> "🎥 Video"
-    "audio", "voice_note" -> "🎙️ Pesan suara"
+    "image" -> "[Foto]"
+    "video" -> "[Video]"
+    "audio", "voice_note" -> "[Pesan suara]"
+    "media" -> "[Media]"
     else -> ""
+}
+
+/**
+ * Preview text for a LIVE incoming message. The socket carries a generic
+ * `type` = "media" for attachments, so when there's no body we infer the kind
+ * from the attachment URL's extension to still show [Foto]/[Video]/[Pesan suara].
+ */
+private fun livePreview(m: NetMessage): String {
+    if (m.body.isNotBlank()) return m.body
+    val url = m.attachments.firstOrNull().orEmpty().substringBefore('?').lowercase()
+    return when {
+        url.isBlank() -> previewFallback(m.type)
+        url.endsWith(".m4a") || url.endsWith(".mp3") || url.endsWith(".aac") || url.endsWith(".ogg") || url.endsWith(".wav") -> "[Pesan suara]"
+        url.endsWith(".mp4") || url.endsWith(".mov") || url.endsWith(".webm") || url.endsWith(".mkv") || url.endsWith(".3gp") -> "[Video]"
+        url.endsWith(".jpg") || url.endsWith(".jpeg") || url.endsWith(".png") || url.endsWith(".webp") || url.endsWith(".gif") -> "[Foto]"
+        else -> "[Media]"
+    }
 }
 
 /** "Baru saja" / "12 menit lalu" / "3 jam lalu" — stories never live past 24h. */
@@ -425,6 +464,41 @@ fun ChatScreen(
     // the story row is never seeded — it shows exactly what GET /stories returns.
     val chats = remember {
         mutableStateListOf<Conversation>().also { if (!ApiConfig.ENABLED) it.addAll(conversations) }
+    }
+    // Deep-link from a message notification: MainActivity parks the target chat id in
+    // ChatNavRequest; when it appears, open that chat. If it isn't in the loaded list
+    // yet (cold start), pull conversations first, then open it.
+    LaunchedEffect(ChatNavRequest.conversationId, chats.size) {
+        val cid = ChatNavRequest.conversationId ?: return@LaunchedEffect
+        val hit = chats.firstOrNull { it.id == cid }
+            ?: runCatching { SyntraClient.getConversations() }.getOrNull()
+                ?.firstOrNull { it.id == cid }?.toUi()
+        if (hit != null) {
+            openedChat = hit
+            ChatNavRequest.conversationId = null
+        }
+    }
+    // Typing sync: remembers each row's real online state while it shows "typing…"
+    // (so it restores correctly on stop), and the last typing time for auto-clear.
+    val onlineWhenIdle = remember { mutableStateMapOf<String, Boolean>() }
+    val typingClears = remember { mutableStateMapOf<String, Long>() }
+    // Safety net: if a typing-stop event is ever missed, drop the "typing…" state a
+    // few seconds after the last typing signal so a row can't be stuck typing.
+    LaunchedEffect(typingClears.toMap()) {
+        val stuck = typingClears.filterValues { System.currentTimeMillis() - it > 6000 }
+        if (stuck.isEmpty()) {
+            if (typingClears.isNotEmpty()) { delay(3000) }
+            return@LaunchedEffect
+        }
+        stuck.keys.forEach { cid ->
+            val idx = chats.indexOfFirst { it.id == cid }
+            if (idx >= 0 && chats[idx].presence == Presence.TYPING) {
+                chats[idx] = chats[idx].copy(
+                    presence = if (onlineWhenIdle[cid] == true) Presence.ONLINE else Presence.NONE,
+                )
+            }
+            typingClears.remove(cid)
+        }
     }
     val stories = remember { mutableStateListOf<ActivePerson>() }
     // Stories whose history has been fully watched (ring turns grey / disappears).
@@ -580,8 +654,15 @@ fun ChatScreen(
                     chats.add(
                         0,
                         c.copy(
-                            message = message.body.ifBlank { previewFallback(message.type) },
+                            message = livePreview(message),
                             time = formatClock(message.createdAt),
+                            // CRUCIAL for the checkmark: advance lastMessageId to THIS
+                            // message. Without it the row keeps comparing an older,
+                            // already-read message id against counterpartLastReadId and
+                            // stays stuck on blue ✓✓ even though the new message is
+                            // unread. A fresh message id (> the peer's read/delivered
+                            // marks) correctly reads as single ✓ until receipts arrive.
+                            lastMessageId = message.id,
                             // No badge for my own messages or the chat I'm reading.
                             unread = when {
                                 mine || openedChat?.id == c.id -> 0
@@ -631,22 +712,74 @@ fun ChatScreen(
                 }
 
                 override fun onReadReceipt(conversationId: String, userId: String, messageId: String) {
-                    // Clear the badge only when *I* read it (possibly on another
-                    // device). The peer reading must not clear my unread count.
-                    if (userId != SyntraClient.myUserId) return
                     val idx = chats.indexOfFirst { it.id == conversationId }
-                    if (idx >= 0 && chats[idx].unread > 0) {
-                        chats[idx] = chats[idx].copy(unread = 0)
+                    if (idx < 0) return
+                    if (userId == SyntraClient.myUserId) {
+                        // I read it (possibly on another device): clear my badge.
+                        if (chats[idx].unread > 0) chats[idx] = chats[idx].copy(unread = 0)
+                    } else {
+                        // The peer read my last message: turn the row's ✓✓ blue live.
+                        // Read implies delivered, so advance both marks (monotonic).
+                        val c = chats[idx]
+                        chats[idx] = c.copy(
+                            counterpartLastReadId = maxUuid(c.counterpartLastReadId, messageId),
+                            counterpartLastDeliveredId = maxUuid(c.counterpartLastDeliveredId, messageId),
+                        )
                     }
+                }
+
+                override fun onDeliveredReceipt(conversationId: String, userId: String, messageId: String) {
+                    // The peer's device received my message: turn the row's single ✓
+                    // into grey ✓✓ live, without waiting for a reload. Ignore my own.
+                    if (userId == SyntraClient.myUserId) return
+                    val idx = chats.indexOfFirst { it.id == conversationId }
+                    if (idx < 0) return
+                    val c = chats[idx]
+                    chats[idx] = c.copy(
+                        counterpartLastDeliveredId = maxUuid(c.counterpartLastDeliveredId, messageId),
+                    )
                 }
 
                 override fun onPresence(presence: NetPresence) {
                     val idx = chats.indexOfFirst { it.counterpartId == presence.userId }
                     if (idx >= 0) {
+                        // Don't stomp a live "typing" state with a presence tick; keep
+                        // TYPING until the typing-stop event clears it.
+                        if (chats[idx].presence == Presence.TYPING) {
+                            onlineWhenIdle[chats[idx].id] = presence.online
+                        } else {
+                            chats[idx] = chats[idx].copy(
+                                presence = if (presence.online) Presence.ONLINE else Presence.NONE,
+                            )
+                        }
+                    }
+                }
+
+                override fun onTyping(conversationId: String, userId: String, typing: Boolean) {
+                    if (userId == SyntraClient.myUserId) return
+                    val idx = chats.indexOfFirst { it.id == conversationId }
+                    if (idx < 0) return
+                    if (typing) {
+                        // Remember the underlying online state so we can restore it when
+                        // typing stops, then show "sedang mengetik…" on the row live.
+                        if (chats[idx].presence != Presence.TYPING) {
+                            onlineWhenIdle[conversationId] = chats[idx].presence == Presence.ONLINE
+                        }
+                        chats[idx] = chats[idx].copy(presence = Presence.TYPING)
+                        typingClears[conversationId] = System.currentTimeMillis()
+                    } else {
+                        val wasOnline = onlineWhenIdle[conversationId] == true
                         chats[idx] = chats[idx].copy(
-                            presence = if (presence.online) Presence.ONLINE else Presence.NONE,
+                            presence = if (wasOnline) Presence.ONLINE else Presence.NONE,
                         )
                     }
+                }
+
+                override fun onStoryNew(storyId: String, authorId: String) {
+                    // A followed user posted a story — refresh the rail live so their
+                    // ring appears without the user pulling to refresh.
+                    if (authorId == SyntraClient.myUserId) return
+                    scope.launch { refresh() }
                 }
 
                 override fun onReconnect() {
@@ -657,6 +790,8 @@ fun ChatScreen(
                             SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
                         }
                     }
+                    // Re-seed presence after a reconnect so online dots aren't stale.
+                    scope.launch { runCatching { SyntraClient.presenceQuery(chats.mapNotNull { it.counterpartId }) } }
                 }
             }
             SyntraClient.addListener(listener)
@@ -904,19 +1039,29 @@ fun ChatScreen(
                         )
                     }
                 }
+                // Fresh account: no chats to show. A warm invite beats a blank void.
+                if (!searching && firstLoadDone && visible.isEmpty()) {
+                    item {
+                        ChatHomeEmpty(
+                            noStories = stories.none { !it.isMine },
+                            onDiscover = { showDiscover = true },
+                        )
+                    }
+                }
             }
             }
         }
 
-        // Floating button: add a new story from the gallery.
+        // Floating button: add a new story. A compact, fully-round pill — smaller
+        // and cleaner than a big rounded-square FAB.
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 20.dp, bottom = 24.dp)
-                .size(56.dp)
+                .size(48.dp)
                 .background(
                     brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
-                    shape = RoundedCornerShape(18.dp),
+                    shape = CircleShape,
                 )
                 .clickable(
                     indication = null,
@@ -925,10 +1070,10 @@ fun ChatScreen(
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = Icons.Filled.Add,
-                contentDescription = "Add story",
+                imageVector = Icons.Filled.AddAPhoto,
+                contentDescription = "Tambah story",
                 tint = Color.White,
-                modifier = Modifier.size(26.dp),
+                modifier = Modifier.size(23.dp),
             )
         }
 
@@ -1110,7 +1255,8 @@ fun ChatScreen(
         // image story (reuses the normal upload path).
         if (showTextStory) {
             TextStoryScreen(
-                onClose = { showTextStory = false },
+                // Back returns to the media picker (foto/video/teks), not all the way out.
+                onClose = { showTextStory = false; showAddStatus = true },
                 onDone = { bmp ->
                     showTextStory = false
                     addStory(StoryImage.Bitmap(bmp.asImageBitmap()))
@@ -1264,35 +1410,71 @@ private fun ActiveRow(
     seen: List<ActivePerson>,
     onStoryClick: (Int) -> Unit,
 ) {
-    LazyRow(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 14.dp),
-        contentPadding = PaddingValues(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        itemsIndexed(people, key = { _, person -> person.id }) { index, person ->
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                StoryAvatar(
-                    photo = person.photo,
-                    size = 56.dp,
-                    posts = person.posts,
-                    // Per-segment: watched stories dim, unwatched stay lit. Watching
-                    // updates each item's `viewed`, so this reflects progress live.
-                    viewedCount = person.items.count { it.viewed },
-                    onClick = { onStoryClick(index) },
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = person.name,
-                    color = NexusTextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.width(64.dp),
-                )
+    // No stories at all → render nothing (the FAB is the way to post one). Avoids a
+    // lone "Cerita" header hovering over an empty rail.
+    if (people.isEmpty()) return
+    // How many people (not counting you) still have an unwatched story — the number
+    // that makes the rail worth glancing at.
+    val freshCount = people.count { !it.isMine && it.items.any { s -> !s.viewed } }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Section label — gives the rail a title instead of floating loose avatars.
+        Row(
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Cerita",
+                color = NexusTextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            if (freshCount > 0) {
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(NexusAccent.copy(alpha = 0.16f))
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = "$freshCount baru",
+                        color = NexusAccentSoft,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+        LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 12.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(18.dp),
+        ) {
+            itemsIndexed(people, key = { _, person -> person.id }) { index, person ->
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    StoryAvatar(
+                        photo = person.photo,
+                        size = 58.dp,
+                        posts = person.posts,
+                        // Per-segment: watched stories dim, unwatched stay lit. Watching
+                        // updates each item's `viewed`, so this reflects progress live.
+                        viewedCount = person.items.count { it.viewed },
+                        onClick = { onStoryClick(index) },
+                    )
+                    Spacer(Modifier.height(7.dp))
+                    Text(
+                        text = if (person.isMine) "Kamu" else person.name,
+                        color = if (person.isMine) NexusTextPrimary else NexusTextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = if (person.isMine) FontWeight.SemiBold else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.width(64.dp),
+                    )
+                }
             }
         }
     }
@@ -1301,6 +1483,19 @@ private fun ActiveRow(
 // ---------------------------------------------------------------------------
 // Conversation row
 // ---------------------------------------------------------------------------
+
+/** Corner presence badge on an avatar: a coloured dot with a card-coloured gap ring. */
+@Composable
+private fun BoxScope.PresenceDot(color: Color, ringColor: Color) {
+    Box(
+        modifier = Modifier
+            .align(Alignment.BottomEnd)
+            .size(15.dp)
+            .background(ringColor, CircleShape)
+            .padding(2.5.dp)
+            .background(color, CircleShape),
+    )
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -1311,134 +1506,140 @@ private fun ConversationRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
-    Row(
+    val unread = convo.unread > 0
+    val online = convo.presence == Presence.ONLINE
+    val typing = convo.presence == Presence.TYPING
+
+    // Flat, card-less row — clean and professional. Only a picked row (selection
+    // mode) gets a soft accent wash; everything else sits directly on the
+    // background so the list reads like a real messenger, not a stack of cards.
+    val rowBg = if (selected) NexusAccent.copy(alpha = 0.14f) else Color.Transparent
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 3.dp)
-            .clip(RoundedCornerShape(18.dp))
-            .background(if (selected) NexusAccent.copy(alpha = 0.16f) else Color.Transparent)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 10.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(rowBg)
+            .combinedClickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+                onLongClick = onLongClick,
+            ),
     ) {
-        Box {
-            GradientAvatar(
-                gradient = convo.gradient,
-                initial = convo.name.first().toString(),
-                size = 54.dp,
-                photoUrl = convo.avatarUrl,
-            )
-            // Tick replaces the presence dot while this row is picked.
-            if (selected) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(20.dp)
-                        .background(NexusAccent, CircleShape)
-                        .border(2.dp, NexusBackground, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.Filled.Check, null,
-                        tint = Color.White, modifier = Modifier.size(12.dp),
-                    )
-                }
-            }
-            if (!selected && convo.presence != Presence.NONE) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(14.dp)
-                        .background(NexusBackground, CircleShape)
-                        .padding(2.dp)
-                        .background(
-                            if (convo.presence == Presence.ONLINE) NexusOnline else NexusAccent,
-                            CircleShape,
-                        ),
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Avatar + presence badge. An unmistakable green dot at the corner when
+            // the person is online (live-updated via presence.update / presence.query).
+            Box(contentAlignment = Alignment.Center) {
+                GradientAvatar(
+                    gradient = convo.gradient,
+                    initial = convo.name.first().toString(),
+                    size = 54.dp,
+                    photoUrl = convo.avatarUrl,
                 )
-            }
-        }
-        Spacer(Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = convo.name,
-                    color = NexusTextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (pinned) {
-                    Icon(
-                        imageVector = Icons.Filled.PushPin,
-                        contentDescription = "Disematkan",
-                        tint = NexusTextSecondary,
+                when {
+                    selected -> Box(
                         modifier = Modifier
-                            .padding(start = 6.dp)
-                            .size(13.dp),
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = convo.time,
-                    color = if (convo.unread > 0) NexusAccentSoft else NexusTextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = if (convo.unread > 0) FontWeight.SemiBold else FontWeight.Normal,
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (convo.sent) {
-                    // Blue ✓✓ only when the peer has actually read my last message
-                    // (lastMessageId <= counterpartLastReadId, UUIDv7 time-ordered);
-                    // otherwise grey "delivered". Consistent with the chat detail.
-                    val read = convo.lastMessageId != null &&
-                        convo.counterpartLastReadId != null &&
-                        convo.lastMessageId <= convo.counterpartLastReadId
-                    Icon(
-                        imageVector = Icons.Filled.DoneAll,
-                        contentDescription = if (read) "Dibaca" else "Terkirim",
-                        tint = if (read) Color(0xFF7FE3FF) else NexusTextSecondary,
-                        modifier = Modifier
-                            .padding(end = 4.dp)
-                            .size(15.dp),
-                    )
-                }
-                Text(
-                    text = convo.message,
-                    color = if (convo.presence == Presence.TYPING) NexusAccentSoft else NexusTextSecondary,
-                    fontStyle = if (convo.presence == Presence.TYPING) FontStyle.Italic else FontStyle.Normal,
-                    fontSize = 14.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (convo.unread > 0) {
-                    Spacer(Modifier.width(8.dp))
-                    // A perfect round badge (not an elongated pill), number centred.
-                    Box(
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .background(NexusAccent),
+                            .align(Alignment.BottomEnd)
+                            .size(20.dp)
+                            .background(NexusAccent, CircleShape)
+                            .border(2.dp, NexusBackground, CircleShape),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            text = if (convo.unread > 99) "99" else convo.unread.toString(),
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            textAlign = TextAlign.Center,
-                            // Kill the font's built-in top/bottom padding and pin the
-                            // line height to the glyph size so the digit sits dead-centre
-                            // in the circle instead of drifting low.
-                            style = androidx.compose.ui.text.TextStyle(
-                                platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false),
-                                lineHeight = 11.sp,
-                            ),
+                        Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(12.dp))
+                    }
+                    // Green = online now. Accent = away/typing but present. The gap
+                    // ring is the page background since there's no card behind it.
+                    online -> PresenceDot(NexusOnline, NexusBackground)
+                    typing -> PresenceDot(NexusAccentSoft, NexusBackground)
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = convo.name,
+                        color = NexusTextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = if (unread) FontWeight.Bold else FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (pinned) {
+                        Icon(
+                            imageVector = Icons.Filled.PushPin,
+                            contentDescription = "Disematkan",
+                            tint = NexusTextSecondary,
+                            modifier = Modifier.padding(start = 6.dp).size(13.dp),
                         )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = convo.time,
+                        color = if (unread) NexusAccentSoft else NexusTextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (convo.sent && !typing) {
+                        // Same rule as inside the chat so home and chat never disagree:
+                        //   read (blue ✓✓)  = peer's read mark covers my last message
+                        //   delivered (grey ✓✓) = peer ONLINE now, or a delivered mark
+                        //                          covers it
+                        //   sent (single ✓) = only reached the server
+                        val lastId = convo.lastMessageId
+                        val read = lastId != null && convo.counterpartLastReadId != null &&
+                            lastId <= convo.counterpartLastReadId
+                        val delivered = online ||
+                            (lastId != null && convo.counterpartLastDeliveredId != null &&
+                                lastId <= convo.counterpartLastDeliveredId)
+                        Icon(
+                            imageVector = if (read || delivered) Icons.Filled.DoneAll else Icons.Filled.Done,
+                            contentDescription = when {
+                                read -> "Dibaca"; delivered -> "Sampai"; else -> "Terkirim"
+                            },
+                            tint = if (read) Color(0xFF7FE3FF) else NexusTextSecondary,
+                            modifier = Modifier.padding(end = 4.dp).size(15.dp),
+                        )
+                    }
+                    Text(
+                        text = if (typing) "sedang mengetik…" else convo.message,
+                        color = if (typing) NexusAccentSoft else if (unread) NexusTextPrimary.copy(alpha = 0.85f) else NexusTextSecondary,
+                        fontStyle = if (typing) FontStyle.Italic else FontStyle.Normal,
+                        fontSize = 14.sp,
+                        fontWeight = if (unread) FontWeight.Medium else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (unread) {
+                        Spacer(Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clip(CircleShape)
+                                .background(NexusAccent),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = if (convo.unread > 99) "99" else convo.unread.toString(),
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                style = androidx.compose.ui.text.TextStyle(
+                                    platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false),
+                                    lineHeight = 11.sp,
+                                ),
+                            )
+                        }
                     }
                 }
             }
@@ -2493,6 +2694,79 @@ private fun StoryDeleteDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
 // ---------------------------------------------------------------------------
 // Preview
 // ---------------------------------------------------------------------------
+
+/**
+ * Empty-home invite: shown once loaded when there are no conversations (and,
+ * softly noted, no stories from others yet). A warm door-in, not a dead void.
+ */
+@Composable
+private fun ChatHomeEmpty(noStories: Boolean, onDiscover: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 32.dp, vertical = 60.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        // Soft gradient emblem.
+        Box(
+            modifier = Modifier
+                .size(104.dp)
+                .clip(CircleShape)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(NexusAccent.copy(alpha = 0.28f), NexusAccent.copy(alpha = 0.06f)),
+                    ),
+                )
+                .border(1.dp, NexusAccent.copy(alpha = 0.35f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.PersonAddAlt,
+                contentDescription = null,
+                tint = NexusAccentSoft,
+                modifier = Modifier.size(46.dp),
+            )
+        }
+        Spacer(Modifier.height(24.dp))
+        Text(
+            text = "Mulai dunia Syntra-mu",
+            color = NexusTextPrimary,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.ExtraBold,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = if (noStories) {
+                "Belum ada obrolan atau story. Ikuti orang untuk melihat story mereka, lalu sapa untuk memulai percakapan pertamamu."
+            } else {
+                "Belum ada obrolan. Temukan orang dan kirim pesan pertama — percakapanmu akan muncul di sini."
+            },
+            color = NexusTextSecondary,
+            fontSize = 14.sp,
+            lineHeight = 21.sp,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(26.dp))
+        // Primary action: discover people (icon-led, on-brand gradient).
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onDiscover,
+                )
+                .padding(horizontal = 26.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Search, null, tint = Color.White, modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(9.dp))
+            Text("Temukan orang", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
 
 /** A shimmering placeholder chat row shown while the first load is in flight. */
 @Composable

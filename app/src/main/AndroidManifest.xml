@@ -21,6 +21,15 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!-- Chat notifications without Firebase/FCM: a foreground service keeps the
+         WebSocket alive so new messages arrive while the app is in the background,
+         and shows a local notification. All over the app's own backend, no Google. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:name=".SyntraApp"
         android:allowBackup="true"
@@ -50,6 +59,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Keeps the realtime chat socket connected in the background so new-message
+             notifications arrive without Firebase. dataSync type = it maintains a
+             network connection to sync data. -->
+        <service
+            android:name=".net.ChatConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

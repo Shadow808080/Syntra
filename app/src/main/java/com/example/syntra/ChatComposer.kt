@@ -178,6 +178,17 @@ class VoiceRecorder(private val context: Context) {
 
     val isRecording: Boolean get() = recorder != null
 
+    /**
+     * Current mic loudness as 0f..1f, for a live waveform. MediaRecorder reports a
+     * raw amplitude up to 32767; we normalise on a gentle curve so quiet speech still
+     * moves the bars. Returns 0 when not recording.
+     */
+    val amplitude: Float
+        get() = runCatching {
+            val raw = recorder?.maxAmplitude ?: return 0f
+            (raw / 12000f).coerceIn(0f, 1f)
+        }.getOrDefault(0f)
+
     fun start(): Boolean = runCatching {
         val file = File(context.cacheDir, "voice-${System.currentTimeMillis()}.m4a")
         val rec = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

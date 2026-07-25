@@ -64,6 +64,7 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.EmojiEmotions
 import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -75,6 +76,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -82,6 +85,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.draw.blur
@@ -155,6 +159,17 @@ private val STORY_REPLY_SEP = ''
 
 /** Marks a message that only exists on this device until the server confirms it. */
 private const val LOCAL_ID_PREFIX = "local-"
+
+/**
+ * The greater of two nullable UUIDv7 ids. Ids sort lexicographically in time
+ * order, so plain string comparison picks the newer one; nulls lose.
+ */
+private fun maxOfNullable(a: String?, b: String?): String? = when {
+    a == null -> b
+    b == null -> a
+    a >= b -> a
+    else -> b
+}
 
 /** Backend message -> bubble. `fromMe` is derived client-side (alignment doc §6). */
 private fun NetMessage.toUi(): Message {
@@ -233,7 +248,29 @@ fun ChatDetailScreen(
     var input by remember { mutableStateOf("") }
     // The message being replied to (swipe right on a bubble), null when not replying.
     var replyingTo by remember(conversation) { mutableStateOf<Message?>(null) }
-    var peerTyping by remember { mutableStateOf(false) }
+    // Whether we've told the peer we're typing (so we don't re-send start per key),
+    // and a counter bumped on each keystroke to re-arm the stop-debounce.
+    var typingActive by remember(conversation) { mutableStateOf(false) }
+    var typingPokes by remember(conversation) { mutableIntStateOf(0) }
+    // Send typing.stop ~2.5s after the last keystroke.
+    LaunchedEffect(typingPokes) {
+        if (typingPokes == 0 || !typingActive) return@LaunchedEffect
+        kotlinx.coroutines.delay(2500)
+        if (typingActive) {
+            typingActive = false
+            if (ApiConfig.ENABLED) SyntraClient.typingStop(conversation.id)
+        }
+    }
+    var peerTyping by remember(conversation) { mutableStateOf(false) }
+    // Safety auto-clear: if a "stopped" event is ever missed, drop the indicator a
+    // few seconds after the last typing signal so it can't stick on forever.
+    var lastTypingAt by remember(conversation) { mutableStateOf(0L) }
+    LaunchedEffect(peerTyping, lastTypingAt) {
+        if (peerTyping) {
+            kotlinx.coroutines.delay(6000)
+            if (System.currentTimeMillis() - lastTypingAt >= 6000) peerTyping = false
+        }
+    }
     // Live online state for the header; seeded from the list, then kept current
     // by presence.update so it changes without leaving the chat.
     var peerOnline by remember(conversation) {
@@ -256,6 +293,19 @@ fun ChatDetailScreen(
     var counterpartLastReadId by remember(conversation) {
         mutableStateOf(conversation.counterpartLastReadId)
     }
+    // Highest message id the peer's device has acknowledged receiving (✓✓ grey).
+    // Moves forward only — never regresses. Seeded from the PERSISTED delivered
+    // mark (and read, since read implies delivered) and advanced ONLY by real
+    // delivered/read receipts from the peer's device. It deliberately does NOT
+    // trust the online indicator: presence can be hidden or stale, so guessing
+    // "online ⇒ delivered" produced wrong ticks in both directions. Ticks now mean
+    // exactly what they say — ✓ sent, ✓✓ grey the peer's device really got it,
+    // ✓✓ blue the peer really read it.
+    var deliveredUpToId by remember(conversation) {
+        val read = conversation.counterpartLastReadId
+        val delivered = conversation.counterpartLastDeliveredId
+        mutableStateOf(maxOfNullable(delivered, read))
+    }
     var confirmClear by remember(conversation) { mutableStateOf(false) }
     var pendingMessage by remember(conversation) { mutableStateOf<Message?>(null) }
     var fullscreenImage by remember(conversation) { mutableStateOf<String?>(null) }
@@ -264,8 +314,6 @@ fun ChatDetailScreen(
     var confirmBlock by remember(conversation) { mutableStateOf(false) }
     var showChatTheme by remember(conversation) { mutableStateOf(false) }
     var showProfile by remember(conversation) { mutableStateOf(false) }
-    // When non-null, a full-screen call (true = video) is on top of the chat.
-    var activeCallVideo by remember(conversation) { mutableStateOf<Boolean?>(null) }
     var chatTheme by remember(conversation) { mutableStateOf(ChatThemeStore.get(context, conversation.id)) }
 
     fun startCall(video: Boolean) {
@@ -273,8 +321,19 @@ fun ChatDetailScreen(
             Toast.makeText(context, "Server belum aktif.", Toast.LENGTH_SHORT).show()
             return
         }
+        if (CallController.isBusy) {
+            Toast.makeText(context, "Masih ada panggilan berlangsung.", Toast.LENGTH_SHORT).show()
+            return
+        }
         showProfile = false
-        activeCallVideo = video
+        // The call lives at the app root (CallHost) so it can float and survive
+        // navigating away — we just hand it the peer and hang up here.
+        CallController.startOutgoing(
+            conversationId = conversation.id,
+            peerName = conversation.name,
+            peerId = conversation.counterpartId.orEmpty(),
+            video = video,
+        )
     }
     val listState = rememberLazyListState()
 
@@ -348,6 +407,16 @@ fun ChatDetailScreen(
                 Toast.makeText(context, "Gagal memuat pesan: ${it.message}", Toast.LENGTH_SHORT).show()
             }
         }
+        // Tell the notification layer which chat is open, so it won't notify for
+        // the very conversation the user is reading (but still notifies for others).
+        DisposableEffect(conversation.id) {
+            com.example.syntra.net.AppForeground.openConversationId = conversation.id
+            onDispose {
+                if (com.example.syntra.net.AppForeground.openConversationId == conversation.id) {
+                    com.example.syntra.net.AppForeground.openConversationId = null
+                }
+            }
+        }
         DisposableEffect(conversation.id) {
             val listener = object : SocketListener {
                 override fun onMessageNew(message: NetMessage) {
@@ -381,6 +450,7 @@ fun ChatDetailScreen(
                 override fun onTyping(conversationId: String, userId: String, typing: Boolean) {
                     if (conversationId == conversation.id && userId != SyntraClient.myUserId) {
                         peerTyping = typing
+                        if (typing) lastTypingAt = System.currentTimeMillis()
                     }
                 }
 
@@ -392,6 +462,20 @@ fun ChatDetailScreen(
                     if (userId == SyntraClient.myUserId) return
                     if (counterpartLastReadId == null || messageId > counterpartLastReadId!!) {
                         counterpartLastReadId = messageId
+                    }
+                    // Read implies delivered — keep the delivered mark at least this far.
+                    if (deliveredUpToId == null || messageId > deliveredUpToId!!) {
+                        deliveredUpToId = messageId
+                    }
+                }
+
+                override fun onDeliveredReceipt(conversationId: String, userId: String, messageId: String) {
+                    // The peer's device got my message (✓✓ grey). Ignore my own echoes,
+                    // and only ever advance the high-water mark so ticks never regress.
+                    if (conversationId != conversation.id) return
+                    if (userId == SyntraClient.myUserId) return
+                    if (deliveredUpToId == null || messageId > deliveredUpToId!!) {
+                        deliveredUpToId = messageId
                     }
                 }
 
@@ -601,6 +685,7 @@ fun ChatDetailScreen(
         messages.add(Message(ref, text, fromMe = true, time = "now", replyToId = replyId))
         input = ""
         replyingTo = null
+        typingActive = false
         if (ApiConfig.ENABLED) {
             SyntraClient.typingStop(conversation.id)
             if (replyId != null) {
@@ -664,13 +749,19 @@ fun ChatDetailScreen(
                     quoted = msg.replyToId?.let { rid -> messages.firstOrNull { it.id == rid } },
                     state = when {
                         msg.id.startsWith(LOCAL_ID_PREFIX) -> DeliveryState.SENDING
-                        // UUIDv7 sorts by time, so a plain comparison answers
-                        // "did they read this yet?" without any receipt table.
+                        // READ (blue) is separate and driven ONLY by the peer's read
+                        // mark — never by online status. UUIDv7 sorts by time, so a
+                        // plain id comparison answers "have they read this yet?".
                         counterpartLastReadId != null && msg.id <= counterpartLastReadId!! ->
                             DeliveryState.READ
-                        // Peer online = the message reached their device (2 ticks);
-                        // offline = only sent to the server (1 tick).
-                        peerOnline -> DeliveryState.DELIVERED
+                        // DELIVERED (✓✓ grey) = it reached the peer's device. True when
+                        // the peer is ONLINE right now (they're connected + subscribed,
+                        // so the message reached them) OR a stored delivered receipt
+                        // already covers it. This is the "peer active but hasn't read =
+                        // two grey ticks" behaviour.
+                        peerOnline || (deliveredUpToId != null && msg.id <= deliveredUpToId!!) ->
+                            DeliveryState.DELIVERED
+                        // Otherwise it only reached the server: a single ✓.
                         else -> DeliveryState.SENT
                     },
                 )
@@ -789,10 +880,25 @@ fun ChatDetailScreen(
             onStartRecording = { startRecording() },
             onStopRecording = { stopRecording() },
             onValueChange = { text ->
+                val wasBlank = input.isBlank()
                 input = text
                 if (ApiConfig.ENABLED) {
-                    if (text.isBlank()) SyntraClient.typingStop(conversation.id)
-                    else SyntraClient.typingStart(conversation.id)
+                    when {
+                        text.isBlank() -> {
+                            typingActive = false
+                            SyntraClient.typingStop(conversation.id)
+                        }
+                        else -> {
+                            // Send typing.start only on the FIRST keystroke of a burst
+                            // (not once per letter — that spammed the socket). A debounce
+                            // job then fires typing.stop ~2.5s after you stop typing.
+                            if (wasBlank || !typingActive) {
+                                typingActive = true
+                                SyntraClient.typingStart(conversation.id)
+                            }
+                            typingPokes++
+                        }
+                    }
                 }
             },
             onSend = { send() },
@@ -981,16 +1087,8 @@ fun ChatDetailScreen(
         }
     }
 
-    // Full-screen call overlay (voice or video), on top of everything else.
-    activeCallVideo?.let { video ->
-        CallScreen(
-            peerName = conversation.name,
-            conversationId = conversation.id,
-            video = video,
-            peerId = conversation.counterpartId.orEmpty(),
-            onClose = { activeCallVideo = null },
-        )
-    }
+    // The call itself is rendered by CallHost at the app root, not here — so it
+    // keeps running (as a floating window) even after you leave this chat.
 }
 
 /** Long-press a bubble. "For everyone" only makes sense for messages I sent. */
@@ -1502,15 +1600,102 @@ private fun String.isMediaUrl(): Boolean =
 private fun String.isAudioUrl(): Boolean =
     endsWith(".m4a", true) || endsWith(".mp3", true) || endsWith(".aac", true)
 
+/**
+ * Only ONE voice note plays at a time across the whole chat. When a bubble starts,
+ * it claims the bus; every other bubble watches the bus and pauses itself. This is
+ * what stops two clips overlapping into noise.
+ */
+private object VoiceBus {
+    var active by mutableStateOf<Any?>(null)
+}
+
 /** Voice note bubble with a play/pause button. */
 @Composable
 private fun AudioBubble(url: String, tint: Color) {
     val context = LocalContext.current
+    // Unique identity for this bubble instance, used to arbitrate the single-play bus.
+    val token = remember { Any() }
     var playing by remember(url) { mutableStateOf(false) }
+    // Buffering the (remote) clip for the first time. Drives the spinner so the
+    // button never looks frozen while the audio loads.
+    var loading by remember(url) { mutableStateOf(false) }
+    var prepared by remember(url) { mutableStateOf(false) }
+    // Playback progress 0..1 and total length, so the waveform can be washed with
+    // an "aura" up to where playback currently is (and show elapsed / total time).
+    var progress by remember(url) { mutableFloatStateOf(0f) }
+    var durationMs by remember(url) { mutableIntStateOf(0) }
     val player = remember(url) { android.media.MediaPlayer() }
 
+    // Another voice note took over the bus — pause this one so they never overlap.
+    LaunchedEffect(VoiceBus.active) {
+        if (VoiceBus.active !== token && playing) {
+            runCatching { player.pause() }
+            playing = false
+        }
+    }
+
+    // While playing, sample the position ~15×/sec into a smooth progress signal.
+    LaunchedEffect(playing, durationMs) {
+        if (!playing || durationMs <= 0) return@LaunchedEffect
+        while (true) {
+            progress = (runCatching { player.currentPosition }.getOrDefault(0)
+                .toFloat() / durationMs).coerceIn(0f, 1f)
+            kotlinx.coroutines.delay(60)
+        }
+    }
+
     DisposableEffect(url) {
-        onDispose { runCatching { player.release() } }
+        onDispose {
+            if (VoiceBus.active === token) VoiceBus.active = null
+            runCatching { player.release() }
+        }
+    }
+
+    fun toggle() {
+        runCatching {
+            when {
+                loading -> Unit // still buffering — ignore extra taps
+                playing -> { player.pause(); playing = false }
+                prepared -> { VoiceBus.active = token; player.start(); playing = true }
+                else -> {
+                    // First play: prepare OFF the main thread (prepareAsync) so the UI
+                    // never blocks; show a spinner until the audio is actually ready.
+                    VoiceBus.active = token
+                    loading = true
+                    player.setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build(),
+                    )
+                    player.setDataSource(context, android.net.Uri.parse(url))
+                    player.setOnPreparedListener { mp ->
+                        loading = false
+                        prepared = true
+                        durationMs = runCatching { mp.duration }.getOrDefault(0)
+                        mp.start()
+                        playing = true
+                    }
+                    player.setOnCompletionListener { mp ->
+                        playing = false
+                        progress = 0f
+                        runCatching { mp.seekTo(0) }
+                    }
+                    player.setOnErrorListener { mp, _, _ ->
+                        loading = false; playing = false; prepared = false
+                        // Reset so a later tap can start a clean prepare instead of
+                        // hitting IllegalStateException on the dead player.
+                        runCatching { mp.reset() }
+                        Toast.makeText(context, "Tidak bisa memutar suara.", Toast.LENGTH_SHORT).show()
+                        true
+                    }
+                    player.prepareAsync()
+                }
+            }
+        }.onFailure {
+            loading = false
+            Toast.makeText(context, "Tidak bisa memutar suara.", Toast.LENGTH_SHORT).show()
+        }
     }
 
     Row(
@@ -1524,56 +1709,88 @@ private fun AudioBubble(url: String, tint: Color) {
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
-                ) {
-                    runCatching {
-                        if (playing) {
-                            player.pause()
-                            playing = false
-                        } else {
-                            if (!player.isPlaying && player.currentPosition == 0) {
-                                player.setDataSource(context, android.net.Uri.parse(url))
-                                player.prepare()
-                                player.setOnCompletionListener { playing = false }
-                            }
-                            player.start()
-                            playing = true
-                        }
-                    }.onFailure {
-                        Toast.makeText(context, "Tidak bisa memutar suara.", Toast.LENGTH_SHORT).show()
-                    }
-                },
+                ) { toggle() },
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (playing) "Jeda" else "Putar",
-                tint = tint,
-                modifier = Modifier.size(20.dp),
-            )
+            if (loading) {
+                CircularProgressIndicator(
+                    color = tint,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp),
+                )
+            } else {
+                Icon(
+                    imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (playing) "Jeda" else "Putar",
+                    tint = tint,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
         Spacer(Modifier.width(10.dp))
-        // Static waveform: a real one needs amplitude data the server does not keep.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            listOf(8, 16, 11, 20, 14, 22, 10, 17, 12, 19, 9, 15).forEach { h ->
-                Box(
-                    modifier = Modifier
-                        .size(width = 3.dp, height = h.dp)
-                        .background(tint.copy(alpha = 0.55f), RoundedCornerShape(2.dp)),
+        Column {
+            // Waveform washed with an accent "aura" that flows with playback. Two
+            // things make it SMOOTH (not the old jerky per-bar jump): (1) the raw
+            // progress is interpolated by a short linear tween, and (2) the aura fills
+            // each bar with a CONTINUOUS alpha, so the leading bar fades in gradually
+            // instead of snapping on. Heights are a fixed pattern (no stored amplitude).
+            val heights = remember { listOf(7, 13, 9, 17, 11, 20, 13, 22, 12, 18, 10, 16, 9, 14, 8, 15, 11, 19) }
+            val auraBrush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent))
+            val animP by animateFloatAsState(
+                targetValue = progress,
+                animationSpec = tween(durationMillis = 90, easing = androidx.compose.animation.core.LinearEasing),
+                label = "voice-progress",
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.5.dp),
+            ) {
+                heights.forEachIndexed { i, h ->
+                    // 0..1 fill for this bar: fully lit behind the line, partial on the
+                    // leading bar, dark ahead — a soft moving edge instead of a step.
+                    val fill = (animP * heights.size - i).coerceIn(0f, 1f)
+                    Box(
+                        modifier = Modifier
+                            .size(width = 3.dp, height = h.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                    ) {
+                        Box(Modifier.matchParentSize().background(tint.copy(alpha = 0.4f)))
+                        if (fill > 0f) {
+                            Box(
+                                Modifier
+                                    .matchParentSize()
+                                    .graphicsLayer { alpha = fill }
+                                    .background(auraBrush),
+                            )
+                        }
+                    }
+                }
+            }
+            // Elapsed / total time under the wave.
+            if (durationMs > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${formatMillis((progress * durationMs).toInt())} / ${formatMillis(durationMs)}",
+                    color = tint.copy(alpha = 0.7f),
+                    fontSize = 10.sp,
                 )
             }
         }
     }
 }
 
+/** mm:ss from milliseconds, for the voice-note timer. */
+private fun formatMillis(ms: Int): String {
+    val totalSec = ms / 1000
+    return "%d:%02d".format(totalSec / 60, totalSec % 60)
+}
+
 /**
  * Where a sent message got to:
- *  - SENDING   : still local (clock)
- *  - SENT      : on the server, peer offline (1 tick)
- *  - DELIVERED : peer online, reached their device (2 grey ticks)
- *  - READ      : peer read it (2 blue ticks)
+ *  - SENDING   : still local, no server ack yet (clock)
+ *  - SENT      : stored on the server, not yet on the peer's device (1 tick)
+ *  - DELIVERED : the peer's device confirmed receipt via message.delivered (2 grey ticks)
+ *  - READ      : the peer opened the chat and read it (2 blue ticks)
  */
 private enum class DeliveryState { SENDING, SENT, DELIVERED, READ }
 

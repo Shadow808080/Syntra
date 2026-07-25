@@ -199,7 +199,12 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
         VoiceEngine.disconnect()
         if (ApiConfig.ENABLED) {
             SyntraClient.roomLeaveTopic(room.id)
-            scope.launch { runCatching { SyntraClient.leaveRoom(room.id) } }
+            // fireAndForget, NOT scope.launch: onLeave() below tears this screen down
+            // and cancels its scope, which would kill the leave request mid-flight.
+            // Then the backend never learns the host left, so the room only ends when
+            // LiveKit's disconnect webhook fires 6–10s later — that's the "friend still
+            // in the room" lag. A detached scope guarantees the leave actually sends.
+            SyntraClient.fireAndForget { SyntraClient.leaveRoom(room.id) }
         }
         onLeave()
     }

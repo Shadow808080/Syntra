@@ -34,6 +34,12 @@ interface SocketListener {
     fun onPresence(presence: NetPresence) {}
     fun onTyping(conversationId: String, userId: String, typing: Boolean) {}
     fun onReadReceipt(conversationId: String, userId: String, messageId: String) {}
+    /**
+     * The peer's device received the message (✓✓ grey), independent of whether
+     * they read it. Fired even when the peer is only on the chat list, and works
+     * regardless of presence-privacy — unlike guessing from online status.
+     */
+    fun onDeliveredReceipt(conversationId: String, userId: String, messageId: String) {}
     /** A message was deleted for everyone — show it as a "deleted" tombstone. */
     fun onMessageDeleted(conversationId: String, messageId: String) {}
     /** A reaction was added/changed/removed. Empty [emoji] means removed. */
@@ -44,6 +50,12 @@ interface SocketListener {
     fun onReelLike(reelId: String, userId: String, liked: Boolean) {}
     /** A new comment landed on a reel — bump the count live. */
     fun onReelComment(reelId: String, userId: String, body: String) {}
+    /** A new (public) reel was posted anywhere — refresh the Shorts feed live. */
+    fun onReelNew(reelId: String, authorId: String) {}
+    /** Someone you follow posted a story — refresh the story rail live. */
+    fun onStoryNew(storyId: String, authorId: String) {}
+    /** A reel was deleted — drop it from the feed live. */
+    fun onReelDeleted(reelId: String) {}
     fun onAck(ref: String?, data: Any?) {}
     fun onReconnect() {}
     /** Ephemeral room chat message. */
@@ -56,6 +68,8 @@ interface SocketListener {
     fun onRoomRoleChanged(roomId: String, userId: String, role: String, needsRejoin: Boolean) {}
     /** Host left: tear the room down. */
     fun onRoomEnded(roomId: String) {}
+    /** A new public room went live anywhere — refresh the Rooms list live. */
+    fun onRoomCreated(roomId: String) {}
 
     /** A group's title/avatar/members changed — re-read that conversation. */
     fun onConversationUpdated(conversationId: String) {}
@@ -168,6 +182,25 @@ object SyntraClient {
             payload = JSONObject().put("refresh_token", token),
             failureMessage = "Sesi berakhir, silakan masuk lagi",
         )
+    }
+
+    /**
+     * Is the backend reachable right now? Hits the unauthenticated /readyz probe.
+     * Used by the launch gate to tell "server down / maintenance" apart from "not
+     * signed in", so an outage shows a maintenance notice instead of the login
+     * screen. Returns true when the backend is intentionally disabled (dev builds).
+     */
+    suspend fun serverReachable(): Boolean = withContext(Dispatchers.IO) {
+        if (!ApiConfig.ENABLED) return@withContext true
+        // A tight overall budget so an outage flips to the maintenance screen fast,
+        // instead of the user staring at the splash for the full connect timeout.
+        val probe = http.newBuilder()
+            .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+        runCatching {
+            val req = Request.Builder().url(ApiConfig.BASE_URL + "/readyz").get().build()
+            probe.newCall(req).execute().use { it.isSuccessful }
+        }.getOrDefault(false)
     }
 
     /** Shared shape for the three auth endpoints; stores the resulting session. */
@@ -520,8 +553,18 @@ object SyntraClient {
     suspend fun getUserReels(username: String): List<NetReel> =
         (getData("/api/v1/users/$username/reels") as JSONArray).mapObjects { it.toReel() }
 
-    suspend fun postReel(mediaId: String, caption: String): String {
-        val data = postData("/api/v1/reels", JSONObject().put("media_id", mediaId).put("caption", caption)) as JSONObject
+    suspend fun postReel(
+        mediaId: String,
+        caption: String,
+        visibility: String = "public",
+        commentsEnabled: Boolean = true,
+    ): String {
+        val payload = JSONObject()
+            .put("media_id", mediaId)
+            .put("caption", caption)
+            .put("visibility", visibility)
+            .put("comments_enabled", commentsEnabled)
+        val data = postData("/api/v1/reels", payload) as JSONObject
         return data.optString("id", "")
     }
 
@@ -878,6 +921,10 @@ object SyntraClient {
     fun messageRead(conversationId: String, messageId: String) =
         sendFrame("message.read", JSONObject().put("conversation_id", conversationId).put("message_id", messageId))
 
+    /** Tell the sender their message reached this device (✓✓ grey, not yet read). */
+    fun messageDelivered(conversationId: String, messageId: String) =
+        sendFrame("message.delivered", JSONObject().put("conversation_id", conversationId).put("message_id", messageId))
+
     private val wsListener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (subscribed.isNotEmpty()) {
@@ -896,18 +943,37 @@ object SyntraClient {
             when (type) {
                 "ready" -> (data as? JSONObject)?.optString("user_id")?.let { id ->
                     myUserId = id
+                    // Subscribe to our own user channel so story.new and
+                    // notification.new actually arrive live (the backend fans those
+                    // out to user:<id>). Without this they never reached the app and
+                    // stories only showed up after a manual refresh.
+                    if (id.isNotBlank()) subscribe(listOf("user:$id"))
                     dispatch { it.onReady(id) }
                 }
-                "message.new" -> (data as? JSONObject)?.toMessage()?.let { m -> dispatch { it.onMessageNew(m) } }
+                "message.new" -> (data as? JSONObject)?.toMessage()?.let { m ->
+                    // Confirm delivery back to the sender the moment the message lands
+                    // on this device — even if the user is only on the chat list and
+                    // never opens the chat. This is what turns the sender's ✓ into ✓✓,
+                    // and it does not depend on presence being visible.
+                    if (m.senderId.isNotBlank() && m.senderId != myUserId) {
+                        messageDelivered(m.conversationId, m.id)
+                    }
+                    dispatch { it.onMessageNew(m) }
+                }
                 "presence.update" -> (data as? JSONObject)?.let { d ->
                     val p = NetPresence(d.getString("user_id"), d.optBoolean("online"), d.strOrNull("last_seen"))
                     dispatch { it.onPresence(p) }
                 }
                 "typing" -> (data as? JSONObject)?.let { d ->
-                    dispatch { it.onTyping(d.getString("conversation_id"), d.optString("user_id"), true) }
+                    // The event carries whether the peer STARTED or STOPPED typing;
+                    // hardcoding true left "typing…" stuck on forever.
+                    dispatch { it.onTyping(d.getString("conversation_id"), d.optString("user_id"), d.optBoolean("typing", true)) }
                 }
                 "message.read" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onReadReceipt(d.getString("conversation_id"), d.optString("user_id"), d.optString("message_id")) }
+                }
+                "message.delivered" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onDeliveredReceipt(d.getString("conversation_id"), d.optString("user_id"), d.optString("message_id")) }
                 }
                 "message.deleted" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onMessageDeleted(d.optString("conversation_id"), d.optString("message_id")) }
@@ -937,6 +1003,15 @@ object SyntraClient {
                 "reel.comment" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onReelComment(d.optString("reel_id"), d.optString("user_id"), d.optString("body")) }
                 }
+                "reel.new" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onReelNew(d.optString("reel_id"), d.optString("author_id")) }
+                }
+                "reel.deleted" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onReelDeleted(d.optString("reel_id")) }
+                }
+                "story.new" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onStoryNew(d.optString("story_id"), d.optString("author_id")) }
+                }
                 "room.participants" -> (data as? JSONObject)?.let { d ->
                     val roomId = d.optString("room_id")
                     val list = d.optJSONArray("participants")
@@ -962,6 +1037,9 @@ object SyntraClient {
                 }
                 "room.ended" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onRoomEnded(d.optString("room_id")) }
+                }
+                "room.created" -> (data as? JSONObject)?.let { d ->
+                    dispatch { it.onRoomCreated(d.optString("room_id")) }
                 }
                 "conversation.updated" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onConversationUpdated(d.optString("conversation_id", d.optString("id"))) }
@@ -991,7 +1069,24 @@ object SyntraClient {
                     )
                     dispatch { it.onRoomMessage(m) }
                 }
-                "ack" -> dispatch { it.onAck(ref, data) }
+                "ack" -> {
+                    // The presence.query reply comes back as an ack whose data is an
+                    // array of {user_id, online, last_seen}. Fan it out as presence
+                    // updates so the peer's LIVE status is seeded the moment you open
+                    // a chat / the list — without this, presenceQuery did nothing and
+                    // you only ever learned someone was online if they (re)connected
+                    // while you happened to be listening.
+                    if (ref == "presence") {
+                        (data as? JSONArray)?.let { arr ->
+                            for (i in 0 until arr.length()) {
+                                val d = arr.optJSONObject(i) ?: continue
+                                val p = NetPresence(d.optString("user_id"), d.optBoolean("online"), d.strOrNull("last_seen"))
+                                dispatch { it.onPresence(p) }
+                            }
+                        }
+                    }
+                    dispatch { it.onAck(ref, data) }
+                }
                 "error" -> dispatch { it.onAck(ref, data) }
             }
         }
@@ -1037,6 +1132,7 @@ private fun JSONObject.toConversation() = NetConversation(
     lastAt = strOrNull("last_message_at"),
     createdAt = strOrNull("created_at"),
     counterpartLastReadId = strOrNull("counterpart_last_read_id"),
+    counterpartLastDeliveredId = strOrNull("counterpart_last_delivered_id"),
 )
 
 private fun JSONObject.toMessage() = NetMessage(

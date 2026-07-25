@@ -61,7 +61,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -74,6 +73,12 @@ import androidx.core.content.ContextCompat
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.VideoFrameDecoder
+import com.example.syntra.ui.theme.NexusAccent
+import com.example.syntra.ui.theme.NexusAccentSoft
+import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusStroke
+import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.Dispatchers
@@ -139,9 +144,6 @@ private fun formatDuration(ms: Long): String {
 // Styling
 // ---------------------------------------------------------------------------
 
-private val SheetGradient = listOf(Color(0xFF1B1430), Color(0xFF141021), Color(0xFF0E0E14))
-private val TitleGradient = listOf(Color(0xFFB79CFF), Color(0xFF6E8BFF))
-private val AccentGradient = listOf(Color(0xFF7C4DFF), Color(0xFF3B68F5))
 
 // ---------------------------------------------------------------------------
 // Screen
@@ -192,7 +194,7 @@ fun AddStatusScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(SheetGradient)),
+            .background(NexusBackground),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Grabber handle
@@ -234,7 +236,7 @@ fun AddStatusScreen(
                 Column {
                     Text(
                         text = "Tambah status",
-                        style = TextStyle(brush = Brush.horizontalGradient(TitleGradient)),
+                        color = NexusTextPrimary,
                         fontSize = 23.sp,
                         fontWeight = FontWeight.Bold,
                     )
@@ -315,8 +317,8 @@ fun AddStatusScreen(
                 .align(Alignment.BottomEnd)
                 .windowInsetsPadding(WindowInsets.navigationBars)
                 .padding(end = 20.dp, bottom = 20.dp)
-                .size(58.dp)
-                .background(Brush.verticalGradient(AccentGradient), RoundedCornerShape(20.dp))
+                .size(56.dp)
+                .background(NexusAccent, CircleShape)
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
@@ -338,23 +340,27 @@ fun AddStatusScreen(
 // Pieces
 // ---------------------------------------------------------------------------
 
-private data class StatusAction(val label: String, val icon: ImageVector, val gradient: List<Color>)
+private data class StatusAction(val label: String, val icon: ImageVector)
 
 private val actionButtons = listOf(
-    StatusAction("Teks", Icons.Filled.Edit, listOf(Color(0xFF7C4DFF), Color(0xFF448AFF))),
-    StatusAction("Musik", Icons.Filled.MusicNote, listOf(Color(0xFFFF6A88), Color(0xFFFF9A8B))),
-    StatusAction("Tata letak", Icons.Filled.Dashboard, listOf(Color(0xFF11998E), Color(0xFF38EF7D))),
-    StatusAction("Suara", Icons.Filled.Mic, listOf(Color(0xFFFF512F), Color(0xFFDD2476))),
-    StatusAction("Galeri", Icons.Filled.PhotoLibrary, listOf(Color(0xFF2196F3), Color(0xFF3B68F5))),
+    StatusAction("Teks", Icons.Filled.Edit),
+    StatusAction("Musik", Icons.Filled.MusicNote),
+    StatusAction("Tata letak", Icons.Filled.Dashboard),
+    StatusAction("Suara", Icons.Filled.Mic),
+    StatusAction("Galeri", Icons.Filled.PhotoLibrary),
 )
 
 @Composable
 private fun ActionButton(action: StatusAction, onClick: () -> Unit) {
+    // Neutral, uniform chips — a calm surface with a hairline, one accent icon. No
+    // rainbow of gradients (that read cheap on the picker).
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
-                .size(60.dp)
-                .background(Brush.linearGradient(action.gradient), CircleShape)
+                .size(58.dp)
+                .clip(CircleShape)
+                .background(NexusSurfaceElevated)
+                .border(1.dp, NexusStroke, CircleShape)
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
@@ -362,7 +368,7 @@ private fun ActionButton(action: StatusAction, onClick: () -> Unit) {
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(action.icon, action.label, tint = Color.White, modifier = Modifier.size(24.dp))
+            Icon(action.icon, action.label, tint = NexusAccentSoft, modifier = Modifier.size(23.dp))
         }
         Spacer(Modifier.height(8.dp))
         Text(action.label, color = NexusTextSecondary, fontSize = 13.sp)
@@ -375,8 +381,8 @@ private fun CameraTile(onClick: () -> Unit) {
         modifier = Modifier
             .aspectRatio(0.72f)
             .clip(RoundedCornerShape(16.dp))
-            .background(Brush.verticalGradient(listOf(Color(0xFF241C3A), Color(0xFF15131E))))
-            .border(1.dp, Color(0xFF7C4DFF).copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .background(NexusSurface)
+            .border(1.dp, NexusStroke, RoundedCornerShape(16.dp))
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
@@ -388,13 +394,15 @@ private fun CameraTile(onClick: () -> Unit) {
             Box(
                 modifier = Modifier
                     .size(46.dp)
-                    .background(Brush.linearGradient(AccentGradient), CircleShape),
+                    .clip(CircleShape)
+                    .background(NexusSurfaceElevated)
+                    .border(1.dp, NexusStroke, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     imageVector = Icons.Filled.PhotoCamera,
                     contentDescription = "Camera",
-                    tint = Color.White,
+                    tint = NexusAccentSoft,
                     modifier = Modifier.size(24.dp),
                 )
             }
@@ -464,7 +472,7 @@ private fun PermissionPrompt(onGrant: () -> Unit) {
         Spacer(Modifier.height(16.dp))
         Box(
             modifier = Modifier
-                .background(Brush.linearGradient(AccentGradient), RoundedCornerShape(24.dp))
+                .background(NexusAccent, RoundedCornerShape(24.dp))
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },

@@ -69,28 +69,50 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val MAX_STORY_VIDEO_MS = 15_000L
+private const val MAX_STORY_VIDEO_MS = 30_000L
 private const val FILM_FRAMES = 8
 
 /**
- * CapCut-style story video trimmer. The video plays in the top area; a dedicated
- * dark panel at the bottom holds a thumbnail filmstrip with a draggable 15-second
- * window. Controls are icons, and nothing overlaps the video frame.
+ * CapCut-style video trimmer. The video plays in the top area; a dedicated dark
+ * panel at the bottom holds a thumbnail filmstrip with a window whose BOTH edges
+ * drag, so the clip length is free up to [maxMs] (30s stories, 60s Shorts).
+ * Controls are icons, and nothing overlaps the video frame.
  */
+/** Shortest clip the trimmer will let you keep. */
+private const val MIN_TRIM_MS = 1_000L
+
 @Composable
-fun VideoTrimScreen(uri: Uri, onCancel: () -> Unit, onDone: (Uri) -> Unit) {
+fun VideoTrimScreen(
+    uri: Uri,
+    onCancel: () -> Unit,
+    onDone: (Uri) -> Unit,
+    // Longest clip the caller allows: 30s for stories, 60s for Shorts.
+    maxMs: Long = MAX_STORY_VIDEO_MS,
+) {
     BackHandler(onBack = onCancel)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
 
     var durationMs by remember { mutableStateOf(0L) }
+    // The selected window as [startMs, endMs]. BOTH edges drag, so the length is
+    // free anywhere between MIN_TRIM_MS and maxMs — that's how you get "50 detik".
     var startMs by remember { mutableFloatStateOf(0f) }
+    var endMs by remember { mutableFloatStateOf(0f) }
     var processing by remember { mutableStateOf(false) }
+    // True once the player is prepared and playing — drives the preview spinner.
+    var prepared by remember(uri) { mutableStateOf(false) }
     val frames = remember { mutableStateListOf<Bitmap>() }
     val player = remember { MediaPlayer() }
 
-    val windowMs = if (durationMs in 1 until MAX_STORY_VIDEO_MS) durationMs else MAX_STORY_VIDEO_MS
+    // Once we know the duration, default the window to the whole clip, capped at maxMs.
+    LaunchedEffect(durationMs) {
+        if (durationMs > 0) {
+            startMs = 0f
+            endMs = minOf(durationMs.toFloat(), maxMs.toFloat())
+        }
+    }
+    val selectedMs = (endMs - startMs).toLong().coerceAtLeast(0L)
 
     // Read duration + build a filmstrip of evenly-spaced thumbnails.
     LaunchedEffect(uri) {
@@ -113,13 +135,29 @@ fun VideoTrimScreen(uri: Uri, onCancel: () -> Unit, onDone: (Uri) -> Unit) {
         }
     }
 
-    // Loop playback within [start, start+window].
-    LaunchedEffect(startMs, windowMs, durationMs) {
+    // Prepare the player ONCE, independent of the surface. Setting the data source
+    // inside the surface callback meant a relayout (the filmstrip loading resizes
+    // the view) recreated the TextureView and called setDataSource again, throwing
+    // — so the surface never attached and you got sound with a black frame.
+    LaunchedEffect(uri) {
+        runCatching {
+            player.setDataSource(context, uri)
+            player.isLooping = false
+            player.setOnPreparedListener { mp ->
+                prepared = true
+                runCatching { mp.start() }
+            }
+            player.prepareAsync()
+        }
+    }
+
+    // Loop playback within [start, end] so the preview matches the selection.
+    LaunchedEffect(startMs, endMs, durationMs) {
         if (durationMs <= 0) return@LaunchedEffect
         while (true) {
             runCatching {
                 val pos = player.currentPosition
-                if (pos < startMs - 150 || pos > startMs + windowMs) player.seekTo(startMs.toInt())
+                if (pos < startMs - 150 || pos > endMs) player.seekTo(startMs.toInt())
             }
             delay(250)
         }
@@ -138,7 +176,7 @@ fun VideoTrimScreen(uri: Uri, onCancel: () -> Unit, onDone: (Uri) -> Unit) {
             IconCircle(Icons.AutoMirrored.Filled.ArrowBack, "Kembali", onClick = onCancel)
             Spacer(Modifier.weight(1f))
             Text(
-                if (durationMs > MAX_STORY_VIDEO_MS) "Maks 15 detik" else "Pratinjau",
+                if (durationMs > maxMs) "Maks ${maxMs / 1000} detik" else "Pratinjau",
                 color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
             )
         }
@@ -149,24 +187,22 @@ fun VideoTrimScreen(uri: Uri, onCancel: () -> Unit, onDone: (Uri) -> Unit) {
                 factory = { ctx ->
                     TextureView(ctx).apply {
                         surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                            // ONLY attach the surface here — never touch the data source.
+                            // Safe to (re)attach whenever a texture appears, including
+                            // after the player has already prepared.
                             override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                                runCatching {
-                                    player.setSurface(Surface(st))
-                                    player.setDataSource(ctx, uri)
-                                    player.isLooping = false
-                                    player.setOnPreparedListener { it.start() }
-                                    player.prepareAsync()
-                                }
+                                runCatching { player.setSurface(Surface(st)) }
                             }
                             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) = Unit
-                            override fun onSurfaceTextureDestroyed(st: SurfaceTexture) = true
+                            // Keep the texture so the surface stays valid across relayouts.
+                            override fun onSurfaceTextureDestroyed(st: SurfaceTexture) = false
                             override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
                         }
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
-            if (durationMs <= 0) {
+            if (!prepared) {
                 CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp)
             }
         }
@@ -201,21 +237,21 @@ fun VideoTrimScreen(uri: Uri, onCancel: () -> Unit, onDone: (Uri) -> Unit) {
                 }
 
                 if (durationMs > 0) {
-                    val frac = (windowMs.toFloat() / durationMs).coerceAtMost(1f)
-                    val winPx = trackW * frac
-                    val leftPx = (trackW * (startMs / durationMs)).coerceIn(0f, trackW - winPx)
-                    // Dim the parts outside the window.
+                    val leftPx = (trackW * (startMs / durationMs)).coerceIn(0f, trackW.toFloat())
+                    val rightPx = (trackW * (endMs / durationMs)).coerceIn(0f, trackW.toFloat())
+                    val winPx = (rightPx - leftPx).coerceAtLeast(0f)
+                    // Dim the parts outside the window (left slab + right slab).
                     Box(
-                        Modifier.offset { androidx.compose.ui.unit.IntOffset(0, 0) }
-                            .width(with(density) { leftPx.toDp() }).fillMaxHeight()
+                        Modifier.width(with(density) { leftPx.toDp() }).fillMaxHeight()
                             .background(Color.Black.copy(alpha = 0.55f)),
                     )
                     Box(
-                        Modifier.offset { androidx.compose.ui.unit.IntOffset((leftPx + winPx).toInt(), 0) }
-                            .width(with(density) { (trackW - leftPx - winPx).coerceAtLeast(0f).toDp() }).fillMaxHeight()
+                        Modifier.offset { androidx.compose.ui.unit.IntOffset(rightPx.toInt(), 0) }
+                            .width(with(density) { (trackW - rightPx).coerceAtLeast(0f).toDp() }).fillMaxHeight()
                             .background(Color.Black.copy(alpha = 0.55f)),
                     )
-                    // The window frame — draggable.
+                    // The window frame — drag the MIDDLE to slide the whole selection,
+                    // keeping its length; drag either HANDLE to change the length.
                     Box(
                         modifier = Modifier
                             .offset { androidx.compose.ui.unit.IntOffset(leftPx.toInt(), 0) }
@@ -223,18 +259,57 @@ fun VideoTrimScreen(uri: Uri, onCancel: () -> Unit, onDone: (Uri) -> Unit) {
                             .fillMaxHeight()
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0x333B68F5))
-                            .pointerInput(durationMs, windowMs) {
+                            .pointerInput(durationMs, trackW) {
                                 detectHorizontalDragGestures { change, dx ->
                                     change.consume()
-                                    if (durationMs <= windowMs) return@detectHorizontalDragGestures
+                                    val len = endMs - startMs
                                     val dMs = (dx / trackW) * durationMs
-                                    startMs = (startMs + dMs).coerceIn(0f, (durationMs - windowMs).toFloat())
+                                    val ns = (startMs + dMs).coerceIn(0f, durationMs - len)
+                                    startMs = ns
+                                    endMs = ns + len
                                 }
                             },
                     ) {
-                        // Left/right handle bars.
-                        Box(Modifier.align(Alignment.CenterStart).width(5.dp).fillMaxHeight().background(Color(0xFF3B68F5)))
-                        Box(Modifier.align(Alignment.CenterEnd).width(5.dp).fillMaxHeight().background(Color(0xFF3B68F5)))
+                        // LEFT handle — moves the start edge (shrinks/grows from left).
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .width(20.dp)
+                                .fillMaxHeight()
+                                .pointerInput(durationMs, trackW) {
+                                    detectHorizontalDragGestures { change, dx ->
+                                        change.consume()
+                                        val dMs = (dx / trackW) * durationMs
+                                        startMs = (startMs + dMs).coerceIn(
+                                            maxOf(0f, endMs - maxMs.toFloat()),
+                                            endMs - MIN_TRIM_MS,
+                                        )
+                                    }
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(Modifier.width(5.dp).fillMaxHeight().background(Color(0xFF3B68F5)))
+                        }
+                        // RIGHT handle — moves the end edge.
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .width(20.dp)
+                                .fillMaxHeight()
+                                .pointerInput(durationMs, trackW) {
+                                    detectHorizontalDragGestures { change, dx ->
+                                        change.consume()
+                                        val dMs = (dx / trackW) * durationMs
+                                        endMs = (endMs + dMs).coerceIn(
+                                            startMs + MIN_TRIM_MS,
+                                            minOf(durationMs.toFloat(), startMs + maxMs.toFloat()),
+                                        )
+                                    }
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(Modifier.width(5.dp).fillMaxHeight().background(Color(0xFF3B68F5)))
+                        }
                     }
                 }
             }
@@ -242,7 +317,7 @@ fun VideoTrimScreen(uri: Uri, onCancel: () -> Unit, onDone: (Uri) -> Unit) {
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Bagian terpilih: ${(windowMs / 1000)} dtk",
+                    "Bagian terpilih: ${selectedMs / 1000} dtk",
                     color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp,
                 )
                 Spacer(Modifier.weight(1f))
@@ -252,14 +327,14 @@ fun VideoTrimScreen(uri: Uri, onCancel: () -> Unit, onDone: (Uri) -> Unit) {
                         .size(50.dp)
                         .background(if (processing) Color.White.copy(alpha = 0.4f) else Color.White, RoundedCornerShape(25.dp))
                         .clickable(
-                            enabled = !processing && durationMs > 0,
+                            enabled = !processing && selectedMs >= MIN_TRIM_MS,
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
                         ) {
                             processing = true
                             scope.launch {
                                 val out = withContext(Dispatchers.IO) {
-                                    runCatching { trimVideo(context, uri, startMs.toLong(), (startMs + windowMs).toLong()) }.getOrNull()
+                                    runCatching { trimVideo(context, uri, startMs.toLong(), endMs.toLong()) }.getOrNull()
                                 }
                                 processing = false
                                 if (out != null) onDone(out) else onCancel()
@@ -300,11 +375,15 @@ private fun IconCircle(icon: androidx.compose.ui.graphics.vector.ImageVector, cd
  * re-encode). Aligns start to the previous sync frame so the clip is playable.
  */
 private fun trimVideo(context: Context, src: Uri, startMs: Long, endMs: Long): Uri {
-    val outFile = java.io.File(context.cacheDir, "story_${System.currentTimeMillis()}.mp4")
+    val outFile = java.io.File(context.cacheDir, "trim_${System.currentTimeMillis()}.mp4")
     val extractor = MediaExtractor()
     extractor.setDataSource(context, src, null)
     val muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
     val indexMap = HashMap<Int, Int>()
+    // Big enough for one compressed sample. Grow it to the track's declared max so
+    // a high-bitrate frame never overflows the buffer (which would truncate the
+    // output — the "it didn't really cut" symptom).
+    var bufferSize = 1 shl 20
     try {
         for (i in 0 until extractor.trackCount) {
             val format = extractor.getTrackFormat(i)
@@ -312,22 +391,38 @@ private fun trimVideo(context: Context, src: Uri, startMs: Long, endMs: Long): U
             if (mime.startsWith("video/") || mime.startsWith("audio/")) {
                 extractor.selectTrack(i)
                 indexMap[i] = muxer.addTrack(format)
+                if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                    bufferSize = maxOf(bufferSize, format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE))
+                }
             }
         }
+
+        // Keep the video upright: carry the source rotation onto the output.
+        runCatching {
+            MediaMetadataRetriever().use { r ->
+                r.setDataSource(context, src)
+                r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    ?.toIntOrNull()?.let { muxer.setOrientationHint(it) }
+            }
+        }
+
         muxer.start()
         val startUs = startMs * 1000
         val endUs = endMs * 1000
-        val buffer = java.nio.ByteBuffer.allocate(1 shl 20)
+        val buffer = java.nio.ByteBuffer.allocate(bufferSize)
         val info = android.media.MediaCodec.BufferInfo()
+        // Align to the previous sync frame so decoding starts cleanly, then rebase
+        // timestamps to zero so the clip begins at 0:00.
         extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
         val firstUs = extractor.sampleTime.coerceAtLeast(0)
         while (true) {
-            val sampleTime = extractor.sampleTime
-            if (sampleTime < 0 || sampleTime > endUs) break
-            info.presentationTimeUs = (sampleTime - firstUs).coerceAtLeast(0)
-            info.flags = extractor.sampleFlags
             info.size = extractor.readSampleData(buffer, 0)
             if (info.size < 0) break
+            val sampleTime = extractor.sampleTime
+            if (sampleTime > endUs) break
+            info.presentationTimeUs = (sampleTime - firstUs).coerceAtLeast(0)
+            info.offset = 0
+            info.flags = extractor.sampleFlags
             val outTrack = indexMap[extractor.sampleTrackIndex]
             if (outTrack != null) muxer.writeSampleData(outTrack, buffer, info)
             if (!extractor.advance()) break

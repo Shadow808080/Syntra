@@ -2,6 +2,7 @@ package com.example.syntra
 
 import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
+import android.content.Context
 import android.net.Uri
 import android.view.Surface
 import android.view.TextureView
@@ -14,8 +15,11 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,6 +32,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
@@ -53,7 +58,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
@@ -66,6 +73,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -99,6 +107,7 @@ import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.NetReel
 import com.example.syntra.net.NetReelComment
 import com.example.syntra.net.SyntraClient
+import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
@@ -107,7 +116,10 @@ import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import com.example.syntra.ui.theme.SyntraTheme
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // ---------------------------------------------------------------------------
 // Shorts / Reels — a chronological, vertically-swiped video feed (docs/api.md).
@@ -122,6 +134,9 @@ fun ShortsScreen(
     // False when the Shorts tab is off-screen (swiped away / call on top); the
     // current reel must pause so its audio doesn't keep playing in the background.
     visible: Boolean = true,
+    // Signals the host to hide the bottom bar while the full-screen add-reels flow
+    // (trim + details) is up, so it doesn't sit on top of that screen.
+    onOverlayChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -129,12 +144,38 @@ fun ShortsScreen(
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var posting by remember { mutableStateOf(false) }
+    // Raw picked video (awaiting trim), then the trimmed clip (awaiting caption).
     var pendingVideo by remember { mutableStateOf<Uri?>(null) }
+    var trimmedVideo by remember { mutableStateOf<Uri?>(null) }
     var commentsFor by remember { mutableStateOf<NetReel?>(null) }
     // Reel the owner asked to delete, pending confirmation.
     var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
     // Author whose profile is open (tapped their avatar), null = feed.
     var openProfileUser by remember { mutableStateOf<String?>(null) }
+
+    // Upload progress card (top of the Shorts feed). Shown while a reel uploads.
+    var uploadCardVisible by remember { mutableStateOf(false) }
+    var uploadThumb by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var uploadStartMs by remember { mutableStateOf(0L) }
+    var uploadEtaMs by remember { mutableStateOf(6000L) }
+
+    // Following tab: show ONLY reels from people the user actually follows (the
+    // feed already carries is_following per reel). Own reels are excluded so it
+    // reads like TikTok's Following, not a mix with your own uploads.
+    var showFollowing by remember { mutableStateOf(false) }
+    val displayReels by remember {
+        derivedStateOf {
+            if (showFollowing) {
+                reels.filter { it.isFollowing && it.authorId != SyntraClient.myUserId }
+            } else {
+                reels.toList()
+            }
+        }
+    }
+    val pager = rememberPagerState(pageCount = { displayReels.size })
+    // Flipping the tab (or posting a new short) should land you at the top, not
+    // stranded mid-feed on a page that no longer exists after the list changed.
+    LaunchedEffect(showFollowing) { runCatching { pager.scrollToPage(0) } }
 
     suspend fun reload() {
         if (!ApiConfig.ENABLED) { loading = false; return }
@@ -153,13 +194,38 @@ fun ShortsScreen(
         loading = false
     }
 
-    LaunchedEffect(Unit) { reload() }
-
-    LaunchedEffect(visible) {
-        if (visible && !loading) reload()
+    // Quietly pull the freshest feed and MERGE in anything new (e.g. a short a
+    // followed user just posted), without a spinner and without disturbing the
+    // reel you're currently watching. New items are prepended; deletions drop out.
+    suspend fun syncFeed() {
+        if (!ApiConfig.ENABLED) return
+        val fresh = runCatching { SyntraClient.getReels() }.getOrNull() ?: return
+        val freshIds = fresh.map { it.id }.toSet()
+        val currentIds = reels.map { it.id }.toSet()
+        if (freshIds == currentIds) return // nothing changed
+        // Keep the currently playing reel anchored: rebuild the list from `fresh`
+        // (authoritative order, newest first) but only actually swap when membership
+        // differs, so counters updated live aren't clobbered.
+        val currentPageId = displayReels.getOrNull(pager.currentPage)?.id
+        reels.clear()
+        reels.addAll(fresh)
+        // Re-anchor to the reel we were on, if it still exists.
+        if (currentPageId != null) {
+            val idx = reels.indexOfFirst { it.id == currentPageId }
+            if (idx >= 0) runCatching { pager.scrollToPage(idx) }
+        }
     }
 
-    // Realtime: like & comment counters change live for everyone watching a reel.
+    LaunchedEffect(Unit) { reload() }
+
+    // Returning to the tab RESUMES the last video you were watching — a quiet merge
+    // that keeps your scroll position, instead of a full reload that would reset the
+    // pager to the top. New shorts still arrive live via the reels:all listener.
+    LaunchedEffect(visible) {
+        if (visible && !loading) syncFeed()
+    }
+
+    // Realtime: like & comment counters, plus new/deleted reels, update live.
     DisposableEffect(Unit) {
         val listener = object : com.example.syntra.net.SocketListener {
             override fun onReelLike(reelId: String, userId: String, liked: Boolean) {
@@ -177,13 +243,25 @@ fun ShortsScreen(
                 val r = reels[i]
                 reels[i] = r.copy(commentCount = r.commentCount + 1)
             }
+            override fun onReelNew(reelId: String, authorId: String) {
+                // Someone (e.g. a followed creator) posted — pull it into the feed
+                // live so it appears without a manual refresh. Skip my own (already
+                // shown via the post flow's reload).
+                if (authorId == SyntraClient.myUserId) return
+                if (reels.any { it.id == reelId }) return
+                scope.launch { syncFeed() }
+            }
+            override fun onReelDeleted(reelId: String) {
+                reels.removeAll { it.id == reelId }
+            }
         }
         SyntraClient.addListener(listener)
         onDispose { SyntraClient.removeListener(listener) }
     }
 
-    // Subscribe to the reel currently on screen so its like/comment events arrive.
-    // (reels:all for new/deleted is handled by the feed reload above.)
+    // Subscribe to the global reels feed (reel.new / reel.deleted) so new shorts
+    // arrive live, plus the reel on screen for its like/comment events.
+    LaunchedEffect(Unit) { SyntraClient.subscribe(listOf("reels:all")) }
     LaunchedEffect(reels.size) {
         if (reels.isNotEmpty()) {
             SyntraClient.subscribe(reels.map { "reel:${it.id}" })
@@ -202,6 +280,69 @@ fun ShortsScreen(
         scope.launch { runCatching { SyntraClient.likeReel(reel.id, now) } }
     }
 
+    // Hide the host's bottom bar for the whole add-reels flow (trim + details).
+    // Hide the bottom bar + lock tab-swipe while the add-reels flow OR a profile is
+    // open, so the profile is truly full-screen (not covered by the nav bar).
+    LaunchedEffect(pendingVideo != null, openProfileUser) {
+        onOverlayChange(pendingVideo != null || openProfileUser != null)
+    }
+
+    // The add-reels flow is its OWN full screen: trim → details. While it is up we
+    // do NOT compose the feed at all — the reel video surface leaves the
+    // composition entirely, so it can never bleed over or fight the preview.
+    val rawVideo = pendingVideo
+    if (rawVideo != null) {
+        val trimmed = trimmedVideo
+        if (trimmed == null) {
+            VideoTrimScreen(
+                uri = rawVideo,
+                onCancel = { pendingVideo = null },
+                onDone = { trimmedVideo = it },
+                maxMs = 60_000L,
+            )
+        } else {
+            // Step 2: title / description / tags / audience / agreement.
+            ReelDetailsScreen(
+                onBack = { trimmedVideo = null }, // back returns to the trimmer
+                onPost = { caption, visibility, commentsEnabled ->
+                    // Return to the feed immediately; the upload runs in the
+                    // background behind a small fixed card at the top of Shorts, so
+                    // the user can keep scrolling while it publishes.
+                    val src = trimmed
+                    pendingVideo = null
+                    trimmedVideo = null
+                    posting = true
+                    uploadCardVisible = true
+                    uploadThumb = null
+                    uploadStartMs = System.currentTimeMillis()
+                    uploadEtaMs = 6000L
+                    scope.launch {
+                        runCatching {
+                            val bytes = context.contentResolver.openInputStream(src)?.use { it.readBytes() }
+                                ?: error("Tidak bisa membaca video")
+                            // Shape the progress bar from a size-based ETA + grab a
+                            // thumbnail for the card (both best-effort).
+                            uploadEtaMs = estimateUploadEtaMs(bytes.size)
+                            uploadThumb = withContext(Dispatchers.IO) { reelThumbnail(context, src) }
+                            val mime = context.contentResolver.getType(src) ?: "video/mp4"
+                            val ext = mime.substringAfterLast('/', "mp4")
+                            val mediaId = SyntraClient.uploadMedia("video", ext, mime, bytes)
+                            SyntraClient.postReel(mediaId, caption, visibility, commentsEnabled)
+                        }.onSuccess {
+                            reload()
+                            showFollowing = false
+                            runCatching { pager.scrollToPage(0) }
+                        }.onFailure {
+                            Toast.makeText(context, "Gagal menerbitkan: ${it.message}", Toast.LENGTH_LONG).show()
+                        }
+                        posting = false
+                    }
+                },
+            )
+        }
+        return
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -214,12 +355,19 @@ fun ShortsScreen(
 
             reels.isEmpty() -> EmptyReels()
 
+            // Following tab can be empty even when the global feed isn't.
+            displayReels.isEmpty() -> FollowingEmpty()
+
             else -> {
-                val pager = rememberPagerState(pageCount = { reels.size })
                 // Count a view whenever a reel settles on screen.
-                LaunchedEffect(pager.currentPage, reels.size) {
-                    reels.getOrNull(pager.currentPage)?.let { r ->
+                LaunchedEffect(pager.currentPage, displayReels.size) {
+                    displayReels.getOrNull(pager.currentPage)?.let { r ->
                         SyntraClient.fireAndForget { SyntraClient.viewReel(r.id) }
+                    }
+                    // Warm the next reel so it's already on disk (and free to
+                    // replay) by the time it scrolls into view.
+                    displayReels.getOrNull(pager.currentPage + 1)?.mediaUrl?.let {
+                        VideoCache.prefetch(scope, context, it)
                     }
                 }
                 // Swipe down on the first reel to reload the feed.
@@ -242,7 +390,7 @@ fun ShortsScreen(
                         // feel heavy. Only the reel on screen holds a player.
                         beyondViewportPageCount = 0,
                     ) { page ->
-                        val reel = reels[page]
+                        val reel = displayReels.getOrNull(page) ?: return@VerticalPager
                         ReelPage(
                             reel = reel,
                             // Play only the reel in view *and* only while the tab is shown.
@@ -265,52 +413,62 @@ fun ShortsScreen(
         }
 
         // Header floats over the feed.
-        ShortsHeader(onPost = {
-            if (posting) return@ShortsHeader
-            pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-        })
-
-        if (posting) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.55f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = Color.White, strokeWidth = 2.5.dp)
-                    Spacer(Modifier.height(12.dp))
-                    Text("Mengunggah…", color = Color.White, fontSize = 13.sp)
-                }
-            }
-        }
-    }
-
-    // Caption + confirm before publishing the picked video.
-    pendingVideo?.let { uri ->
-        PostReelDialog(
-            onDismiss = { pendingVideo = null },
-            onPost = { caption ->
-                pendingVideo = null
-                posting = true
-                scope.launch {
-                    runCatching {
-                        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                            ?: error("Tidak bisa membaca video")
-                        val mime = context.contentResolver.getType(uri) ?: "video/mp4"
-                        val ext = mime.substringAfterLast('/', "mp4")
-                        val mediaId = SyntraClient.uploadMedia("video", ext, mime, bytes)
-                        SyntraClient.postReel(mediaId, caption)
-                    }.onSuccess {
-                        Toast.makeText(context, "Reel diterbitkan.", Toast.LENGTH_SHORT).show()
-                        reload()
-                    }.onFailure {
-                        Toast.makeText(context, "Gagal menerbitkan: ${it.message}", Toast.LENGTH_LONG).show()
-                    }
-                    posting = false
-                }
+        ShortsHeader(
+            following = showFollowing,
+            onSelectFollowing = { showFollowing = it },
+            onPost = {
+                if (posting) return@ShortsHeader
+                pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
             },
         )
+
+        // Fixed upload card at the very top. Stays while the reel uploads, then
+        // fills the bar and disappears. Only ever visible on this (Shorts) screen.
+        LaunchedEffect(posting) {
+            if (!posting && uploadCardVisible) { delay(900); uploadCardVisible = false }
+        }
+        if (uploadCardVisible) {
+            UploadReelCard(
+                thumb = uploadThumb,
+                startMs = uploadStartMs,
+                etaMs = uploadEtaMs,
+                uploading = posting,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        }
+
+        // "Back to top" — appears once you've scrolled past the first reel, jumps
+        // straight back to the top video. Sits just under the header on the left.
+        if (displayReels.isNotEmpty() && pager.currentPage > 0 && !uploadCardVisible) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(start = 16.dp, top = 60.dp)
+                    .size(40.dp)
+                    .background(Color.Black.copy(alpha = 0.42f), CircleShape)
+                    .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { scope.launch { pager.animateScrollToPage(0) } },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowUp,
+                    contentDescription = "Ke video teratas",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
+
+        // Author profile (TikTok-style), opened by tapping an avatar or @name. Kept
+        // INSIDE the root box as the last child so it reliably draws on top of the
+        // feed (as a sibling it wasn't rendering full-screen).
+        openProfileUser?.let { uname ->
+            ProfileScreen(username = uname, onClose = { openProfileUser = null })
+        }
     }
 
     commentsFor?.let { reel ->
@@ -322,11 +480,6 @@ fun ShortsScreen(
                 if (i >= 0) reels[i] = reels[i].copy(commentCount = reels[i].commentCount + 1)
             },
         )
-    }
-
-    // Author profile (TikTok-style) opened by tapping an avatar in the feed.
-    openProfileUser?.let { uname ->
-        ProfileScreen(username = uname, onClose = { openProfileUser = null })
     }
 
     pendingDelete?.let { reel ->
@@ -504,12 +657,42 @@ private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifi
         Box(modifier.background(Color.Black))
         return
     }
+    val context = LocalContext.current
     val player = remember(url) { MediaPlayer() }
     var ready by remember(url) { mutableStateOf(false) }
     var failed by remember(url) { mutableStateOf(false) }
     // Intrinsic video size, used to centre-crop instead of stretching.
     var videoW by remember(url) { mutableStateOf(0) }
     var videoH by remember(url) { mutableStateOf(0) }
+    // The surface (once the TextureView is laid out) and the resolved playback
+    // source (the on-disk copy once VideoCache has it) arrive independently; the
+    // player is prepared only when both are in hand. `started` keeps that to
+    // exactly one setDataSource/prepare per url.
+    var surface by remember(url) { mutableStateOf<Surface?>(null) }
+    var source by remember(url) { mutableStateOf<String?>(null) }
+    var started by remember(url) { mutableStateOf(false) }
+
+    // Download-once: play from the local cached file, or stream (and fall back)
+    // if the miss can't be filled. Immutable media urls make this safe forever —
+    // this is what stops the feed re-streaming the same clip on every scroll.
+    LaunchedEffect(url) { source = VideoCache.resolve(context, url) }
+
+    // Bind surface + source to the player exactly once both are ready.
+    LaunchedEffect(surface, source) {
+        val s = surface ?: return@LaunchedEffect
+        val src = source ?: return@LaunchedEffect
+        if (started) return@LaunchedEffect
+        started = true
+        runCatching {
+            player.setSurface(s)
+            player.setDataSource(src)
+            player.isLooping = true
+            player.setOnVideoSizeChangedListener { _, vw, vh -> videoW = vw; videoH = vh }
+            player.setOnPreparedListener { ready = true }
+            player.setOnErrorListener { _, _, _ -> failed = true; true }
+            player.prepareAsync()
+        }.onFailure { failed = true }
+    }
 
     DisposableEffect(url) {
         onDispose { runCatching { player.release() } }
@@ -536,22 +719,16 @@ private fun ReelVideo(url: String, playing: Boolean, modifier: Modifier = Modifi
                 TextureView(ctx).apply {
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                            runCatching {
-                                player.setSurface(Surface(st))
-                                player.setDataSource(url)
-                                player.isLooping = true
-                                player.setOnVideoSizeChangedListener { _, vw, vh ->
-                                    videoW = vw
-                                    videoH = vh
-                                }
-                                player.setOnPreparedListener { ready = true }
-                                player.setOnErrorListener { _, _, _ -> failed = true; true }
-                                player.prepareAsync()
-                            }.onFailure { failed = true }
+                            // Just hand the surface up; the prepare runs from the
+                            // LaunchedEffect above once the cached source resolves too.
+                            surface = Surface(st)
                         }
 
                         override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) = Unit
-                        override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean = true
+                        override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                            surface = null
+                            return true
+                        }
                         override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
                     }
                 }
@@ -603,6 +780,9 @@ fun ReelViewer(reels: List<NetReel>, startIndex: Int, onClose: () -> Unit) {
     LaunchedEffect(pager.currentPage) {
         items.getOrNull(pager.currentPage)?.let { r ->
             SyntraClient.fireAndForget { SyntraClient.viewReel(r.id) }
+        }
+        items.getOrNull(pager.currentPage + 1)?.mediaUrl?.let {
+            VideoCache.prefetch(scope, context, it)
         }
     }
     fun toggleLike(reel: NetReel) {
@@ -703,14 +883,37 @@ private fun ReelCaption(reel: NetReel, onOpenProfile: () -> Unit = {}, modifier:
         )
         if (reel.caption.isNotBlank()) {
             Spacer(Modifier.height(8.dp))
+            // Collapsed to 2 lines with a "selengkapnya" affordance; tap the caption
+            // to expand and again to collapse. Reset when the reel changes.
+            var expanded by remember(reel.id) { mutableStateOf(false) }
+            var overflows by remember(reel.id) { mutableStateOf(false) }
             Text(
                 text = highlightHashtags(reel.caption),
                 color = Color.White,
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
-                maxLines = 3,
+                maxLines = if (expanded) Int.MAX_VALUE else 2,
                 overflow = TextOverflow.Ellipsis,
+                onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow },
+                modifier = Modifier.clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { if (overflows || expanded) expanded = !expanded },
             )
+            if (overflows || expanded) {
+                Text(
+                    text = if (expanded) "Sembunyikan" else "Selengkapnya",
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { expanded = !expanded },
+                )
+            }
         }
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -759,17 +962,17 @@ private fun ReelActions(
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        // Author avatar with a teal follow (+) badge. Tapping the avatar opens
-        // the author's profile.
+        // Author avatar — tap opens their TikTok-style profile. A small "+" (no
+        // coloured background, just a hairline chip) sits under it to follow.
         Box(contentAlignment = Alignment.BottomCenter) {
             Box(
                 modifier = Modifier
-                    .size(50.dp)
+                    .size(44.dp)
                     .clip(CircleShape)
                     .background(Color(0xFF222228))
-                    .border(2.dp, Color.White, CircleShape)
+                    .border(1.5.dp, Color.White, CircleShape)
                     .clickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
@@ -788,30 +991,28 @@ private fun ReelActions(
                     Text(
                         text = (reel.creatorUsername.firstOrNull() ?: 'U').uppercase(),
                         color = Color.White,
-                        fontSize = 18.sp,
+                        fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                     )
                 }
             }
-            // Follow (+) — hidden on your own reels AND once you've followed.
-            // Tapping it opens a small sheet: Follow, or view the profile.
+            // Follow (+) — hidden on your own reels AND once you've followed. No fill
+            // colour, just a plain white "+" so it reads clean over any video.
             if (reel.authorId.isNotBlank() && reel.authorId != SyntraClient.myUserId && !followed) {
                 Box(
                     modifier = Modifier
-                        .offset(y = 9.dp)
-                        .size(20.dp)
-                        .background(ShortsTeal, CircleShape)
+                        .offset(y = 8.dp)
+                        .size(18.dp)
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
                         ) { showFollowSheet = true },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Filled.Add, "Ikuti", tint = Color.White, modifier = Modifier.size(14.dp))
+                    Icon(Icons.Filled.Add, "Ikuti", tint = Color.White, modifier = Modifier.size(18.dp))
                 }
             }
         }
-        Spacer(Modifier.height(2.dp))
         RailItem(
             icon = if (reel.isLiked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
             tint = if (reel.isLiked) Color(0xFFFF3B5C) else Color.White,
@@ -827,7 +1028,7 @@ private fun ReelActions(
         RailItem(
             icon = Icons.Filled.Share,
             tint = Color.White,
-            label = "Share",
+            label = "Bagikan",
             onClick = onShare,
         )
         // Owner-only: remove my own reel (kept subtle, others never see it).
@@ -839,7 +1040,6 @@ private fun ReelActions(
                 onClick = onDelete,
             )
         }
-        Spacer(Modifier.height(2.dp))
         SpinningMusicDisc(avatarUrl = reel.creatorAvatarUrl)
     }
 
@@ -914,15 +1114,15 @@ private fun RailItem(icon: ImageVector, tint: Color, label: String, onClick: () 
             contentDescription = label,
             tint = tint,
             modifier = Modifier
-                .size(34.dp)
+                .size(27.dp)
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
                     onClick = onClick,
                 ),
         )
-        Spacer(Modifier.height(4.dp))
-        Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(3.dp))
+        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -938,7 +1138,7 @@ private fun SpinningMusicDisc(avatarUrl: String?) {
     )
     Box(
         modifier = Modifier
-            .size(46.dp)
+            .size(38.dp)
             .graphicsLayer { rotationZ = angle }
             .clip(CircleShape)
             .background(Brush.radialGradient(listOf(Color(0xFF3A3A3A), Color(0xFF101014))))
@@ -950,7 +1150,7 @@ private fun SpinningMusicDisc(avatarUrl: String?) {
                 model = avatarUrl,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.size(22.dp).clip(CircleShape),
+                modifier = Modifier.size(18.dp).clip(CircleShape),
             )
         } else {
             Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(18.dp))
@@ -963,9 +1163,11 @@ private fun SpinningMusicDisc(avatarUrl: String?) {
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun ShortsHeader(onPost: () -> Unit) {
-    val context = LocalContext.current
-    var following by remember { mutableStateOf(false) }
+private fun ShortsHeader(
+    following: Boolean,
+    onSelectFollowing: (Boolean) -> Unit,
+    onPost: () -> Unit,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -993,11 +1195,8 @@ private fun ShortsHeader(onPost: () -> Unit) {
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(22.dp),
         ) {
-            ShortsTab("Following", active = following) {
-                following = true
-                Toast.makeText(context, "Feed Following segera hadir.", Toast.LENGTH_SHORT).show()
-            }
-            ShortsTab("For You", active = !following) { following = false }
+            ShortsTab("Following", active = following) { onSelectFollowing(true) }
+            ShortsTab("For You", active = !following) { onSelectFollowing(false) }
         }
         // Right: search.
         Icon(
@@ -1052,6 +1251,144 @@ private fun EmptyReels() {
             "Jadilah yang pertama — ketuk + di atas untuk mengunggah video.",
             color = NexusTextSecondary,
             fontSize = 13.sp,
+        )
+    }
+}
+
+/**
+ * Fixed card at the very top of Shorts while a reel uploads. Full width, short,
+ * with a progress bar shaped by an ETA (no numbers), a label, and a small
+ * thumbnail at the far end. Tap to expand for a little more detail.
+ */
+@Composable
+private fun UploadReelCard(
+    thumb: androidx.compose.ui.graphics.ImageBitmap?,
+    startMs: Long,
+    etaMs: Long,
+    uploading: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    // Drive a time-based fraction toward ~0.92 over the ETA, then snap to full when
+    // the upload finishes — an ETA-shaped bar without ever showing a number.
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(uploading, startMs) {
+        while (uploading) { now = System.currentTimeMillis(); delay(80) }
+    }
+    val target = if (!uploading) 1f else {
+        val elapsed = (now - startMs).coerceAtLeast(0L).toFloat()
+        (elapsed / etaMs.coerceAtLeast(1L).toFloat()).coerceIn(0.04f, 0.92f)
+    }
+    val frac by animateFloatAsState(targetValue = target, animationSpec = tween(320), label = "upload-bar")
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xF215151C))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(14.dp))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+            ) { expanded = !expanded }
+            .padding(horizontal = 14.dp, vertical = if (expanded) 14.dp else 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (!uploading) "Video terunggah" else "Menunggu upload video..",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (expanded) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = "Reel kamu sedang diproses dan akan segera tayang.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                    )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            // Small thumbnail at the far end of the card.
+            Box(
+                modifier = Modifier
+                    .size(if (expanded) 52.dp else 34.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF222230)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (thumb != null) {
+                    Image(
+                        bitmap = thumb,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Icon(Icons.Filled.MusicNote, null, tint = Color.White.copy(alpha = 0.4f), modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+        Spacer(Modifier.height(if (expanded) 12.dp else 9.dp))
+        // ETA-shaped progress bar.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.10f)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(frac)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(50))
+                    .background(Brush.horizontalGradient(listOf(ShortsTeal, NexusAccentSoft))),
+            )
+        }
+    }
+}
+
+/** Rough upload ETA from the payload size — assumes ~300 KB/s, clamped sensibly. */
+private fun estimateUploadEtaMs(sizeBytes: Int): Long {
+    val bytesPerMs = 300.0 * 1024 / 1000 // ~307 B/ms
+    return (sizeBytes / bytesPerMs).toLong().coerceIn(2500L, 40_000L)
+}
+
+/** A single frame from the video, for the upload card thumbnail. Best-effort. */
+private fun reelThumbnail(context: Context, uri: Uri): androidx.compose.ui.graphics.ImageBitmap? =
+    runCatching {
+        android.media.MediaMetadataRetriever().use { r ->
+            r.setDataSource(context, uri)
+            r.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?.asImageBitmap()
+        }
+    }.getOrNull()
+
+/** Shown on the Following tab when you don't follow anyone with shorts yet. */
+@Composable
+private fun FollowingEmpty() {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(40.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Icon(Icons.Filled.People, null, tint = NexusTextSecondary, modifier = Modifier.size(40.dp))
+        Spacer(Modifier.height(16.dp))
+        Text("Belum ada video", color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Ikuti kreator dan short mereka muncul di sini. Sementara itu, buka For You.",
+            color = NexusTextSecondary,
+            fontSize = 13.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
     }
 }

@@ -1,7 +1,9 @@
 package com.example.syntra.net
 
 import android.content.Context
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.os.Build
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -78,11 +80,10 @@ object CallEngine {
 
         audio = (context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.apply {
             mode = AudioManager.MODE_IN_COMMUNICATION
-            // Video defaults to loudspeaker; a voice call starts on the earpiece
-            // like a normal phone call.
-            isSpeakerphoneOn = video
         }
-        speakerOn = video
+        // Video defaults to loudspeaker; a voice call starts on the earpiece like a
+        // normal phone call. Uses the modern routing API (Android 12+ safe).
+        setSpeaker(video)
 
         val me = r.localParticipant
         runCatching { me.setMicrophoneEnabled(true) }
@@ -134,7 +135,20 @@ object CallEngine {
     }
 
     fun setSpeaker(on: Boolean) {
-        audio?.isSpeakerphoneOn = on
+        val am = audio
+        if (am != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                runCatching {
+                    val target = if (on) AudioDeviceInfo.TYPE_BUILTIN_SPEAKER else AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                    val device = am.availableCommunicationDevices.firstOrNull { it.type == target }
+                    if (device != null) am.setCommunicationDevice(device)
+                    else @Suppress("DEPRECATION") { am.isSpeakerphoneOn = on }
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                am.isSpeakerphoneOn = on
+            }
+        }
         speakerOn = on
     }
 
@@ -173,6 +187,9 @@ object CallEngine {
         runCatching { scope?.cancel() }
         scope = null
         runCatching { room?.disconnect() }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audio?.clearCommunicationDevice()
+        }
         runCatching { audio?.mode = AudioManager.MODE_NORMAL }
         room = null
         audio = null

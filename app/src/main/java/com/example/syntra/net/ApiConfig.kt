@@ -17,10 +17,10 @@ object ApiConfig {
      * internet reaches it — no LAN/Wi-Fi dependency. No trailing slash: paths
      * like `/api/v1/...` are appended directly.
      */
-    const val BASE_URL = "https://classifieds-jesus-arts-implementation.trycloudflare.com"
+    const val BASE_URL = "https://api.syntra.fun"
 
     /** WebSocket base — same host over TLS, so `wss://`. */
-    const val WS_URL = "wss://classifieds-jesus-arts-implementation.trycloudflare.com"
+    const val WS_URL = "wss://api.syntra.fun"
 
     /**
      * Only for a backend running with `AUTH_DEV_BYPASS=true` and `APP_ENV` other

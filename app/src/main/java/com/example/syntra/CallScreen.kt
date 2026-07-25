@@ -1,9 +1,11 @@
 package com.example.syntra
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -12,9 +14,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,6 +26,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.navigationBars
@@ -36,6 +41,7 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
@@ -47,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,13 +62,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -77,9 +88,14 @@ import com.example.syntra.ui.theme.NexusTextSecondary
 import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 // ---------------------------------------------------------------------------
-// Call screen — full-screen voice & video call UI, driven by CallEngine.
+// Call orchestration.
+//
+// The call lives at the APP ROOT (CallHost), not inside a chat screen — so it
+// survives navigating away, and can shrink into a draggable picture-in-picture
+// window that floats over the whole app and expands back on tap.
 //
 // The Syntra backend only carries call *state* (POST /calls, answer, leave) and
 // mints the LiveKit sfu_token; the media itself rides the SFU. When the media
@@ -87,73 +103,147 @@ import kotlinx.coroutines.delay
 // close instead of pretending a call connected.
 // ---------------------------------------------------------------------------
 
+/** One active/pending call. A plain class so each call is a distinct instance. */
+class CallDescriptor(
+    val conversationId: String,
+    val peerName: String,
+    val peerId: String,
+    val video: Boolean,
+    val incoming: Boolean,
+    val incomingCallId: String?,
+)
+
+/**
+ * App-wide holder for the current call. Any screen can start/answer a call; the
+ * single [CallHost] at the app root renders it (full or minimized).
+ */
+object CallController {
+    var call by mutableStateOf<CallDescriptor?>(null)
+        private set
+    var minimized by mutableStateOf(false)
+        private set
+
+    val isBusy: Boolean get() = call != null
+
+    fun startOutgoing(conversationId: String, peerName: String, peerId: String, video: Boolean) {
+        if (call != null) return
+        call = CallDescriptor(conversationId, peerName, peerId, video, incoming = false, incomingCallId = null)
+        minimized = false
+    }
+
+    fun incoming(conversationId: String, peerName: String, peerId: String, video: Boolean, callId: String) {
+        if (call != null) return
+        call = CallDescriptor(conversationId, peerName, peerId, video, incoming = true, incomingCallId = callId)
+        minimized = false
+    }
+
+    fun minimize() { if (call != null) minimized = true }
+    fun expand() { minimized = false }
+    fun end() { call = null; minimized = false }
+}
+
 private enum class CallPhase { INCOMING, CONNECTING, RINGING, ONGOING, ENDED }
 
 private val callBackdrop = listOf(Color(0xFF141726), Color(0xFF0B0C14))
 private val callAvatarGradient = listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5))
 
+/** Renders the current call, if any. Mount once at the app root, above everything. */
 @Composable
-fun CallScreen(
-    peerName: String,
-    conversationId: String,
-    video: Boolean,
-    onClose: () -> Unit,
-    incoming: Boolean = false,
-    incomingCallId: String? = null,
-    peerId: String = "",
-) {
+fun CallHost() {
+    val descriptor = CallController.call ?: return
+    // Key on the instance so a brand-new call rebuilds all call state from scratch
+    // (a re-used descriptor with equal fields must NOT keep the old phase/timer).
+    key(descriptor) {
+        CallSession(descriptor)
+    }
+}
+
+@Composable
+private fun CallSession(d: CallDescriptor) {
     val context = LocalContext.current
+    val incoming = d.incoming
     var phase by remember { mutableStateOf(if (incoming) CallPhase.INCOMING else CallPhase.CONNECTING) }
-    var callId by remember { mutableStateOf(incomingCallId.orEmpty()) }
-    var isVideo by remember { mutableStateOf(video) }
+    var callId by remember { mutableStateOf(d.incomingCallId.orEmpty()) }
+    val isVideo = d.video
     var elapsed by remember { mutableIntStateOf(0) }
     var statusLine by remember { mutableStateOf(if (incoming) "Panggilan masuk" else "Memanggil…") }
     var everConnected by remember { mutableStateOf(false) }
 
-    // The engine drives these; reading them here recomposes as the far side joins.
     val remoteJoined = CallEngine.remoteJoined
     val remoteVideo = CallEngine.remoteVideo
     val localVideo = CallEngine.localVideo
 
-    // Log the call once the screen leaves the composition, with the truth of what
-    // happened (answered / missed / how long it lasted).
     val elapsedLatest by rememberUpdatedState(elapsed)
     val connectedLatest by rememberUpdatedState(everConnected)
     val videoLatest by rememberUpdatedState(isVideo)
+    // Latest call id captured for the teardown leave (callId is set after start/answer).
+    val callIdAtDispose by rememberUpdatedState(callId)
 
-    // Actually place / answer the call once permissions are in hand.
+    // CRUCIAL: subscribe to the conversation channel that carries call.answered /
+    // call.ended. Without this the caller never learns the callee declined/hung up,
+    // stays stuck on "Memanggil…", and CallController stays busy — so the NEXT call
+    // is a silent no-op (startOutgoing sees a call already in progress) and the peer
+    // never rings. This one subscription fixes "declined but still calling" AND
+    // "second call doesn't show up on their phone". Idempotent, so it's safe even
+    // when the home/chat screen already subscribed.
+    LaunchedEffect(d.conversationId) {
+        if (ApiConfig.ENABLED && d.conversationId.isNotBlank()) {
+            SyntraClient.subscribe(listOf("conversation:${d.conversationId}"))
+        }
+    }
+
+    // Guard: connect exactly ONCE. Backend logs showed answer/start being hit ~15×
+    // in two seconds — every call re-created the LiveKit session, so media never
+    // stabilised ("gada menyambungkan"). A one-shot latch makes the answer/start
+    // request fire a single time no matter how often connectNow is (re)triggered.
+    var connectStarted by remember { mutableStateOf(false) }
+
     suspend fun connectNow() {
+        if (connectStarted) return
+        connectStarted = true
         if (!ApiConfig.ENABLED) {
-            statusLine = "Server belum aktif"
-            phase = CallPhase.ENDED
-            return
+            statusLine = "Server belum aktif"; phase = CallPhase.ENDED; return
         }
         runCatching {
             val call = if (incoming) {
-                SyntraClient.answerCall(callId, conversationId)
+                SyntraClient.answerCall(callId, d.conversationId)
             } else {
-                SyntraClient.startCall(conversationId, if (isVideo) "video" else "audio")
+                SyntraClient.startCall(d.conversationId, if (isVideo) "video" else "audio")
                     .also { callId = it.callId }
             }
             if (call.sfuUrl.isBlank() || call.sfuToken.isBlank()) {
                 error("Panggilan belum tersedia — server media belum dikonfigurasi.")
             }
-            CallEngine.connect(context, call.sfuUrl, call.sfuToken, isVideo)
+            // Show the connecting/ringing UI IMMEDIATELY, BEFORE the media connect.
+            // Tapping "Terima" must give instant feedback; the old order set the phase
+            // only AFTER CallEngine.connect, so if the LiveKit handshake hung (common
+            // on emulators / bad networks) the screen sat on the incoming buttons with
+            // no reaction — looking like the button was disabled.
             phase = if (incoming) CallPhase.CONNECTING else CallPhase.RINGING
             statusLine = if (incoming) "Menyambungkan…" else "Memanggil…"
+            // Bound the media handshake so it can't hang forever with no feedback. If
+            // it doesn't complete, end the call with a clear message instead of a
+            // frozen "Menyambungkan…".
+            try {
+                kotlinx.coroutines.withTimeout(20_000) {
+                    CallEngine.connect(context, call.sfuUrl, call.sfuToken, isVideo)
+                }
+            } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
+                error("Gagal menyambung ke server media (jaringan / emulator?)")
+            }
         }.onFailure {
-            // The screen closing mid-connect cancels this — that's not a call
-            // failure. Re-throw cancellation so it doesn't surface as the bogus
-            // "coroutine scope left the composition" error.
-            if (it is kotlinx.coroutines.CancellationException) throw it
+            // A real screen-close cancellation must propagate; a media timeout is a
+            // failure we surface, not a cancellation.
+            if (it is kotlinx.coroutines.CancellationException &&
+                it !is kotlinx.coroutines.TimeoutCancellationException
+            ) throw it
             statusLine = it.message ?: "Panggilan gagal"
             Toast.makeText(context, statusLine, Toast.LENGTH_LONG).show()
             phase = CallPhase.ENDED
         }
     }
 
-    // Permission gate: video needs camera + mic, audio needs mic.
-    val permissions = if (video) {
+    val permissions = if (isVideo) {
         arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
     } else {
         arrayOf(Manifest.permission.RECORD_AUDIO)
@@ -173,22 +263,54 @@ fun CallScreen(
     }
 
     LaunchedEffect(launchAfterPermission) {
-        if (launchAfterPermission) {
-            launchAfterPermission = false
-            connectNow()
-        }
+        if (launchAfterPermission) { launchAfterPermission = false; connectNow() }
     }
 
-    // Outgoing calls dial immediately; incoming waits for the user to accept.
-    LaunchedEffect(Unit) {
-        if (!incoming) permLauncher.launch(permissions)
+    // Proceed to connect — but only ASK for permissions we don't already have.
+    // Relying on RequestMultiplePermissions.launch() to always fire its callback is
+    // the bug behind "tekan Terima, tak terjadi apa-apa": when the permissions are
+    // already granted the callback can silently not run, so connectNow() was never
+    // called and the screen sat on the incoming/connecting state forever. Checking
+    // the grant state directly and jumping straight to connectNow fixes that.
+    fun proceed() {
+        val micOk = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        val camOk = !isVideo || ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (micOk && camOk) launchAfterPermission = true // fires connectNow()
+        else permLauncher.launch(permissions)
     }
+
+    // Outgoing dials immediately; incoming waits for the user to accept.
+    LaunchedEffect(Unit) { if (!incoming) proceed() }
 
     // Promote to "ongoing" the moment the other side is really in the room.
     LaunchedEffect(remoteJoined) {
         if (remoteJoined && phase != CallPhase.ONGOING && phase != CallPhase.ENDED) {
-            phase = CallPhase.ONGOING
-            everConnected = true
+            phase = CallPhase.ONGOING; everConnected = true
+        }
+    }
+
+    // Reliability net for a dropped WebSocket. The tunnel occasionally drops the
+    // socket (close 1006), and a call.ended sent during that gap is lost — leaving
+    // one side stuck "Memanggil…" after the other declined/cancelled. So while the
+    // call is still pending, POLL the call's real status every 3s: if the backend
+    // no longer has it active (declined / cancelled / missed), end this screen too.
+    LaunchedEffect(phase) {
+        val pending = phase == CallPhase.INCOMING || phase == CallPhase.RINGING || phase == CallPhase.CONNECTING
+        if (!pending || d.conversationId.isBlank()) return@LaunchedEffect
+        while (true) {
+            delay(3000)
+            if (phase == CallPhase.ONGOING || phase == CallPhase.ENDED) break
+            // Distinguish "call really ended" (a successful response of null) from a
+            // transient network error — only the former should end the screen, or a
+            // glitchy poll would kill a perfectly good ringing call.
+            val result = runCatching { SyntraClient.getActiveCall(d.conversationId) }
+            if (result.isSuccess && result.getOrNull() == null) {
+                statusLine = "Panggilan berakhir"
+                phase = CallPhase.ENDED
+                break
+            }
         }
     }
 
@@ -196,23 +318,38 @@ fun CallScreen(
     LaunchedEffect(phase) {
         if (phase == CallPhase.ONGOING) {
             statusLine = ""
-            while (true) {
-                delay(1000)
-                elapsed++
+            while (true) { delay(1000); elapsed++ }
+        }
+    }
+
+    // A ring must not last forever. Outgoing: give up when nobody answers. Incoming:
+    // auto-miss so it stops ringing if never picked up. Either way tell the far side.
+    LaunchedEffect(phase) {
+        val ringingOut = !incoming && phase == CallPhase.RINGING
+        val ringingIn = incoming && phase == CallPhase.INCOMING
+        if (ringingOut || ringingIn) {
+            delay(35_000)
+            if ((ringingOut && phase == CallPhase.RINGING) || (ringingIn && phase == CallPhase.INCOMING)) {
+                statusLine = if (ringingIn) "Panggilan tak terjawab" else "Tidak dijawab"
+                val id = callId
+                if (id.isNotBlank() && ApiConfig.ENABLED) {
+                    if (ringingIn) SyntraClient.fireAndForget { SyntraClient.declineCall(id, d.conversationId) }
+                    else SyntraClient.fireAndForget { SyntraClient.leaveCall(id, d.conversationId) }
+                }
+                phase = CallPhase.ENDED
             }
         }
     }
 
-    // Ringtone while waiting — on BOTH sides (the receiver's INCOMING and the
-    // caller's RINGING) and for both audio & video calls. Uses MediaPlayer with
-    // real looping so it works on every Android version (Ringtone.isLooping is
-    // API 28+ only). Stops the moment the call connects or ends.
+    // Ringtone while waiting — on BOTH sides. Prepared off the main thread so it
+    // never blocks; falls back to the notification sound if the ringtone is unset.
     val ringing = phase == CallPhase.INCOMING || phase == CallPhase.RINGING
     DisposableEffect(ringing) {
         var player: android.media.MediaPlayer? = null
         if (ringing) {
             val uri = android.media.RingtoneManager
                 .getActualDefaultRingtoneUri(context, android.media.RingtoneManager.TYPE_RINGTONE)
+                ?: android.media.RingtoneManager.getActualDefaultRingtoneUri(context, android.media.RingtoneManager.TYPE_NOTIFICATION)
                 ?: android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_RINGTONE)
             runCatching {
                 player = android.media.MediaPlayer().apply {
@@ -224,8 +361,8 @@ fun CallScreen(
                             .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
                             .build(),
                     )
-                    prepare()
-                    start()
+                    setOnPreparedListener { runCatching { it.start() } }
+                    prepareAsync()
                 }
             }
         }
@@ -239,12 +376,23 @@ fun CallScreen(
                 statusLine = if (reason == "declined") "Panggilan ditolak" else "Panggilan berakhir"
                 phase = CallPhase.ENDED
             }
+            override fun onCallAnswered(answeredCallId: String) {
+                if (!incoming && phase == CallPhase.RINGING) statusLine = "Menyambungkan…"
+            }
         }
         SyntraClient.addListener(listener)
         onDispose {
             SyntraClient.removeListener(listener)
             CallEngine.disconnect()
-            // Record the attempt honestly.
+            // CRUCIAL: always tell the backend we left, on EVERY teardown path — not
+            // just the hang-up button. Otherwise a call that ended some other way
+            // (answer succeeded but SFU connect failed, the screen was torn down, etc.)
+            // stays 'ongoing' forever and BLOCKS every future call to that person
+            // (start_call joins the ghost instead of ringing). leaveCall is idempotent.
+            val id = callIdAtDispose
+            if (id.isNotBlank() && ApiConfig.ENABLED) {
+                SyntraClient.fireAndForget { SyntraClient.leaveCall(id, d.conversationId) }
+            }
             val direction = when {
                 !incoming -> CallDirection.OUTGOING
                 connectedLatest -> CallDirection.INCOMING
@@ -254,8 +402,8 @@ fun CallScreen(
                 context,
                 CallEntry(
                     id = "c-${System.currentTimeMillis()}",
-                    peerName = peerName,
-                    peerId = peerId,
+                    peerName = d.peerName,
+                    peerId = d.peerId,
                     video = videoLatest,
                     direction = direction,
                     at = System.currentTimeMillis(),
@@ -265,32 +413,86 @@ fun CallScreen(
         }
     }
 
-    // When the call ends, linger briefly on the status then close.
+    // When the call ends, linger briefly on the status then tear down.
     LaunchedEffect(phase) {
-        if (phase == CallPhase.ENDED) {
-            delay(1200)
-            onClose()
-        }
+        if (phase == CallPhase.ENDED) { delay(1200); CallController.end() }
     }
 
     fun hangUp() {
         val id = callId
         if (id.isNotBlank() && ApiConfig.ENABLED) {
-            // Fire-and-forget: leaving is best-effort, the UI closes regardless.
-            SyntraClient.fireAndForget { SyntraClient.leaveCall(id, conversationId) }
+            SyntraClient.fireAndForget { SyntraClient.leaveCall(id, d.conversationId) }
         }
-        onClose()
+        CallController.end()
     }
 
     fun decline() {
         val id = callId
         if (id.isNotBlank() && ApiConfig.ENABLED) {
-            SyntraClient.fireAndForget { SyntraClient.declineCall(id, conversationId) }
+            SyntraClient.fireAndForget { SyntraClient.declineCall(id, d.conversationId) }
         }
-        onClose()
+        CallController.end()
     }
 
-    BackHandler { hangUp() }
+    if (CallController.minimized) {
+        MiniCallWindow(
+            peerName = d.peerName,
+            elapsed = elapsed,
+            statusLine = if (phase == CallPhase.ONGOING) formatDuration(elapsed) else statusLine,
+            isVideo = isVideo,
+            remoteVideo = remoteVideo.takeIf { phase == CallPhase.ONGOING },
+            onExpand = { CallController.expand() },
+            onHangUp = { hangUp() },
+        )
+    } else {
+        FullCallUi(
+            peerName = d.peerName,
+            phase = phase,
+            statusLine = statusLine,
+            elapsed = elapsed,
+            isVideo = isVideo,
+            remoteVideo = remoteVideo,
+            localVideo = localVideo,
+            onMinimize = { CallController.minimize() },
+            onAccept = { proceed() },
+            onDecline = { decline() },
+            onHangUp = { hangUp() },
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full-screen call UI
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun FullCallUi(
+    peerName: String,
+    phase: CallPhase,
+    statusLine: String,
+    elapsed: Int,
+    isVideo: Boolean,
+    remoteVideo: VideoTrack?,
+    localVideo: VideoTrack?,
+    onMinimize: () -> Unit,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+    onHangUp: () -> Unit,
+) {
+    // Back behaviour depends on where the call is:
+    //  - INCOMING (ringing at me)        → decline
+    //  - ONGOING (connected)             → minimize to the floating window
+    //  - RINGING / CONNECTING (pending)  → HANG UP / cancel
+    // The old code minimized on RINGING too, so pressing Back while dialing left a
+    // floating call stuck alive — CallController stayed busy and you couldn't start
+    // a new call until you found and killed that window. Cancelling instead frees it.
+    BackHandler {
+        when (phase) {
+            CallPhase.INCOMING -> onDecline()
+            CallPhase.ONGOING -> onMinimize()
+            else -> onHangUp()
+        }
+    }
 
     val showVideoStage = isVideo && phase == CallPhase.ONGOING && remoteVideo != null
 
@@ -299,30 +501,40 @@ fun CallScreen(
             .fillMaxSize()
             .background(Brush.verticalGradient(callBackdrop)),
     ) {
-        // Remote video fills the screen once it arrives.
         if (showVideoStage) {
-            remoteVideo?.let { track ->
-                VideoRenderer(track = track, modifier = Modifier.fillMaxSize())
+            remoteVideo?.let { track -> VideoRenderer(track = track, modifier = Modifier.fillMaxSize()) }
+            Box(
+                modifier = Modifier.fillMaxWidth().height(180.dp).background(
+                    Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)),
+                ),
+            )
+            Box(
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(240.dp).background(
+                    Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.7f))),
+                ),
+            )
+        }
+
+        // Minimize-to-PiP button — ONLY once the call is actually connected. There's
+        // nothing useful to float before that, and allowing minimize while dialing is
+        // exactly what let a pending call get stranded off-screen.
+        if (phase == CallPhase.ONGOING) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(12.dp)
+                    .size(40.dp)
+                    .background(Color.Black.copy(alpha = 0.28f), CircleShape)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onMinimize,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Rounded.KeyboardArrowDown, "Perkecil", tint = Color.White, modifier = Modifier.size(24.dp))
             }
-            // Gentle top scrim so the name stays readable over bright video.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp)
-                    .background(
-                        Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)),
-                    ),
-            )
-            // Bottom scrim so the control dock stays legible over bright video.
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(240.dp)
-                    .background(
-                        Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.7f))),
-                    ),
-            )
         }
 
         Column(
@@ -333,70 +545,49 @@ fun CallScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             if (showVideoStage) {
-                // Compact header over live video.
                 Spacer(Modifier.height(8.dp))
-                CallHeaderPill(
-                    name = peerName.ifBlank { "Tanpa nama" },
-                    subtitle = formatDuration(elapsed),
-                )
+                CallHeaderPill(name = peerName.ifBlank { "Tanpa nama" }, subtitle = formatDuration(elapsed))
             } else {
                 Spacer(Modifier.height(64.dp))
                 Text(
                     text = peerName.ifBlank { "Tanpa nama" },
-                    color = NexusTextPrimary,
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    color = NexusTextPrimary, fontSize = 26.sp, fontWeight = FontWeight.Bold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(10.dp))
-                // End-to-end encrypted reassurance line.
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Rounded.Lock,
-                        contentDescription = null,
-                        tint = NexusTextSecondary,
-                        modifier = Modifier.size(13.dp),
-                    )
+                    Icon(Icons.Rounded.Lock, null, tint = NexusTextSecondary, modifier = Modifier.size(13.dp))
                     Spacer(Modifier.width(5.dp))
                     Text(
-                        text = if (phase == CallPhase.ONGOING && statusLine.isBlank()) {
-                            formatDuration(elapsed)
-                        } else {
-                            statusLine
-                        },
-                        color = NexusAccentSoft,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                        textAlign = TextAlign.Center,
+                        text = if (phase == CallPhase.ONGOING && statusLine.isBlank()) formatDuration(elapsed) else statusLine,
+                        color = NexusAccentSoft, fontSize = 15.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center,
                     )
                 }
                 Spacer(Modifier.height(56.dp))
                 PulsingAvatar(
                     initial = peerName.firstOrNull()?.uppercase() ?: "?",
-                    pulsing = phase == CallPhase.RINGING || phase == CallPhase.INCOMING,
+                    // Pulse while ringing, waiting to be answered, AND while connecting
+                    // media — so "Menyambungkan…" reads as active loading, not frozen.
+                    pulsing = phase == CallPhase.RINGING || phase == CallPhase.INCOMING ||
+                        phase == CallPhase.CONNECTING,
                 )
             }
 
             Spacer(Modifier.weight(1f))
 
             Box(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
-            when (phase) {
-                CallPhase.INCOMING -> IncomingControls(
-                    video = isVideo,
-                    onAccept = { permLauncher.launch(permissions) },
-                    onDecline = { decline() },
-                )
-                CallPhase.ENDED -> Spacer(Modifier.height(40.dp))
-                else -> OngoingControls(
-                    isVideo = isVideo,
-                    onToggleMic = { CallEngine.fireMic() },
-                    onToggleSpeaker = { CallEngine.setSpeaker(!CallEngine.speakerOn) },
-                    onToggleCamera = { CallEngine.fireCamera(!CallEngine.cameraEnabled) },
-                    onSwitchCamera = { CallEngine.switchCamera() },
-                    onHangUp = { hangUp() },
-                )
-            }
+                when (phase) {
+                    CallPhase.INCOMING -> IncomingControls(video = isVideo, onAccept = onAccept, onDecline = onDecline)
+                    CallPhase.ENDED -> Spacer(Modifier.height(40.dp))
+                    else -> OngoingControls(
+                        isVideo = isVideo,
+                        onToggleMic = { CallEngine.fireMic() },
+                        onToggleSpeaker = { CallEngine.setSpeaker(!CallEngine.speakerOn) },
+                        onToggleCamera = { CallEngine.fireCamera(!CallEngine.cameraEnabled) },
+                        onSwitchCamera = { CallEngine.switchCamera() },
+                        onHangUp = onHangUp,
+                    )
+                }
             }
             Spacer(Modifier.height(36.dp))
         }
@@ -414,14 +605,127 @@ fun CallScreen(
                         .background(Color.Black)
                         .border(1.5.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(18.dp)),
                 ) {
-                    VideoRenderer(
-                        track = track,
-                        mirror = true,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    VideoRenderer(track = track, mirror = true, modifier = Modifier.fillMaxSize())
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Minimized floating call window (draggable, tap to expand)
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun MiniCallWindow(
+    peerName: String,
+    elapsed: Int,
+    statusLine: String,
+    isVideo: Boolean,
+    remoteVideo: VideoTrack?,
+    onExpand: () -> Unit,
+    onHangUp: () -> Unit,
+) {
+    val density = LocalDensity.current
+    // The window is 128x180 (video) or a compact pill (audio). It starts near the
+    // top-right and can be dragged ANYWHERE; position is clamped to stay on screen.
+    val winW = if (isVideo) 128.dp else 220.dp
+    val winH = if (isVideo) 180.dp else 76.dp
+
+    // Full-screen container that does NOT consume touches, so the app behind the
+    // window stays fully interactive — only the window itself grabs gestures.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val maxXpx = with(density) { (maxWidth - winW).toPx() }
+        val maxYpx = with(density) { (maxHeight - winH).toPx() }
+        val startX = maxXpx - with(density) { 12.dp.toPx() }
+        val startY = with(density) { 64.dp.toPx() }
+        var offset by remember { mutableStateOf(Offset(startX.coerceAtLeast(0f), startY)) }
+
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(offset.x.roundToInt(), offset.y.roundToInt()) }
+                .size(width = winW, height = winH)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF141726))
+                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
+                .pointerInput(maxXpx, maxYpx) {
+                    detectDragGestures { change, drag ->
+                        change.consume()
+                        offset = Offset(
+                            (offset.x + drag.x).coerceIn(0f, maxXpx.coerceAtLeast(0f)),
+                            (offset.y + drag.y).coerceIn(0f, maxYpx.coerceAtLeast(0f)),
+                        )
+                    }
+                }
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onExpand,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isVideo && remoteVideo != null) {
+                VideoRenderer(track = remoteVideo, modifier = Modifier.fillMaxSize())
+                // Bottom bar with timer + hang up over the video.
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(statusLine, color = Color.White, fontSize = 11.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    MiniHangUp(onHangUp)
+                }
+            } else {
+                // Audio (or video not yet flowing): avatar + name + timer + hang up.
+                Row(
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .background(Brush.verticalGradient(callAvatarGradient), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            peerName.firstOrNull()?.uppercase() ?: "?",
+                            color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            peerName.ifBlank { "Tanpa nama" },
+                            color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(statusLine, color = NexusAccentSoft, fontSize = 12.sp, maxLines = 1)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    MiniHangUp(onHangUp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniHangUp(onHangUp: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(34.dp)
+            .background(Color(0xFFE5484D), CircleShape)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onHangUp,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Rounded.CallEnd, "Akhiri", tint = Color.White, modifier = Modifier.size(18.dp))
     }
 }
 
@@ -435,8 +739,6 @@ private fun VideoRenderer(
     modifier: Modifier = Modifier,
     mirror: Boolean = false,
 ) {
-    // Keyed on the track so a new track builds a fresh renderer instead of
-    // leaking the old one into the new stream.
     androidx.compose.runtime.key(track) {
         AndroidView(
             modifier = modifier,
@@ -468,7 +770,6 @@ private fun OngoingControls(
     onSwitchCamera: () -> Unit,
     onHangUp: () -> Unit,
 ) {
-    // A single frosted dock keeps the controls grouped and readable over video.
     Row(
         modifier = Modifier
             .background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(44.dp))
@@ -490,11 +791,7 @@ private fun OngoingControls(
                 active = !CallEngine.cameraEnabled,
                 onClick = onToggleCamera,
             )
-            CallControl(
-                icon = Icons.Rounded.Cameraswitch,
-                description = "Balik kamera",
-                onClick = onSwitchCamera,
-            )
+            CallControl(icon = Icons.Rounded.Cameraswitch, description = "Balik kamera", onClick = onSwitchCamera)
         } else {
             CallControl(
                 icon = if (CallEngine.speakerOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff,
@@ -503,16 +800,11 @@ private fun OngoingControls(
                 onClick = onToggleSpeaker,
             )
         }
-        // End call sits in the same dock, tinted red so it can't be mistaken.
         Box(
             modifier = Modifier
                 .size(58.dp)
                 .background(Color(0xFFE5484D), CircleShape)
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                    onClick = onHangUp,
-                ),
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onHangUp),
             contentAlignment = Alignment.Center,
         ) {
             Icon(Icons.Rounded.CallEnd, "Akhiri", tint = Color.White, modifier = Modifier.size(26.dp))
@@ -520,7 +812,6 @@ private fun OngoingControls(
     }
 }
 
-/** Compact "in call" header shown over live video. */
 @Composable
 private fun CallHeaderPill(name: String, subtitle: String) {
     Row(
@@ -530,20 +821,9 @@ private fun CallHeaderPill(name: String, subtitle: String) {
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(7.dp)
-                .background(Color(0xFF2FB463), CircleShape),
-        )
+        Box(modifier = Modifier.size(7.dp).background(Color(0xFF2FB463), CircleShape))
         Spacer(Modifier.width(8.dp))
-        Text(
-            text = name,
-            color = Color.White,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Text(name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Spacer(Modifier.width(8.dp))
         Text("·", color = Color.White.copy(alpha = 0.5f), fontSize = 14.sp)
         Spacer(Modifier.width(8.dp))
@@ -552,22 +832,14 @@ private fun CallHeaderPill(name: String, subtitle: String) {
 }
 
 @Composable
-private fun IncomingControls(
-    video: Boolean,
-    onAccept: () -> Unit,
-    onDecline: () -> Unit,
-) {
+private fun IncomingControls(video: Boolean, onAccept: () -> Unit, onDecline: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            RoundActionButton(
-                icon = Icons.Rounded.CallEnd,
-                background = Color(0xFFE5484D),
-                onClick = onDecline,
-            )
+            RoundActionButton(icon = Icons.Rounded.CallEnd, background = Color(0xFFE5484D), onClick = onDecline)
             Spacer(Modifier.height(8.dp))
             Text("Tolak", color = NexusTextSecondary, fontSize = 13.sp)
         }
@@ -584,24 +856,12 @@ private fun IncomingControls(
 }
 
 @Composable
-private fun CallControl(
-    icon: ImageVector,
-    description: String,
-    active: Boolean = false,
-    onClick: () -> Unit,
-) {
+private fun CallControl(icon: ImageVector, description: String, active: Boolean = false, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .size(58.dp)
-            .background(
-                if (active) Color.White else Color.White.copy(alpha = 0.14f),
-                CircleShape,
-            )
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = onClick,
-            ),
+            .background(if (active) Color.White else Color.White.copy(alpha = 0.14f), CircleShape)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
@@ -614,20 +874,12 @@ private fun CallControl(
 }
 
 @Composable
-private fun RoundActionButton(
-    icon: ImageVector,
-    background: Color,
-    onClick: () -> Unit,
-) {
+private fun RoundActionButton(icon: ImageVector, background: Color, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .size(64.dp)
             .background(background, CircleShape)
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = onClick,
-            ),
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, null, tint = Color.White, modifier = Modifier.size(28.dp))
@@ -645,16 +897,10 @@ private fun PulsingAvatar(initial: String, pulsing: Boolean) {
     )
     Box(contentAlignment = Alignment.Center) {
         if (pulsing) {
-            Box(
-                modifier = Modifier
-                    .size((132 * scale).dp)
-                    .background(NexusAccent.copy(alpha = 0.12f), CircleShape),
-            )
+            Box(modifier = Modifier.size((132 * scale).dp).background(NexusAccent.copy(alpha = 0.12f), CircleShape))
         }
         Box(
-            modifier = Modifier
-                .size(120.dp)
-                .background(Brush.verticalGradient(callAvatarGradient), CircleShape),
+            modifier = Modifier.size(120.dp).background(Brush.verticalGradient(callAvatarGradient), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             Text(initial, color = Color.White, fontSize = 46.sp, fontWeight = FontWeight.SemiBold)

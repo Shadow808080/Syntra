@@ -40,7 +40,7 @@ object AppTheme {
     private const val PREFS = "syntra_settings"
     private const val KEY = "theme_choice"
 
-    var current by mutableStateOf(Choice.DARK)
+    var current by mutableStateOf(Choice.MIDNIGHT)
         private set
 
     fun paletteOf(choice: Choice): Palette = when (choice) {
@@ -133,7 +133,8 @@ object AppTheme {
     /** Reads the saved choice and paints it. Call once at start-up. */
     fun load(context: Context) {
         val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
-        val choice = Choice.entries.firstOrNull { it.name == name } ?: Choice.DARK
+        // Default is Midnight (pure-black OLED) when the user hasn't picked a theme.
+        val choice = Choice.entries.firstOrNull { it.name == name } ?: Choice.MIDNIGHT
         apply(choice)
     }
 

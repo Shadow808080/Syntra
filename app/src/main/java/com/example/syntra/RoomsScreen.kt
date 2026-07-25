@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -204,13 +205,16 @@ fun RoomsScreen(
         }
     }
 
-    // Live list. The server pushes room.ended/participants (handled below), but has
-    // no "room created" event — so while this tab is on screen we re-sync quietly
-    // to make new rooms appear on their own, without the user pulling to refresh.
+    // Live list. The backend broadcasts room.created to the global rooms:all feed;
+    // subscribing to it makes a friend's new room appear on its own, instantly. The
+    // slow poll below stays only as a safety net for anything missed off-socket.
+    LaunchedEffect(Unit) {
+        if (ApiConfig.ENABLED) SyntraClient.subscribe(listOf("rooms:all"))
+    }
     LaunchedEffect(visible, openedRoom) {
         if (!ApiConfig.ENABLED || !visible || openedRoom != null) return@LaunchedEffect
         while (true) {
-            delay(8000)
+            delay(15000)
             syncQuietly()
         }
     }
@@ -222,6 +226,12 @@ fun RoomsScreen(
                 // Host closed it: drop the card immediately.
                 allRooms.removeAll { it.id == roomId }
                 roomFaces.remove(roomId)
+            }
+
+            override fun onRoomCreated(roomId: String) {
+                // A new public room went live — pull it in right away instead of
+                // waiting for the poll (this is the "had to refresh" fix).
+                scope.launch { syncQuietly() }
             }
 
             override fun onRoomParticipants(roomId: String, participants: List<NetRoomParticipant>) {
@@ -299,7 +309,8 @@ fun RoomsScreen(
             }
         }
 
-        // Floating "create room" button
+        // Floating "create room" button — round, with a mic icon (its function:
+        // start a voice room), distinct from the home story button.
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
@@ -307,7 +318,7 @@ fun RoomsScreen(
                 .size(56.dp)
                 .background(
                     brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
-                    shape = RoundedCornerShape(18.dp),
+                    shape = CircleShape,
                 )
                 .clickable(
                     indication = null,
@@ -324,8 +335,8 @@ fun RoomsScreen(
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = Icons.Filled.Add,
-                contentDescription = "New room",
+                imageVector = Icons.Filled.Mic,
+                contentDescription = "Buat voice room",
                 tint = Color.White,
                 modifier = Modifier.size(26.dp),
             )
@@ -493,10 +504,16 @@ private fun RoomsHeader() {
         modifier = Modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(SyntraHeaderPadding),
+            .padding(start = 20.dp, end = 16.dp, top = 20.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        SyntraTitle()
+        // Plain page title — no wordmark.
+        Text(
+            "Rooms",
+            color = NexusTextPrimary,
+            fontSize = 26.sp,
+            fontWeight = FontWeight.ExtraBold,
+        )
         Spacer(Modifier.weight(1f))
         Icon(Icons.Filled.Search, "Search", tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
         Spacer(Modifier.width(18.dp))
@@ -510,21 +527,15 @@ private fun RoomsHeader() {
 
 @Composable
 private fun HubTitle() {
-    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
-        Text(
-            text = "Voice Hub",
-            color = NexusTextPrimary,
-            fontSize = 30.sp,
-            fontWeight = FontWeight.ExtraBold,
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = "Join real-time conversations with experts and creators across the globe.",
-            color = NexusAccentSoft,
-            fontSize = 14.sp,
-            lineHeight = 20.sp,
-        )
-    }
+    // The page title lives in the app bar now; this is just a one-line subtitle so
+    // the header doesn't double up with a second big heading.
+    Text(
+        text = "Ngobrol suara real-time — buat atau gabung room siapa saja.",
+        color = NexusTextSecondary,
+        fontSize = 13.sp,
+        lineHeight = 19.sp,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 4.dp),
+    )
 }
 
 // ---------------------------------------------------------------------------

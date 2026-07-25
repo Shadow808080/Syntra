@@ -1,8 +1,11 @@
 package com.example.syntra.net
 
 import android.content.Context
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.os.Build
 import io.livekit.android.LiveKit
+import io.livekit.android.events.collect
 import io.livekit.android.room.Room
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,13 +48,29 @@ object VoiceEngine {
     suspend fun connect(context: Context, url: String, token: String) {
         disconnect()
         val r = LiveKit.create(appContext = context.applicationContext)
+
+        // Route audio BEFORE connecting so the very first remote frames play out of
+        // the loudspeaker instead of the (near-silent) earpiece.
+        audio = (context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.apply {
+            mode = AudioManager.MODE_IN_COMMUNICATION
+        }
+        setLoudspeaker(true)
+
         r.connect(url, token)
         room = r
-        // Sample every participant's audio level a few times a frame's worth apart.
-        // LiveKit keeps these updated internally; polling turns them into a smooth,
-        // responsive signal for the UI. Identity == user's UUID (token `sub`).
+
         val s = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         scope = s
+
+        // Collect room events. Remote audio is auto-subscribed and auto-played, but
+        // collecting events keeps the session healthy and lets us react to speakers
+        // joining/leaving immediately instead of only on the next poll tick.
+        s.launch {
+            runCatching { r.events.collect { /* keep the event stream flowing */ } }
+        }
+
+        // Sample every participant's audio level ~12×/sec into a smooth UI signal.
+        // Identity == user's UUID (token `sub`).
         s.launch {
             while (isActive) {
                 val rm = room
@@ -68,17 +87,29 @@ object VoiceEngine {
                 delay(80)
             }
         }
-        audio = (context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.apply {
-            // A voice room routed to the earpiece sounds broken — it is barely audible
-            // unless the phone is against your ear. Default to the loudspeaker.
-            mode = AudioManager.MODE_IN_COMMUNICATION
-            isSpeakerphoneOn = true
-        }
     }
 
-    /** Routes audio to the loudspeaker or the earpiece. */
+    /**
+     * Routes audio to the loudspeaker or the earpiece.
+     *
+     * On Android 12+ `isSpeakerphoneOn` is deprecated and frequently a no-op — the
+     * audio then plays through the (near-silent) earpiece and the room sounds
+     * "broken / no sound". Use the modern communication-device API there, and fall
+     * back to the old flag only on older releases.
+     */
     fun setLoudspeaker(on: Boolean) {
-        audio?.isSpeakerphoneOn = on
+        val am = audio ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching {
+                val target = if (on) AudioDeviceInfo.TYPE_BUILTIN_SPEAKER else AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                val device = am.availableCommunicationDevices.firstOrNull { it.type == target }
+                if (device != null) am.setCommunicationDevice(device)
+                else @Suppress("DEPRECATION") { am.isSpeakerphoneOn = on }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = on
+        }
     }
 
     /** [level] 0..1 mapped onto the voice-call stream. */
@@ -100,6 +131,9 @@ object VoiceEngine {
         scope = null
         _audioLevels.value = emptyMap()
         runCatching { room?.disconnect() }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audio?.clearCommunicationDevice()
+        }
         runCatching { audio?.mode = AudioManager.MODE_NORMAL }
         room = null
         audio = null

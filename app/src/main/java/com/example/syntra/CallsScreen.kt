@@ -16,26 +16,37 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallMissed
 import androidx.compose.material.icons.automirrored.filled.CallReceived
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -45,10 +56,14 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -141,6 +156,7 @@ object CallLog {
 // Screen
 // ---------------------------------------------------------------------------
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CallsScreen(
     modifier: Modifier = Modifier,
@@ -155,12 +171,14 @@ fun CallsScreen(
     // People you could call, taken from the real conversation list.
     val contacts = remember { mutableStateListOf<Pair<String, String>>() }
     var filter by remember { mutableStateOf(0) } // 0 = semua, 1 = tak terjawab
-    // Non-null while a full-screen call is up: (name, conversationId, peerId, video).
-    var activeCall by remember { mutableStateOf<CallTarget?>(null) }
+    var searching by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var showNewCall by remember { mutableStateOf(false) }
 
     // A call placed or received anywhere in the app appends to the log; re-read it
-    // whenever this tab comes back so the history is always current.
-    LaunchedEffect(visible) {
+    // whenever this tab comes back — or the moment a call finishes — so the history
+    // is always current without a manual refresh.
+    LaunchedEffect(visible, CallController.isBusy) {
         if (visible) {
             val fresh = CallLog.all(context)
             if (fresh.map { it.id } != history.map { it.id }) {
@@ -188,18 +206,25 @@ fun CallsScreen(
             Toast.makeText(context, "Tidak bisa memulai panggilan.", Toast.LENGTH_SHORT).show()
             return
         }
-        // Resolve (or create) the direct conversation, then open the call screen.
+        if (CallController.isBusy) {
+            Toast.makeText(context, "Masih ada panggilan berlangsung.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Resolve (or create) the direct conversation, then hand the call to the
+        // app-root CallHost (which floats over every tab).
         scope.launch {
             val convId = runCatching { SyntraClient.createDirect(peerId) }.getOrNull()
             if (convId == null) {
                 Toast.makeText(context, "Gagal memulai panggilan.", Toast.LENGTH_SHORT).show()
             } else {
-                activeCall = CallTarget(name, convId, peerId, video)
+                CallController.startOutgoing(convId, name, peerId, video)
             }
         }
     }
 
-    val shown = if (filter == 1) history.filter { it.direction == CallDirection.MISSED } else history
+    val byFilter = if (filter == 1) history.filter { it.direction == CallDirection.MISSED } else history
+    val shown = if (query.isBlank()) byFilter
+    else byFilter.filter { it.peerName.contains(query, ignoreCase = true) }
 
     Box(
         modifier = modifier
@@ -207,167 +232,253 @@ fun CallsScreen(
             .background(NexusBackground),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Header
+            // App bar — plain page title, no wordmark. Search collapses in place.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(SyntraHeaderPadding),
+                    .padding(start = 20.dp, end = 14.dp, top = 20.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                SyntraTitle()
-                Spacer(Modifier.weight(1f))
-                Icon(
-                    Icons.Filled.Search, "Cari",
-                    tint = NexusTextPrimary, modifier = Modifier.size(22.dp),
-                )
+                if (searching) {
+                    CallIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Tutup cari") {
+                        searching = false; query = ""
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Box(modifier = Modifier.weight(1f)) {
+                        if (query.isEmpty()) {
+                            Text("Cari nama…", color = NexusTextSecondary, fontSize = 16.sp)
+                        }
+                        val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+                        LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+                        BasicTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            singleLine = true,
+                            textStyle = TextStyle(color = NexusTextPrimary, fontSize = 16.sp),
+                            cursorBrush = SolidColor(NexusAccentSoft),
+                            modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                        )
+                    }
+                    if (query.isNotEmpty()) {
+                        CallIconButton(Icons.Filled.Close, "Bersihkan") { query = "" }
+                    }
+                } else {
+                    Text(
+                        "Panggilan",
+                        color = NexusTextPrimary,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    CallIconButton(Icons.Filled.Search, "Cari") { searching = true }
+                }
+            }
+
+            // Segmented filter — quiet pill, not a gradient.
+            Row(
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf("Semua", "Tak terjawab").forEachIndexed { i, label ->
+                    val active = filter == i
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(if (active) NexusAccent.copy(alpha = 0.16f) else NexusSurface)
+                            .border(1.dp, if (active) NexusAccent.copy(alpha = 0.45f) else NexusStroke, RoundedCornerShape(50))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { filter = i }
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (active) NexusTextPrimary else NexusTextSecondary,
+                            fontSize = 13.sp,
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                        )
+                    }
+                }
             }
 
             LazyColumn(
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(bottom = 24.dp),
+                contentPadding = PaddingValues(top = 6.dp, bottom = 96.dp),
             ) {
-                item {
-                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
-                        Text(
-                            "Panggilan",
-                            color = NexusTextPrimary,
-                            fontSize = 30.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            "Riwayat panggilan suara dan video kamu.",
-                            color = NexusAccentSoft,
-                            fontSize = 14.sp,
-                        )
-                    }
-                }
-
-                item {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        listOf("Semua", "Tak terjawab").forEachIndexed { i, label ->
-                            val active = filter == i
-                            Box(
-                                modifier = Modifier
-                                    .background(
-                                        brush = if (active) {
-                                            Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent))
-                                        } else {
-                                            Brush.horizontalGradient(listOf(NexusSurface, NexusSurface))
-                                        },
-                                        shape = RoundedCornerShape(50),
-                                    )
-                                    .border(
-                                        width = if (active) 0.dp else 1.dp,
-                                        color = if (active) Color.Transparent else NexusStroke,
-                                        shape = RoundedCornerShape(50),
-                                    )
-                                    .clickable(
-                                        indication = null,
-                                        interactionSource = remember { MutableInteractionSource() },
-                                    ) { filter = i }
-                                    .padding(horizontal = 18.dp, vertical = 9.dp),
-                            ) {
-                                Text(
-                                    text = label,
-                                    color = if (active) Color.White else NexusTextSecondary,
-                                    fontSize = 13.sp,
-                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-                                )
-                            }
-                        }
-                    }
-                }
-
                 if (shown.isEmpty()) {
-                    item { EmptyCalls(missedOnly = filter == 1) }
+                    item { EmptyCalls(missedOnly = filter == 1 && query.isBlank()) }
                 } else {
-                    item { SectionTitle("Terbaru") }
-                    itemsIndexed(shown) { _, entry ->
+                    items(shown, key = { it.id }) { entry ->
                         CallRow(
                             entry = entry,
                             onCall = { placeCall(entry.peerName, entry.peerId, false) },
                             onVideo = { placeCall(entry.peerName, entry.peerId, true) },
                         )
                     }
-                    item {
-                        Text(
-                            text = "Bersihkan riwayat",
-                            color = Color(0xFFFF5D5D),
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(
-                                    indication = null,
-                                    interactionSource = remember { MutableInteractionSource() },
-                                ) {
-                                    CallLog.clear(context)
-                                    history.clear()
-                                }
-                                .padding(vertical = 18.dp),
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                }
-
-                if (contacts.isNotEmpty()) {
-                    item { SectionTitle("Mulai panggilan") }
-                    itemsIndexed(contacts) { _, (name, id) ->
-                        ContactRow(
-                            name = name,
-                            onCall = { placeCall(name, id, false) },
-                            onVideo = { placeCall(name, id, true) },
-                        )
+                    if (query.isBlank()) {
+                        item {
+                            Text(
+                                text = "Bersihkan riwayat",
+                                color = Color(0xFFFF5D5D),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) {
+                                        CallLog.clear(context)
+                                        history.clear()
+                                    }
+                                    .padding(vertical = 20.dp),
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // Full-screen call overlay.
-        activeCall?.let { target ->
-            CallScreen(
-                peerName = target.name,
-                conversationId = target.conversationId,
-                video = target.video,
-                peerId = target.peerId,
-                onClose = {
-                    activeCall = null
-                    // The call screen logged the attempt; refresh the list.
-                    history.clear()
-                    history.addAll(CallLog.all(context))
-                },
+        // FAB: start a new call — opens a contact picker sheet (the "big app" flow),
+        // instead of a long inline contact list under the history.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(end = 20.dp, bottom = 20.dp)
+                .size(56.dp)
+                .background(
+                    Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
+                    CircleShape,
+                )
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { showNewCall = true },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Filled.Add, "Panggilan baru", tint = Color.White, modifier = Modifier.size(28.dp))
+        }
+
+        if (showNewCall) {
+            NewCallSheet(
+                contacts = contacts,
+                onDismiss = { showNewCall = false },
+                onCall = { name, id -> showNewCall = false; placeCall(name, id, false) },
+                onVideo = { name, id -> showNewCall = false; placeCall(name, id, true) },
             )
+        }
+
+        // The call itself is rendered by CallHost at the app root (floats over all
+        // tabs, survives navigation, minimizes to a draggable window).
+    }
+}
+
+/**
+ * Contact picker for starting a new call — a bottom sheet with search + your direct
+ * contacts, each offering a voice and a video button. This is the "new call" entry
+ * point, keeping the main screen focused on history.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NewCallSheet(
+    contacts: List<Pair<String, String>>,
+    onDismiss: () -> Unit,
+    onCall: (String, String) -> Unit,
+    onVideo: (String, String) -> Unit,
+) {
+    var q by remember { mutableStateOf("") }
+    val filtered by remember {
+        derivedStateOf {
+            if (q.isBlank()) contacts else contacts.filter { it.first.contains(q, ignoreCase = true) }
+        }
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = NexusSurface,
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text(
+                "Panggilan baru",
+                color = NexusTextPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp),
+            )
+            // Search field.
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = 20.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(NexusBackground)
+                    .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Search, null, tint = NexusTextSecondary, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(10.dp))
+                Box(modifier = Modifier.weight(1f)) {
+                    if (q.isEmpty()) Text("Cari kontak…", color = NexusTextSecondary, fontSize = 14.sp)
+                    BasicTextField(
+                        value = q,
+                        onValueChange = { q = it },
+                        singleLine = true,
+                        textStyle = TextStyle(color = NexusTextPrimary, fontSize = 14.sp),
+                        cursorBrush = SolidColor(NexusAccentSoft),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            if (filtered.isEmpty()) {
+                Text(
+                    if (contacts.isEmpty()) "Belum ada kontak. Mulai obrolan dulu untuk bisa menelepon."
+                    else "Tidak ada kontak cocok.",
+                    color = NexusTextSecondary,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 28.dp),
+                )
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                    items(filtered, key = { it.second }) { (name, id) ->
+                        ContactRow(
+                            name = name,
+                            onCall = { onCall(name, id) },
+                            onVideo = { onVideo(name, id) },
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
-/** A call the user is placing from this screen. */
-private data class CallTarget(
-    val name: String,
-    val conversationId: String,
-    val peerId: String,
-    val video: Boolean,
-)
+@Composable
+private fun CallIconButton(icon: ImageVector, cd: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(42.dp)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, cd, tint = NexusTextPrimary, modifier = Modifier.size(23.dp))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Pieces
 // ---------------------------------------------------------------------------
 
-@Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text = text,
-        color = NexusTextSecondary,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 6.dp),
-    )
-}
 
 private val callGradients = listOf(
     listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5)),
@@ -512,8 +623,8 @@ private fun EmptyCalls(missedOnly: Boolean) {
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Riwayat panggilan akan muncul di sini. Panggilan sendiri belum " +
-                "bisa tersambung — server belum menyediakan fiturnya.",
+            text = "Riwayat panggilan suara & video kamu akan muncul di sini. Ketuk " +
+                "tombol + untuk memulai panggilan baru.",
             color = NexusTextSecondary,
             fontSize = 13.sp,
             lineHeight = 19.sp,

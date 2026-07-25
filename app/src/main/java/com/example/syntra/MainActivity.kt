@@ -1,14 +1,26 @@
 package com.example.syntra
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
@@ -29,24 +41,81 @@ import kotlinx.coroutines.launch
 import com.example.syntra.ui.theme.AppTheme
 import com.example.syntra.ui.theme.SyntraTheme
 
+/**
+ * A pending "open this chat" request, set when the user taps a message notification.
+ * The chat tab observes it, jumps to the conversation, then clears it.
+ */
+object ChatNavRequest {
+    var conversationId by mutableStateOf<String?>(null)
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Paint the saved theme before the first frame so there is no flash.
         AppTheme.load(this)
-        enableEdgeToEdge()
+        applySystemBars()
+        handleNavIntent(intent)
         setContent {
             SyntraTheme {
+                // Re-apply whenever the user switches theme, so the Android system
+                // status/navigation bars follow the app palette (dark bars + light
+                // icons on Midnight/dark themes, light bars + dark icons on Light).
+                androidx.compose.runtime.LaunchedEffect(AppTheme.current) { applySystemBars() }
                 NexusApp()
             }
         }
     }
 
-    override fun onDestroy() {
-        // Close the realtime socket with the app; ChatScreen reopens it on start.
-        if (ApiConfig.ENABLED) SyntraClient.disconnect()
-        super.onDestroy()
+    /** Makes the system status & navigation bars match the current theme. */
+    private fun applySystemBars() {
+        val palette = AppTheme.paletteOf(AppTheme.current)
+        val dark = palette.isDark
+        val bg = palette.background.toArgb()
+        // Transparent bars over a themed window: icons flip to stay legible.
+        val style = if (dark) {
+            androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        } else {
+            androidx.activity.SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+        }
+        enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+        // Also colour the nav bar itself to the app background on APIs that show a
+        // solid bar, so a gesture pill / 3-button bar never flashes system white.
+        runCatching {
+            window.navigationBarColor = bg
+            window.statusBarColor = android.graphics.Color.TRANSPARENT
+        }
     }
+
+    override fun onStart() {
+        super.onStart()
+        // App is on screen → suppress message notifications (the user sees updates live).
+        com.example.syntra.net.AppForeground.isForeground = true
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // App went to the background → let the foreground service post notifications.
+        com.example.syntra.net.AppForeground.isForeground = false
+    }
+
+    // A notification tapped while the app is already running delivers a NEW intent
+    // here (activity is singleTop via the notification's flags) — route it too.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNavIntent(intent)
+    }
+
+    /** Pulls an "open this chat" request out of a notification intent, if present. */
+    private fun handleNavIntent(intent: Intent?) {
+        val cid = intent?.getStringExtra("open_conversation")
+        if (!cid.isNullOrBlank()) ChatNavRequest.conversationId = cid
+    }
+
+    // NOTE: we deliberately do NOT disconnect the socket in onDestroy anymore. The
+    // ChatConnectionService owns the connection so messages (and notifications) keep
+    // arriving while the app isn't on screen. The socket is closed on sign-out.
 }
 
 /**
@@ -61,9 +130,20 @@ private fun NexusApp() {
     // Set when the session was valid but the account no longer exists in the
     // database (deleted): the login screen shows this as the reason.
     var deletedNotice by remember { mutableStateOf<String?>(null) }
+    // The backend is unreachable (outage / maintenance). We show a maintenance
+    // notice instead of the login screen, because dumping a signed-in user onto
+    // login during an outage looks like they were logged out.
+    var serverDown by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val remembered = SessionStore.isSignedIn(context)
+        // Before anything else, is the server even up? If not, this is an outage,
+        // not a sign-in problem — go straight to the maintenance screen. (Dev
+        // builds with the backend disabled report reachable and skip this.)
+        if (ApiConfig.ENABLED && !SyntraClient.serverReachable()) {
+            serverDown = true
+            return@LaunchedEffect
+        }
         signedIn = when {
             !remembered -> false
             !ApiConfig.ENABLED -> true
@@ -120,13 +200,122 @@ private fun NexusApp() {
         }
     }
 
-    when (signedIn) {
-        null -> AuthSplash()
-        false -> AuthScreen(
+    // Ask for notification permission (Android 13+) so background chat notifications
+    // can actually show. Fire it once we're signed in.
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* granted or not — the service still runs; notifications just no-op if denied */ }
+
+    // When signed in: start the background chat connection service (keeps the socket
+    // alive for notifications, no Firebase), request notification permission, and
+    // offer a battery-optimisation exemption so aggressive OEMs don't kill it.
+    LaunchedEffect(signedIn) {
+        if (signedIn == true && ApiConfig.ENABLED) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, android.Manifest.permission.POST_NOTIFICATIONS,
+                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+            com.example.syntra.net.ChatConnectionService.start(context)
+        }
+    }
+
+    when {
+        serverDown -> MaintenanceScreen(
+            onAgree = { (context as? android.app.Activity)?.finishAndRemoveTask() },
+        )
+        signedIn == null -> AuthSplash()
+        signedIn == false -> AuthScreen(
             onAuthenticated = { signedIn = true; deletedNotice = null },
             notice = deletedNotice,
         )
-        true -> MainTabs(onSignOut = { signedIn = false })
+        else -> MainTabs(onSignOut = {
+            // Sign out: stop the background service and close the socket.
+            com.example.syntra.net.ChatConnectionService.stop(context)
+            if (ApiConfig.ENABLED) SyntraClient.disconnect()
+            signedIn = false
+        })
+    }
+}
+
+/**
+ * Shown when the backend can't be reached at launch. Deliberately a dead end: the
+ * app needs the server for everything, so instead of pretending to work offline we
+ * ask the user to wait — and the only action, "Setuju", closes the app.
+ */
+@Composable
+private fun MaintenanceScreen(onAgree: () -> Unit) {
+    androidx.activity.compose.BackHandler(onBack = onAgree)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(com.example.syntra.ui.theme.NexusBackground),
+        contentAlignment = androidx.compose.ui.Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 36.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(96.dp)
+                    .background(
+                        com.example.syntra.ui.theme.NexusAccent.copy(alpha = 0.14f),
+                        androidx.compose.foundation.shape.CircleShape,
+                    ),
+                contentAlignment = androidx.compose.ui.Alignment.Center,
+            ) {
+                androidx.compose.material3.Icon(
+                    imageVector = Icons.Filled.Build,
+                    contentDescription = null,
+                    tint = com.example.syntra.ui.theme.NexusAccentSoft,
+                    modifier = Modifier.size(44.dp),
+                )
+            }
+            androidx.compose.foundation.layout.Spacer(Modifier.height(24.dp))
+            androidx.compose.material3.Text(
+                text = "Sedang Maintenance",
+                color = com.example.syntra.ui.theme.NexusTextPrimary,
+                fontSize = 22.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+            )
+            androidx.compose.foundation.layout.Spacer(Modifier.height(10.dp))
+            androidx.compose.material3.Text(
+                text = "Aplikasi sedang dalam perbaikan. Mohon bersabar, kami akan segera kembali.",
+                color = com.example.syntra.ui.theme.NexusTextSecondary,
+                fontSize = 14.sp,
+                lineHeight = 21.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            androidx.compose.foundation.layout.Spacer(Modifier.height(32.dp))
+            Box(
+                modifier = Modifier
+                    .background(
+                        androidx.compose.ui.graphics.Brush.horizontalGradient(
+                            listOf(
+                                com.example.syntra.ui.theme.NexusAccentSoft,
+                                com.example.syntra.ui.theme.NexusAccent,
+                            ),
+                        ),
+                        androidx.compose.foundation.shape.RoundedCornerShape(50),
+                    )
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        onClick = onAgree,
+                    )
+                    .padding(horizontal = 44.dp, vertical = 13.dp),
+            ) {
+                androidx.compose.material3.Text(
+                    text = "Setuju",
+                    color = androidx.compose.ui.graphics.Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                )
+            }
+        }
     }
 }
 
@@ -142,38 +331,48 @@ private fun MainTabs(onSignOut: () -> Unit) {
     // pager so its own gestures don't accidentally flip to the next tab.
     var chatOverlay by remember { mutableStateOf(false) }
     var roomOverlay by remember { mutableStateOf(false) }
-    // A call ringing on this device (I'm the receiver), null when idle.
-    var incoming by remember { mutableStateOf<IncomingCall?>(null) }
+    var shortsOverlay by remember { mutableStateOf(false) }
+    // True while a full-screen call is up (not minimized) — used to pause Shorts.
+    val callBusy = CallController.isBusy
 
     fun goTo(tab: NexusTab) {
         scope.launch { pager.animateScrollToPage(tabOrder.indexOf(tab)) }
     }
 
-    // Listen for incoming calls anywhere in the app and raise the ringing screen.
+    // A tapped message notification asks to open a specific chat: jump to the CHAT
+    // tab so ChatScreen (which watches the same request) can surface that chat.
+    LaunchedEffect(ChatNavRequest.conversationId) {
+        if (ChatNavRequest.conversationId != null) goTo(NexusTab.CHAT)
+    }
+
+    // Listen for incoming calls anywhere in the app and hand them to CallController,
+    // which the app-root CallHost renders (as a full screen, then a floating window).
     DisposableEffect(Unit) {
         if (!ApiConfig.ENABLED) return@DisposableEffect onDispose {}
         val listener = object : com.example.syntra.net.SocketListener {
             override fun onCallIncoming(conversationId: String) {
+                // Already in/among a call on this device — ignore (a re-sent event,
+                // or a call in another chat while one is active).
+                if (CallController.isBusy) return
                 scope.launch {
                     val call = SyntraClient.getActiveCall(conversationId) ?: return@launch
-                    // I started this call — don't ring my own device.
                     if (call.initiatorId == SyntraClient.myUserId) return@launch
+                    if (call.status.isNotBlank() && call.status != "ringing") return@launch
+                    if (CallController.isBusy) return@launch
                     val conv = runCatching { SyntraClient.getConversations() }
                         .getOrNull()?.firstOrNull { it.id == conversationId }
-                    incoming = IncomingCall(
+                    CallController.incoming(
                         conversationId = conversationId,
-                        callId = call.id,
-                        video = call.kind == "video",
                         peerName = conv?.title.orEmpty().ifBlank { "Panggilan masuk" },
                         peerId = conv?.counterpartId.orEmpty(),
+                        video = call.kind == "video",
+                        callId = call.id,
                     )
                 }
             }
 
-            override fun onCallEnded(reason: String) {
-                // Caller hung up before I answered — drop the ringing screen.
-                incoming = null
-            }
+            // call.ended teardown is owned by CallHost (shows "Panggilan berakhir"
+            // briefly, then clears the call), so nothing to do here.
         }
         SyntraClient.addListener(listener)
         onDispose { SyntraClient.removeListener(listener) }
@@ -182,7 +381,7 @@ private fun MainTabs(onSignOut: () -> Unit) {
     // One fixed bottom bar below the pager — it never slides with the pages, only
     // its highlight follows. It hides when a full-screen overlay is up so chat
     // detail / story viewer / voice room can cover the whole screen.
-    val overlay = chatOverlay || roomOverlay
+    val overlay = chatOverlay || roomOverlay || shortsOverlay
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(
@@ -202,7 +401,8 @@ private fun MainTabs(onSignOut: () -> Unit) {
                     modifier = Modifier.fillMaxSize(),
                     // Kept alive off-screen by the pager, so it must stop its video
                     // (and audio) whenever it isn't the tab actually being shown.
-                    visible = tabOrder[pager.currentPage] == NexusTab.SHORTS && incoming == null,
+                    visible = tabOrder[pager.currentPage] == NexusTab.SHORTS && !callBusy,
+                    onOverlayChange = { shortsOverlay = it },
                 )
                     NexusTab.ROOMS -> RoomsScreen(
                         modifier = Modifier.fillMaxSize(),
@@ -223,26 +423,8 @@ private fun MainTabs(onSignOut: () -> Unit) {
             }
         }
 
-        // Incoming-call ringing screen, above everything.
-        incoming?.let { call ->
-            CallScreen(
-                peerName = call.peerName,
-                conversationId = call.conversationId,
-                video = call.video,
-                incoming = true,
-                incomingCallId = call.callId,
-                peerId = call.peerId,
-                onClose = { incoming = null },
-            )
-        }
+        // The call (incoming or outgoing) is rendered above everything by CallHost:
+        // full-screen, or a draggable floating window when minimized.
+        CallHost()
     }
 }
-
-/** A call ringing on this device that the user can answer or decline. */
-private data class IncomingCall(
-    val conversationId: String,
-    val callId: String,
-    val video: Boolean,
-    val peerName: String,
-    val peerId: String,
-)

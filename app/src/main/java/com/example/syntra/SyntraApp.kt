@@ -35,7 +35,10 @@ class SyntraApp : Application(), ImageLoaderFactory {
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("syntra_images"))
-                    .maxSizeBytes(192L * 1024 * 1024)
+                    // Generous: the more avatars/photos/thumbnails stay on disk, the
+                    // fewer repeat downloads — the same cached-egress win the video
+                    // cache gives, applied to images.
+                    .maxSizeBytes(512L * 1024 * 1024)
                     .build()
             }
             // Storage objects never change under a given URL, so short/absent

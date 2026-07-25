@@ -34,6 +34,11 @@ data class NetConversation(
      * `message.id <= this` means "already read" — no receipt table needed.
      */
     val counterpartLastReadId: String? = null,
+    /**
+     * Newest message that reached the other side's device (✓✓ grey), whether or
+     * not they've read it. Compared the same way as [counterpartLastReadId].
+     */
+    val counterpartLastDeliveredId: String? = null,
 )
 
 data class NetMessage(
