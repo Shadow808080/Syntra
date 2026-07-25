@@ -78,12 +78,21 @@ interface SocketListener {
     /** A new in-app notification arrived. */
     fun onNotification(kind: String) {}
 
-    /** A call started in one of my conversations — show the incoming/ongoing UI. */
-    fun onCallIncoming(conversationId: String) {}
-    /** The call I'm ringing was picked up. */
-    fun onCallAnswered(callId: String) {}
-    /** The call ended; [reason] is "declined" or "left". */
-    fun onCallEnded(reason: String) {}
+    /**
+     * A call started in one of my conversations — show the incoming/ongoing UI.
+     * The payload already carries everything needed to ring ([callId], [kind],
+     * [initiatorId]), so the UI doesn't have to round-trip GET .../call first —
+     * that extra fetch used to drop the call entirely when it raced or failed.
+     */
+    fun onCallIncoming(conversationId: String, callId: String, kind: String, initiatorId: String) {}
+    /** The call I'm ringing was picked up. [conversationId] scopes it to one call. */
+    fun onCallAnswered(callId: String, conversationId: String) {}
+    /**
+     * The call ended; [reason] is "declined" / "left" / "disconnected".
+     * [callId]/[conversationId] identify WHICH call, so a stray ended event from
+     * another chat can't tear down the call currently on screen.
+     */
+    fun onCallEnded(callId: String, conversationId: String, reason: String) {}
 }
 
 /**
@@ -1052,13 +1061,26 @@ object SyntraClient {
                     dispatch { it.onNotification(d.optString("type")) }
                 }
                 "call.incoming" -> (data as? JSONObject)?.let { d ->
-                    dispatch { it.onCallIncoming(d.optString("conversation_id")) }
+                    dispatch {
+                        it.onCallIncoming(
+                            d.optString("conversation_id"),
+                            d.optString("call_id"),
+                            d.optString("kind"),
+                            d.optString("initiator_id"),
+                        )
+                    }
                 }
                 "call.answered" -> (data as? JSONObject)?.let { d ->
-                    dispatch { it.onCallAnswered(d.optString("call_id")) }
+                    dispatch { it.onCallAnswered(d.optString("call_id"), d.optString("conversation_id")) }
                 }
                 "call.ended" -> (data as? JSONObject)?.let { d ->
-                    dispatch { it.onCallEnded(d.optString("reason")) }
+                    dispatch {
+                        it.onCallEnded(
+                            d.optString("call_id"),
+                            d.optString("conversation_id"),
+                            d.optString("reason"),
+                        )
+                    }
                 }
                 "room.message" -> (data as? JSONObject)?.let { d ->
                     val m = NetRoomMessage(

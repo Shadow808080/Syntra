@@ -372,11 +372,18 @@ private fun CallSession(d: CallDescriptor) {
     // Realtime call signalling: the far side answering, declining, or hanging up.
     DisposableEffect(Unit) {
         val listener = object : SocketListener {
-            override fun onCallEnded(reason: String) {
+            override fun onCallEnded(endedCallId: String, endedConversationId: String, reason: String) {
+                // Only react to THIS call. Events carry the conversation now, so a
+                // stray ended from another chat (or a late one from a previous call)
+                // can't tear down the call currently on screen. Match on conversation
+                // (always present) or the call id once we know it.
+                if (endedConversationId.isNotBlank() && endedConversationId != d.conversationId) return
+                if (endedCallId.isNotBlank() && callId.isNotBlank() && endedCallId != callId) return
                 statusLine = if (reason == "declined") "Panggilan ditolak" else "Panggilan berakhir"
                 phase = CallPhase.ENDED
             }
-            override fun onCallAnswered(answeredCallId: String) {
+            override fun onCallAnswered(answeredCallId: String, answeredConversationId: String) {
+                if (answeredConversationId.isNotBlank() && answeredConversationId != d.conversationId) return
                 if (!incoming && phase == CallPhase.RINGING) statusLine = "Menyambungkan…"
             }
         }

@@ -350,23 +350,38 @@ private fun MainTabs(onSignOut: () -> Unit) {
     DisposableEffect(Unit) {
         if (!ApiConfig.ENABLED) return@DisposableEffect onDispose {}
         val listener = object : com.example.syntra.net.SocketListener {
-            override fun onCallIncoming(conversationId: String) {
+            override fun onCallIncoming(conversationId: String, callId: String, kind: String, initiatorId: String) {
                 // Already in/among a call on this device — ignore (a re-sent event,
                 // or a call in another chat while one is active).
                 if (CallController.isBusy) return
+                // Never ring myself for a call I placed (the event fans out to the
+                // whole conversation, including the caller's own session).
+                if (initiatorId.isNotBlank() && initiatorId == SyntraClient.myUserId) return
                 scope.launch {
-                    val call = SyntraClient.getActiveCall(conversationId) ?: return@launch
-                    if (call.initiatorId == SyntraClient.myUserId) return@launch
-                    if (call.status.isNotBlank() && call.status != "ringing") return@launch
-                    if (CallController.isBusy) return@launch
+                    // Resolve the id + kind. The payload now carries them, so the
+                    // common path needs NO extra request (the old GET .../call could
+                    // race or fail and then the phone never rang). Fall back to the
+                    // fetch only if an older backend sent a bare event.
+                    var id = callId
+                    var isVideo = kind == "video"
+                    if (id.isBlank()) {
+                        val active = SyntraClient.getActiveCall(conversationId) ?: return@launch
+                        if (active.initiatorId == SyntraClient.myUserId) return@launch
+                        if (active.status.isNotBlank() && active.status != "ringing") return@launch
+                        id = active.id
+                        isVideo = active.kind == "video"
+                    }
+                    if (id.isBlank() || CallController.isBusy) return@launch
+                    // Name/avatar are a nicety — fetch best-effort, but ring even if
+                    // this fails, so an unopened chat still shows an incoming call.
                     val conv = runCatching { SyntraClient.getConversations() }
                         .getOrNull()?.firstOrNull { it.id == conversationId }
                     CallController.incoming(
                         conversationId = conversationId,
                         peerName = conv?.title.orEmpty().ifBlank { "Panggilan masuk" },
                         peerId = conv?.counterpartId.orEmpty(),
-                        video = call.kind == "video",
-                        callId = call.id,
+                        video = isVideo,
+                        callId = id,
                     )
                 }
             }
