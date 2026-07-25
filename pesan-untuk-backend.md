@@ -249,3 +249,27 @@ Endpoint `GET /reels`, `POST /reels {media_id, caption}`,
   (`unknown field`). Sementara app mengirim URL media sebagai body teks lalu
   merendernya sebagai foto/suara. Kalau nanti pesan mendukung `media_id` +
   `media_url` + `duration_ms`, app akan beralih ke sana.
+
+---
+
+## 🆕 Permintaan baru (26 Juli 2026) — fitur chat yang kini masih lokal
+
+App sudah menambahkan beberapa fitur percakapan, tapi dua di antaranya baru bisa
+**lokal per-perangkat** karena belum ada dukungan server. Kalau backend menyediakan
+endpoint-nya, app akan langsung beralih ke versi lintas-perangkat.
+
+- **Sematkan pesan (pin) lintas-perangkat.** Sekarang app menyimpan 1 pesan
+  tersemat per percakapan **di perangkat saja** (`PinStore`). Idealnya ada:
+  `PUT /conversations/{id}/pin {message_id}` + `DELETE /conversations/{id}/pin`,
+  field `pinned_message_id` di objek percakapan, dan siaran WS
+  `conversation.pinned {conversation_id, message_id|null}`. **Kemungkinan butuh
+  migrasi SQL** (kolom `pinned_message_id` di tabel conversations).
+- **Foto sekali lihat (view once).** App menandai foto view-once lewat penanda di
+  body (`VIEWONCE`+`0x01`+caption) dan mengunci "Dibuka" **secara lokal**
+  (`ViewOnceStore`). Untuk benar-benar aman (tidak bisa dibuka ulang / diselamatkan
+  oleh perangkat lain), idealnya ada flag pesan `view_once: bool` + status
+  `viewed_at` per penerima, dan server menolak `GET` media setelah dibuka.
+  **Kemungkinan butuh migrasi SQL** (kolom/tabel status view-once).
+- **Edit pesan** — app sudah pakai `PATCH /messages/{id}` + siaran `message.updated`
+  (terima kasih, sudah jalan). Batas 10 detik diberlakukan di sisi app; kalau server
+  mau menegakkan juga, silakan tolak edit yang lewat dari mis. 15 detik.

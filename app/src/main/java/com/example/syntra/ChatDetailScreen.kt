@@ -96,6 +96,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
@@ -127,6 +128,7 @@ import com.example.syntra.net.SocketListener
 import com.example.syntra.net.MessageCache
 import com.example.syntra.net.PinStore
 import com.example.syntra.net.Translate
+import com.example.syntra.net.ViewOnceStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusAccent
@@ -137,8 +139,10 @@ import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 // ---------------------------------------------------------------------------
@@ -164,6 +168,8 @@ private data class Message(
     val isDeleted: Boolean = false,
     /** True once the text was edited — shows a small "diedit" marker. */
     val isEdited: Boolean = false,
+    /** True for a "sekali lihat" (view-once) photo — opens once, then it's gone. */
+    val viewOnce: Boolean = false,
     /** Set when this is a reply to a story — a small blurred thumbnail is shown. */
     val storyReplyUrl: String? = null,
     /** Id of the message this one replies to (WhatsApp-style quote), if any. */
@@ -172,6 +178,8 @@ private data class Message(
 
 /** Marker prefix for a story reply: "STORYREPLY<0x1>url<0x1>text". */
 private const val STORY_REPLY_MARKER = "STORYREPLY"
+/** Body prefix marking a view-once ("sekali lihat") photo: "VIEWONCE<0x1>caption". */
+private const val VIEW_ONCE_MARKER = "VIEWONCE"
 private val STORY_REPLY_SEP = ''
 
 /** Marks a message that only exists on this device until the server confirms it. */
@@ -210,6 +218,13 @@ private fun NetMessage.toUi(): Message {
         }
     }
 
+    // View-once photo: "VIEWONCE<sep>caption" → mark as sekali-lihat, strip marker.
+    var viewOnce = false
+    if (!isDeleted && displayBody.startsWith(VIEW_ONCE_MARKER + STORY_REPLY_SEP)) {
+        viewOnce = true
+        displayBody = displayBody.removePrefix(VIEW_ONCE_MARKER + STORY_REPLY_SEP)
+    }
+
     return Message(
         id = id,
         text = when {
@@ -223,6 +238,7 @@ private fun NetMessage.toUi(): Message {
         media = if (isDeleted) null else attachment ?: legacyUrl,
         isDeleted = isDeleted,
         isEdited = editedAt != null,
+        viewOnce = viewOnce,
         storyReplyUrl = storyUrl,
         replyToId = replyToId,
     )
@@ -317,6 +333,11 @@ fun ChatDetailScreen(
     var pinnedId by remember(conversation) { mutableStateOf(PinStore.get(context, conversation.id)) }
     // Per-message translations the user asked for (message id -> translated text).
     val translations = remember(conversation) { mutableStateMapOf<String, String>() }
+    // A picked/captured photo waiting in the edit-before-send screen. Non-null shows
+    // that editor; sending clears it.
+    var pendingImage by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    // View-once photos already opened on this device (locked as "Dibuka" afterwards).
+    val viewOnceOpened = remember(conversation) { mutableStateListOf<String>() }
     // Whether we've told the peer we're typing (so we don't re-send start per key),
     // and a counter bumped on each keystroke to re-arm the stop-debounce.
     var typingActive by remember(conversation) { mutableStateOf(false) }
@@ -712,7 +733,15 @@ fun ChatDetailScreen(
      * so a link is the only way to deliver a photo or voice note today; the bubble
      * renderer turns it back into a picture or a player.
      */
-    fun sendMedia(kind: String, ext: String, mime: String, bytes: ByteArray, durationMs: Long = 0) {
+    fun sendMedia(
+        kind: String,
+        ext: String,
+        mime: String,
+        bytes: ByteArray,
+        durationMs: Long = 0,
+        caption: String = "",
+        viewOnce: Boolean = false,
+    ) {
         if (!ApiConfig.ENABLED) {
             Toast.makeText(context, "Backend belum dikonfigurasi.", Toast.LENGTH_SHORT).show()
             return
@@ -732,16 +761,19 @@ fun ChatDetailScreen(
             ).show()
             return
         }
+        // Body carries the caption; a view-once photo is prefixed with a marker so
+        // the peer's app knows to show it as "sekali lihat".
+        val body = if (viewOnce) VIEW_ONCE_MARKER + STORY_REPLY_SEP + caption else caption
         uploading = true
         scope.launch {
             runCatching {
                 val (mediaId, url) = SyntraClient.uploadMediaFull(kind, ext, mime, bytes, durationMs = durationMs)
                 // Optimistic bubble shows the uploaded file straight away…
                 val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
-                messages.add(Message(ref, "", fromMe = true, time = "now", media = url.ifBlank { null }))
+                messages.add(Message(ref, caption, fromMe = true, time = "now", media = url.ifBlank { null }, viewOnce = viewOnce))
                 // …while the message itself carries the media *id*, so the body
                 // stays empty instead of leaking a URL into the conversation.
-                val sent = SyntraClient.sendMessageRest(conversation.id, "", listOf(mediaId))
+                val sent = SyntraClient.sendMessageRest(conversation.id, body, listOf(mediaId))
                 val i = messages.indexOfFirst { it.id == ref }
                 if (i >= 0) {
                     val authoritative = sent.toUi()
@@ -795,20 +827,22 @@ fun ChatDetailScreen(
     }
 
     // Goes through the permission gate; capturing without CAMERA granted crashes.
-    val camera = rememberCameraCapture { bitmap ->
-        val out = java.io.ByteArrayOutputStream()
-        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, out)
-        sendMedia("image", "jpg", "image/jpeg", out.toByteArray())
-    }
+    // The captured photo lands in the edit-before-send screen rather than sending.
+    val camera = rememberCameraCapture { bitmap -> pendingImage = bitmap }
 
     val gallery = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
         if (uri != null) scope.launch {
-            val bytes = runCatching {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            }.getOrNull()
-            if (bytes != null) sendMedia("image", "jpg", "image/jpeg", bytes)
+            // Decode to a bitmap and hand off to the edit screen; nothing is sent
+            // until the user confirms there.
+            val bmp = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it) }
+                }.getOrNull()
+            }
+            if (bmp != null) pendingImage = bmp
+            else Toast.makeText(context, "Tidak bisa membuka gambar.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -978,6 +1012,15 @@ fun ChatDetailScreen(
                     onLongPress = { pendingMessage = msg },
                     onImageClick = { fullscreenImage = it },
                     onReply = { replyingTo = msg },
+                    viewOnceOpened = msg.viewOnce &&
+                        (viewOnceOpened.contains(msg.id) || ViewOnceStore.isOpened(context, msg.id)),
+                    onOpenViewOnce = {
+                        if (!viewOnceOpened.contains(msg.id)) {
+                            ViewOnceStore.markOpened(context, msg.id)
+                            viewOnceOpened.add(msg.id)
+                        }
+                        msg.media?.let { fullscreenImage = it }
+                    },
                     translation = translations[msg.id],
                     onHideTranslation = { translations.remove(msg.id) },
                     quoted = msg.replyToId?.let { rid -> messages.firstOrNull { it.id == rid } },
@@ -1393,6 +1436,21 @@ fun ChatDetailScreen(
         }
     }
 
+    // Edit-before-send screen for a picked/captured photo. Sending compresses the
+    // (possibly edited) bitmap and routes through sendMedia with the caption + flag.
+    pendingImage?.let { bmp ->
+        ChatImagePreviewScreen(
+            source = bmp,
+            onCancel = { pendingImage = null },
+            onSend = { finalBmp, caption, viewOnce ->
+                pendingImage = null
+                val out = java.io.ByteArrayOutputStream()
+                finalBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+                sendMedia("image", "jpg", "image/jpeg", out.toByteArray(), caption = caption, viewOnce = viewOnce)
+            },
+        )
+    }
+
     if (showProfile) {
         // TikTok-style profile for the person you're chatting with (their shorts,
         // follower counts, etc.). Falls back to the counterpart id when no username.
@@ -1722,6 +1780,44 @@ private fun MessagesSkeleton() {
     }
 }
 
+/** A "sekali lihat" photo placeholder — tap to open once, then locked as "Dibuka". */
+@Composable
+private fun ViewOnceBubble(opened: Boolean, textColor: Color, onOpen: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .then(
+                if (!opened) {
+                    Modifier.clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onOpen,
+                    )
+                } else {
+                    Modifier
+                },
+            )
+            .padding(vertical = 6.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .border(1.5.dp, textColor.copy(alpha = if (opened) 0.5f else 0.85f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("1", color = textColor.copy(alpha = if (opened) 0.5f else 1f), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = if (opened) "Dibuka" else "Foto · Sekali lihat",
+            color = textColor.copy(alpha = if (opened) 0.6f else 1f),
+            fontSize = 14.sp,
+            fontStyle = if (opened) FontStyle.Italic else FontStyle.Normal,
+        )
+    }
+}
+
 @Composable
 private fun DateChip(label: String) {
     Row(
@@ -1753,6 +1849,8 @@ private fun MessageBubble(
     reactions: Map<String, Int> = emptyMap(),
     translation: String? = null,
     onHideTranslation: () -> Unit = {},
+    viewOnceOpened: Boolean = false,
+    onOpenViewOnce: () -> Unit = {},
 ) {
     val bubbleColor = if (msg.fromMe) outgoingColor else NexusSurfaceElevated
     val textColor = if (msg.fromMe) Color.White else NexusTextPrimary
@@ -1886,6 +1984,11 @@ private fun MessageBubble(
                 val media = msg.media
                 when {
                     media != null && media.isAudioUrl() -> AudioBubble(media, textColor)
+                    media != null && msg.viewOnce -> ViewOnceBubble(
+                        opened = viewOnceOpened,
+                        textColor = textColor,
+                        onOpen = onOpenViewOnce,
+                    )
                     media != null -> Box(
                         modifier = Modifier
                             .size(width = 220.dp, height = 260.dp)
