@@ -1,6 +1,7 @@
 package com.example.syntra
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -57,6 +58,8 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -122,6 +125,8 @@ import com.example.syntra.net.NetMessage
 import com.example.syntra.net.NetPresence
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.MessageCache
+import com.example.syntra.net.PinStore
+import com.example.syntra.net.Translate
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusAccent
@@ -157,6 +162,8 @@ private data class Message(
     val media: String? = null,
     /** True once deleted-for-everyone — rendered as a greyed "deleted" tombstone. */
     val isDeleted: Boolean = false,
+    /** True once the text was edited — shows a small "diedit" marker. */
+    val isEdited: Boolean = false,
     /** Set when this is a reply to a story — a small blurred thumbnail is shown. */
     val storyReplyUrl: String? = null,
     /** Id of the message this one replies to (WhatsApp-style quote), if any. */
@@ -215,6 +222,7 @@ private fun NetMessage.toUi(): Message {
         at = parseEpoch(createdAt),
         media = if (isDeleted) null else attachment ?: legacyUrl,
         isDeleted = isDeleted,
+        isEdited = editedAt != null,
         storyReplyUrl = storyUrl,
         replyToId = replyToId,
     )
@@ -301,6 +309,14 @@ fun ChatDetailScreen(
     var input by remember { mutableStateOf("") }
     // The message being replied to (swipe right on a bubble), null when not replying.
     var replyingTo by remember(conversation) { mutableStateOf<Message?>(null) }
+    // The message currently being edited (its text is loaded into the composer), or
+    // null. Editing is only offered within 10s of sending — see MessageActionsDialog.
+    var editingId by remember(conversation) { mutableStateOf<String?>(null) }
+    // Locally pinned message id for this conversation (sematkan pesan) — shown as a
+    // banner at the top. On-device only until the backend gains a pin endpoint.
+    var pinnedId by remember(conversation) { mutableStateOf(PinStore.get(context, conversation.id)) }
+    // Per-message translations the user asked for (message id -> translated text).
+    val translations = remember(conversation) { mutableStateMapOf<String, String>() }
     // Whether we've told the peer we're typing (so we don't re-send start per key),
     // and a counter bumped on each keystroke to re-arm the stop-debounce.
     var typingActive by remember(conversation) { mutableStateOf(false) }
@@ -609,6 +625,16 @@ fun ChatDetailScreen(
                     MessageCache.remove(context, conversation.id, messageId)
                 }
 
+                override fun onMessageUpdated(conversationId: String, messageId: String, body: String) {
+                    if (conversationId != conversation.id) return
+                    val i = messages.indexOfFirst { it.id == messageId }
+                    if (i >= 0 && !messages[i].isDeleted) {
+                        messages[i] = messages[i].copy(text = body, isEdited = true)
+                        // A translation of the old text is now stale — drop it.
+                        translations.remove(messageId)
+                    }
+                }
+
                 override fun onMessageReaction(
                     conversationId: String,
                     messageId: String,
@@ -789,6 +815,32 @@ fun ChatDetailScreen(
     fun send() {
         val text = input.trim()
         if (text.isEmpty()) return
+
+        // Edit mode: PATCH the existing message instead of sending a new one.
+        val editId = editingId
+        if (editId != null) {
+            val i = messages.indexOfFirst { it.id == editId }
+            if (i >= 0) messages[i] = messages[i].copy(text = text, isEdited = true)
+            input = ""
+            editingId = null
+            typingActive = false
+            if (ApiConfig.ENABLED) {
+                SyntraClient.typingStop(conversation.id)
+                scope.launch {
+                    runCatching { SyntraClient.editMessage(editId, text) }
+                        .onFailure {
+                            val why = if ((it as? ApiException)?.code == "not_found") {
+                                "Server belum mendukung edit pesan."
+                            } else {
+                                it.message ?: "Gagal mengedit pesan."
+                            }
+                            Toast.makeText(context, why, Toast.LENGTH_LONG).show()
+                        }
+                }
+            }
+            return
+        }
+
         val replyId = replyingTo?.id
         // Optimistic message: a client id now, replaced by the server id on ack.
         val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
@@ -840,6 +892,65 @@ fun ChatDetailScreen(
             },
         )
 
+        // Pinned-message banner (sematkan pesan). Tap to jump to it, X to unpin.
+        pinnedId?.let { pid ->
+            val pinned = messages.firstOrNull { it.id == pid }
+            if (pinned == null) {
+                // The pinned message is gone (deleted/cleared) — drop the stale pin.
+                PinStore.clear(context, conversation.id)
+                pinnedId = null
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(NexusSurface)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) {
+                            val i = messages.indexOfFirst { it.id == pid }
+                            if (i >= 0) scope.launch {
+                                listState.animateScrollToItem((i + if (loadingOlder) 1 else 0).coerceAtLeast(0))
+                            }
+                        }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier.width(3.dp).height(30.dp).clip(RoundedCornerShape(2.dp)).background(NexusAccentSoft),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Icon(Icons.Filled.PushPin, null, tint = NexusAccentSoft, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Pesan tersemat", color = NexusAccentSoft, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = when {
+                                pinned.media != null && pinned.media.isAudioUrl() -> "🎤 Pesan suara"
+                                pinned.media != null -> "📷 Foto"
+                                else -> pinned.text
+                            },
+                            color = NexusTextSecondary,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Lepas sematan",
+                        tint = NexusTextSecondary,
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { PinStore.clear(context, conversation.id); pinnedId = null },
+                    )
+                }
+            }
+        }
+
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
             state = listState,
@@ -867,6 +978,8 @@ fun ChatDetailScreen(
                     onLongPress = { pendingMessage = msg },
                     onImageClick = { fullscreenImage = it },
                     onReply = { replyingTo = msg },
+                    translation = translations[msg.id],
+                    onHideTranslation = { translations.remove(msg.id) },
                     quoted = msg.replyToId?.let { rid -> messages.firstOrNull { it.id == rid } },
                     state = when {
                         msg.id.startsWith(LOCAL_ID_PREFIX) -> DeliveryState.SENDING
@@ -926,6 +1039,46 @@ fun ChatDetailScreen(
 
         if (recording) {
             RecordingBar(seconds = recordSeconds, onCancel = { cancelRecording() })
+        }
+
+        // Edit banner above the composer — shows we're editing an existing message.
+        if (editingId != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(NexusSurface)
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = null,
+                    tint = NexusAccentSoft,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Edit pesan", color = NexusAccentSoft, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Tekan kirim untuk menyimpan perubahan",
+                        color = NexusTextSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Batal edit",
+                    tint = NexusTextSecondary,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { editingId = null; input = "" },
+                )
+            }
         }
 
         // Reply banner above the composer — shows which message you're replying to.
@@ -1050,6 +1203,49 @@ fun ChatDetailScreen(
         val mine = SyntraClient.myUserId
         MessageActionsDialog(
             msg = msg,
+            // Edit is offered only for my own text message, within 10s of sending.
+            canEdit = msg.fromMe && !msg.isDeleted && msg.media == null &&
+                (System.currentTimeMillis() - msg.at) <= 10_000L,
+            isPinned = pinnedId == msg.id,
+            isTranslated = translations.containsKey(msg.id),
+            onEdit = {
+                pendingMessage = null
+                editingId = msg.id
+                replyingTo = null
+                input = msg.text
+                showEmoji = false
+                fieldFocus.requestFocus()
+                keyboard?.show()
+            },
+            onCopy = {
+                pendingMessage = null
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("pesan", msg.text))
+                Toast.makeText(context, "Pesan disalin.", Toast.LENGTH_SHORT).show()
+            },
+            onPin = {
+                pendingMessage = null
+                if (pinnedId == msg.id) {
+                    PinStore.clear(context, conversation.id); pinnedId = null
+                } else {
+                    PinStore.set(context, conversation.id, msg.id); pinnedId = msg.id
+                }
+            },
+            onTranslate = {
+                pendingMessage = null
+                if (translations.containsKey(msg.id)) {
+                    translations.remove(msg.id)
+                } else {
+                    scope.launch {
+                        val result = Translate.translate(msg.text)
+                        if (result != null && result != msg.text) {
+                            translations[msg.id] = result
+                        } else {
+                            Toast.makeText(context, "Tidak bisa menerjemahkan.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            },
             myReaction = mine?.let { reactions[msg.id]?.get(it) },
             onReact = { emoji ->
                 pendingMessage = null
@@ -1220,6 +1416,13 @@ private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "
 private fun MessageActionsDialog(
     msg: Message,
     myReaction: String?,
+    canEdit: Boolean,
+    isPinned: Boolean,
+    isTranslated: Boolean,
+    onEdit: () -> Unit,
+    onCopy: () -> Unit,
+    onPin: () -> Unit,
+    onTranslate: () -> Unit,
     onReact: (String) -> Unit,
     onDismiss: () -> Unit,
     onDeleteForMe: () -> Unit,
@@ -1271,6 +1474,16 @@ private fun MessageActionsDialog(
                 modifier = Modifier.padding(horizontal = 22.dp),
             )
             Spacer(Modifier.height(14.dp))
+            if (canEdit) {
+                MessageAction("Edit pesan", NexusTextPrimary, onEdit)
+            }
+            if (!msg.isDeleted && msg.text.isNotBlank()) {
+                MessageAction("Salin", NexusTextPrimary, onCopy)
+                MessageAction(if (isTranslated) "Sembunyikan terjemahan" else "Terjemahkan", NexusTextPrimary, onTranslate)
+            }
+            if (!msg.isDeleted) {
+                MessageAction(if (isPinned) "Lepas sematan" else "Sematkan pesan", NexusTextPrimary, onPin)
+            }
             if (msg.fromMe && !msg.isDeleted) {
                 MessageAction("Hapus untuk semua orang", Color(0xFFFF5D5D), onDeleteForEveryone)
             }
@@ -1538,6 +1751,8 @@ private fun MessageBubble(
     onReply: () -> Unit = {},
     quoted: Message? = null,
     reactions: Map<String, Int> = emptyMap(),
+    translation: String? = null,
+    onHideTranslation: () -> Unit = {},
 ) {
     val bubbleColor = if (msg.fromMe) outgoingColor else NexusSurfaceElevated
     val textColor = if (msg.fromMe) Color.White else NexusTextPrimary
@@ -1702,6 +1917,30 @@ private fun MessageBubble(
                     Spacer(Modifier.height(6.dp))
                     Text(text = msg.text, color = textColor, fontSize = 15.sp, lineHeight = 20.sp)
                 }
+                // Translation, shown under the original text. Tap to hide it again.
+                translation?.let { tr ->
+                    Spacer(Modifier.height(6.dp))
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.White.copy(alpha = 0.12f))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                                onClick = onHideTranslation,
+                            )
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            "Terjemahan",
+                            color = textColor.copy(alpha = 0.7f),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(text = tr, color = textColor, fontSize = 15.sp, lineHeight = 20.sp)
+                    }
+                }
                 // Time + delivery ticks INSIDE the bubble, bottom-right — WhatsApp style.
                 // Colour adapts: muted-white on the accent bubble, grey on the surface one.
                 val metaColor = if (msg.fromMe) Color.White.copy(alpha = 0.72f) else NexusTextSecondary
@@ -1710,6 +1949,10 @@ private fun MessageBubble(
                     modifier = Modifier.align(Alignment.End),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    if (msg.isEdited && !msg.isDeleted) {
+                        Text(text = "diedit", color = metaColor, fontSize = 10.sp)
+                        Spacer(Modifier.width(4.dp))
+                    }
                     Text(text = msg.time, color = metaColor, fontSize = 10.sp)
                     if (msg.fromMe) {
                         Spacer(Modifier.width(4.dp))

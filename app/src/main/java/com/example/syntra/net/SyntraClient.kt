@@ -42,6 +42,8 @@ interface SocketListener {
     fun onDeliveredReceipt(conversationId: String, userId: String, messageId: String) {}
     /** A message was deleted for everyone — show it as a "deleted" tombstone. */
     fun onMessageDeleted(conversationId: String, messageId: String) {}
+    /** A message's text was edited — replace it in place and mark it "diedit". */
+    fun onMessageUpdated(conversationId: String, messageId: String, body: String) {}
     /** A reaction was added/changed/removed. Empty [emoji] means removed. */
     fun onMessageReaction(conversationId: String, messageId: String, userId: String, emoji: String) {}
     /** A user changed their name/photo — sync it (own devices or a contact). */
@@ -375,6 +377,11 @@ object SyntraClient {
     /** `PUT /messages/{id}/reaction`. Blank [emoji] removes my reaction. Broadcasts. */
     suspend fun reactToMessage(messageId: String, emoji: String) {
         putData("/api/v1/messages/$messageId/reaction", JSONObject().put("emoji", emoji))
+    }
+
+    /** `PATCH /messages/{id}` — edit my own text message. Broadcasts `message.updated`. */
+    suspend fun editMessage(messageId: String, body: String) {
+        patchData("/api/v1/messages/$messageId", JSONObject().put("body", body))
     }
 
     /**
@@ -1065,6 +1072,10 @@ object SyntraClient {
                 }
                 "message.deleted" -> (data as? JSONObject)?.let { d ->
                     dispatch { it.onMessageDeleted(d.optString("conversation_id"), d.optString("message_id")) }
+                }
+                "message.updated" -> (data as? JSONObject)?.let { d ->
+                    // Payload uses `id` (not `message_id`) for the edited message.
+                    dispatch { it.onMessageUpdated(d.optString("conversation_id"), d.optString("id"), d.optString("body")) }
                 }
                 "message.reaction" -> (data as? JSONObject)?.let { d ->
                     dispatch {
