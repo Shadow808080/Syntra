@@ -3,6 +3,7 @@ package com.example.syntra.net
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -38,6 +39,13 @@ object VideoCache {
     // the on-screen reel and a prefetch of the same id racing).
     private val locks = ConcurrentHashMap<String, Mutex>()
 
+    // Cache fills run here, NOT in the caller's coroutine. A reel's video can be
+    // 20+ MB; tying the download to the composable meant scrolling away mid-download
+    // cancelled it, so nothing was cached and the next view re-downloaded from
+    // scratch (exactly the "loads again like a fresh download" bug). This scope
+    // outlives navigation so a started download always finishes and caches.
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     private fun dir(context: Context): File =
         File(context.cacheDir, DIR).apply { mkdirs() }
 
@@ -61,34 +69,35 @@ object VideoCache {
     }
 
     /**
-     * A playable source for [url]: the local path once cached, downloading it
-     * first if needed. On any network/IO failure it returns the original [url] so
-     * the player can still stream it (just without caching this attempt).
-     *
-     * Suspends on [Dispatchers.IO] for the download; safe to call from the UI.
+     * The source to play RIGHT NOW: the local cached file if present, otherwise the
+     * original [url] so playback starts immediately by streaming — while a background
+     * download (in the persistent [scope]) caches it for next time. It never blocks on
+     * the download, so a big clip no longer shows a long "loading" before it starts,
+     * and re-plays come from disk instantly.
      */
-    suspend fun resolve(context: Context, url: String): String {
-        if (!url.startsWith("http")) return url // already a local file/uri
-        cachedFile(context, url)?.let { return it.absolutePath }
-
-        val lock = locks.getOrPut(url) { Mutex() }
-        return lock.withLock {
-            // Re-check inside the lock: a racing caller may have just finished.
-            cachedFile(context, url)?.let { return@withLock it.absolutePath }
-            val ok = withContext(Dispatchers.IO) { download(context, url) }
-            if (ok) File(dir(context), keyFor(url)).absolutePath else url
-        }
+    suspend fun resolve(context: Context, url: String): String = withContext(Dispatchers.IO) {
+        if (!url.startsWith("http")) return@withContext url // already a local file/uri
+        cachedFile(context, url)?.let { return@withContext it.absolutePath }
+        prefetch(context, url) // fill the cache in the background; play by streaming now
+        url
     }
 
     /**
-     * Warms the cache for [url] in the background (e.g. the next reel in the
-     * pager) so it is already on disk by the time it scrolls into view. Silent:
-     * failures are ignored.
+     * Warms the cache for [url] in the background (the current clip, or the next reel
+     * in the pager) so a replay — or a scroll to it — comes from disk. Runs in the
+     * persistent scope, so it finishes even if the caller navigates away. Silent.
      */
-    fun prefetch(scope: CoroutineScope, context: Context, url: String) {
+    fun prefetch(context: Context, url: String) {
         if (!url.startsWith("http")) return
         if (cachedFile(context, url) != null) return
-        scope.launch(Dispatchers.IO) { runCatching { resolve(context, url) } }
+        val app = context.applicationContext // don't hold an Activity in the long-lived scope
+        val lock = locks.getOrPut(url) { Mutex() }
+        scope.launch {
+            lock.withLock {
+                if (cachedFile(app, url) != null) return@withLock
+                runCatching { download(app, url) }
+            }
+        }
     }
 
     private fun download(context: Context, url: String): Boolean {

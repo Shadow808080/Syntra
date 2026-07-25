@@ -388,7 +388,7 @@ fun ShortsScreen(
                     // Warm the next reel so it's already on disk (and free to
                     // replay) by the time it scrolls into view.
                     displayReels.getOrNull(pager.currentPage + 1)?.mediaUrl?.let {
-                        VideoCache.prefetch(scope, context, it)
+                        VideoCache.prefetch(context, it)
                     }
                 }
                 // Swipe down on the first reel to reload the feed.
@@ -1019,7 +1019,7 @@ fun ReelViewer(reels: List<NetReel>, startIndex: Int, onClose: () -> Unit) {
             SyntraClient.fireAndForget { SyntraClient.viewReel(r.id) }
         }
         items.getOrNull(pager.currentPage + 1)?.mediaUrl?.let {
-            VideoCache.prefetch(scope, context, it)
+            VideoCache.prefetch(context, it)
         }
     }
     fun toggleLike(reel: NetReel) {
