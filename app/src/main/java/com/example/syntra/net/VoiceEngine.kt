@@ -7,6 +7,9 @@ import android.os.Build
 import io.livekit.android.LiveKit
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
+import io.livekit.android.room.track.LocalVideoTrack
+import io.livekit.android.room.track.Track
+import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -18,15 +21,16 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Thin wrapper around the LiveKit room used for voice chat.
+ * Thin wrapper around the LiveKit room used for voice AND video rooms.
  *
- * The Syntra backend never carries audio — it only mints the `sfu_token` that says
- * who may listen and who may speak (docs/voice-rooms.md). This class turns that
- * token into an actual audio session.
+ * The Syntra backend never carries media — it only mints the `sfu_token` that says
+ * who may publish (speaker) and who may only listen (docs/voice-rooms.md). A speaker
+ * token grants BOTH audio and video publish, so a room can be a plain voice room or,
+ * the moment someone turns their camera on, a video room — no backend change needed.
  *
  * Note on tokens: a token minted while you were a listener has `canPublish: false`
  * baked in. After a promotion you must call `POST /rooms/{id}/join` again and
- * reconnect with the new token, otherwise the mic silently stays off.
+ * reconnect with the new token, otherwise the mic/camera silently stay off.
  */
 object VoiceEngine {
 
@@ -44,6 +48,18 @@ object VoiceEngine {
     private val _audioLevels = MutableStateFlow<Map<String, Float>>(emptyMap())
     val audioLevels: StateFlow<Map<String, Float>> = _audioLevels
 
+    /**
+     * Camera video tracks per participant, keyed by `user_id`. Includes the local
+     * camera (so the grid can render your own preview the same way as everyone
+     * else). A user absent from this map simply has their camera off.
+     */
+    private val _videoTracks = MutableStateFlow<Map<String, VideoTrack>>(emptyMap())
+    val videoTracks: StateFlow<Map<String, VideoTrack>> = _videoTracks
+
+    /** Whether MY camera is currently publishing. */
+    private val _cameraOn = MutableStateFlow(false)
+    val cameraOn: StateFlow<Boolean> = _cameraOn
+
     /** Connects to the SFU. Safe to call again; the previous session is dropped first. */
     suspend fun connect(context: Context, url: String, token: String) {
         disconnect()
@@ -56,38 +72,58 @@ object VoiceEngine {
         }
         setLoudspeaker(true)
 
-        MusicPlayer.pauseForExternalAudio() // a voice room takes over audio
+        MusicPlayer.pauseForExternalAudio() // a room takes over audio
         r.connect(url, token)
         room = r
 
         val s = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         scope = s
 
-        // Collect room events. Remote audio is auto-subscribed and auto-played, but
-        // collecting events keeps the session healthy and lets us react to speakers
-        // joining/leaving immediately instead of only on the next poll tick.
+        // Collect room events. Remote tracks are auto-subscribed; collecting events
+        // keeps the session healthy and lets us react to cameras/speakers changing.
         s.launch {
             runCatching { r.events.collect { /* keep the event stream flowing */ } }
         }
 
-        // Sample every participant's audio level ~12×/sec into a smooth UI signal.
-        // Identity == user's UUID (token `sub`).
+        // Sample audio levels ~12x/sec AND reconcile the video-track map. The map is
+        // only re-emitted when it actually changes, so idle recompositions stay cheap.
         s.launch {
             while (isActive) {
                 val rm = room
                 if (rm != null) {
                     val levels = HashMap<String, Float>()
+                    val videos = HashMap<String, VideoTrack>()
                     rm.localParticipant.let { lp ->
-                        lp.identity?.value?.let { levels[it] = lp.audioLevel.coerceIn(0f, 1f) }
+                        val id = lp.identity?.value
+                        if (id != null) {
+                            levels[id] = lp.audioLevel.coerceIn(0f, 1f)
+                            (lp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack)
+                                ?.let { videos[id] = it }
+                        }
                     }
                     rm.remoteParticipants.values.forEach { rp ->
-                        rp.identity?.value?.let { levels[it] = rp.audioLevel.coerceIn(0f, 1f) }
+                        val id = rp.identity?.value ?: return@forEach
+                        levels[id] = rp.audioLevel.coerceIn(0f, 1f)
+                        (rp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack)
+                            ?.let { videos[id] = it }
                     }
                     _audioLevels.value = levels
+                    // Emit video only on change (key set or track refs), to avoid
+                    // re-rendering every surface at 12 fps for nothing.
+                    if (!sameTracks(_videoTracks.value, videos)) {
+                        _videoTracks.value = videos
+                    }
                 }
                 delay(80)
             }
         }
+    }
+
+    /** True when both maps hold the same user ids pointing at the same track objects. */
+    private fun sameTracks(a: Map<String, VideoTrack>, b: Map<String, VideoTrack>): Boolean {
+        if (a.size != b.size) return false
+        for ((k, v) in a) if (b[k] !== v) return false
+        return true
     }
 
     /**
@@ -127,10 +163,42 @@ object VoiceEngine {
         runCatching { room?.localParticipant?.setMicrophoneEnabled(enabled) }
     }
 
+    /**
+     * Turns MY camera on/off (turning a voice room into a video room). No-op when not
+     * connected or the token is listener-only. Updates [cameraOn] and the track map.
+     */
+    suspend fun setCameraEnabled(enabled: Boolean) {
+        val lp = room?.localParticipant ?: return
+        runCatching { lp.setCameraEnabled(enabled) }
+        _cameraOn.value = enabled
+        val id = lp.identity?.value
+        if (id != null) {
+            val cur = HashMap(_videoTracks.value)
+            val track = lp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack
+            if (enabled && track != null) cur[id] = track else cur.remove(id)
+            _videoTracks.value = cur
+        }
+    }
+
+    /** Flips between the front and back cameras. */
+    fun switchCamera() {
+        val lp = room?.localParticipant ?: return
+        runCatching {
+            (lp.getTrackPublication(Track.Source.CAMERA)?.track as? LocalVideoTrack)?.switchCamera()
+        }
+    }
+
+    /** Grabs the shared EGL context so a renderer view can display a room track. */
+    fun initRenderer(view: io.livekit.android.renderer.TextureViewRenderer) {
+        runCatching { room?.initVideoRenderer(view) }
+    }
+
     fun disconnect() {
         runCatching { scope?.cancel() }
         scope = null
         _audioLevels.value = emptyMap()
+        _videoTracks.value = emptyMap()
+        _cameraOn.value = false
         runCatching { room?.disconnect() }
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audio?.clearCommunicationDevice()

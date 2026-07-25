@@ -1,5 +1,11 @@
 package com.example.syntra
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,12 +32,16 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import coil.compose.AsyncImage
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -55,6 +65,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.text.font.FontWeight
@@ -75,6 +86,7 @@ import kotlinx.coroutines.launch
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusOnline
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
@@ -98,6 +110,9 @@ data class Room(
     val participantCount: Int,
     val speakerCount: Int,
     val accent: Color,
+    /** Host's profile photo + background — the card avatar and card background. */
+    val hostAvatarUrl: String? = null,
+    val hostCoverUrl: String? = null,
 )
 
 private val roomAccents = listOf(
@@ -117,6 +132,8 @@ private fun NetRoom.toUi() = Room(
     participantCount = participantCount,
     speakerCount = speakerCount,
     accent = accentFor(id),
+    hostAvatarUrl = hostAvatarMediaId?.takeIf { it.startsWith("http") },
+    hostCoverUrl = hostCoverUrl,
 )
 
 private val filters = listOf("Semua", "Tech", "Music", "Chill")
@@ -361,6 +378,8 @@ fun RoomsScreen(
                                     participantCount = 1,
                                     speakerCount = 1,
                                     accent = accentFor(id),
+                                    hostAvatarUrl = ProfileStore.avatarUrl(context),
+                                    hostCoverUrl = ProfileStore.coverUrl(context),
                                 )
                                 allRooms.add(0, fresh)
                                 openedRoom = fresh
@@ -591,143 +610,176 @@ private fun RoomCard(
     faces: List<NetRoomParticipant>,
     onJoin: () -> Unit,
 ) {
+    val shape = RoundedCornerShape(22.dp)
+    val hasCover = !room.hostCoverUrl.isNullOrBlank()
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
-            .clip(RoundedCornerShape(22.dp))
-            // A megaphone-mouth wash: bright at the top-left "horn", fading into the
-            // surface — the card reads like a megaphone calling people over.
-            .background(
-                Brush.linearGradient(
-                    listOf(room.accent.copy(alpha = 0.24f), NexusSurface),
-                ),
-            )
-            .border(1.dp, room.accent.copy(alpha = 0.35f), RoundedCornerShape(22.dp))
+            .clip(shape)
+            .border(1.dp, room.accent.copy(alpha = 0.30f), shape)
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onJoin,
             ),
     ) {
-        // Big faint megaphone bleeding off the right edge — the visual hallmark.
-        Icon(
-            imageVector = Icons.Filled.Campaign,
-            contentDescription = null,
-            tint = room.accent.copy(alpha = 0.10f),
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .size(148.dp)
-                .offset(x = 26.dp, y = (-20).dp)
-                .graphicsLayer { rotationZ = -18f },
-        )
+        // Card background: the host's PROFILE BACKGROUND (cover) if they have one,
+        // otherwise the room's accent gradient. Never the profile photo.
+        if (hasCover) {
+            AsyncImage(
+                model = room.hostCoverUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+            // Accent + dark wash keeps the text readable over any cover.
+            Box(
+                Modifier.matchParentSize().background(
+                    Brush.linearGradient(
+                        listOf(room.accent.copy(alpha = 0.60f), Color.Black.copy(alpha = 0.58f)),
+                    ),
+                ),
+            )
+        } else {
+            Box(
+                Modifier.matchParentSize().background(
+                    Brush.linearGradient(listOf(room.accent, room.accent.copy(alpha = 0.6f))),
+                ),
+            )
+        }
 
         Column(modifier = Modifier.padding(16.dp)) {
-            // Author (host) up top: their avatar sits at the mouth of a megaphone
-            // badge, next to a "calling you" line, with the listener count on the right.
+            // Top: tag (topic, else LIVE) on the left, a "join" hint on the right.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                MegaphoneAuthor(room)
-                Spacer(Modifier.width(11.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = room.hostName.ifBlank { "Host" },
-                        color = NexusTextPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = "memanggil kamu untuk gabung",
-                        color = room.accent,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Filled.Headphones,
-                        contentDescription = null,
-                        tint = NexusTextSecondary,
-                        modifier = Modifier.size(15.dp),
-                    )
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        text = room.participantCount.toString(),
-                        color = NexusTextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-            if (room.topic.isNotBlank()) {
-                CategoryTag(room.topic, room.accent)
-                Spacer(Modifier.height(10.dp))
-            }
-            Text(
-                text = room.title,
-                color = NexusTextPrimary,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "${room.speakerCount} speaker · ${room.participantCount} peserta",
-                color = NexusTextSecondary,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-            )
-            Spacer(Modifier.height(14.dp))
-            // Bottom: overlapping avatars of who is inside + Join
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (faces.isNotEmpty()) {
-                    AvatarStack(faces, room.participantCount)
+                if (room.topic.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.Black.copy(alpha = 0.28f))
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    ) {
+                        Text(room.topic, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    }
                 } else {
-                    Text(
-                        text = "Jadi yang pertama gabung",
-                        color = NexusTextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
+                    LivePill(accent = room.accent)
                 }
                 Spacer(Modifier.weight(1f))
-                JoinButton(enabled = joinable, onJoin = onJoin)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Gabung", color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(18.dp))
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            // Middle: host avatar (photo) + username/title, and a right-side badge.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RoomHostAvatar(room)
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "@${room.hostName.ifBlank { "host" }}",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = room.title,
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                // Right badge: a round accent circle + a count pill (crown/level slot).
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(Brush.linearGradient(listOf(NexusAccentSoft, NexusAccent))),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Filled.People, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.Black.copy(alpha = 0.32f))
+                            .padding(horizontal = 8.dp, vertical = 1.dp),
+                    ) {
+                        Text("${room.participantCount}", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
     }
 }
 
-/** The room author's avatar, framed as the mouth of a small megaphone badge. */
+/** A pulsing "LIVE" pill — a small red dot that breathes next to the label. */
 @Composable
-private fun MegaphoneAuthor(room: Room) {
-    Box(contentAlignment = Alignment.Center) {
-        GradientAvatar(
-            gradient = listOf(room.accent, room.accent.copy(alpha = 0.55f)),
-            initial = room.hostName.ifBlank { "?" }.first().toString(),
-            size = 46.dp,
+private fun LivePill(accent: Color) {
+    val transition = rememberInfiniteTransition(label = "live")
+    val pulse by transition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Reverse),
+        label = "live-pulse",
+    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .background(Color(0xFFFF3B48).copy(alpha = 0.14f), RoundedCornerShape(50))
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .graphicsLayer { alpha = pulse }
+                .background(Color(0xFFFF3B48), CircleShape),
         )
-        // Little megaphone chip clipped to the avatar's corner.
+        Spacer(Modifier.width(6.dp))
+        Text("LIVE", color = Color(0xFFFF6B72), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** The host's avatar — profile photo when available, else a gradient initial — with
+ *  a small "live" corner dot. */
+@Composable
+private fun RoomHostAvatar(room: Room) {
+    Box(contentAlignment = Alignment.Center) {
+        val photo = room.hostAvatarUrl
+        if (!photo.isNullOrBlank()) {
+            AsyncImage(
+                model = photo,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(CircleShape)
+                    .border(2.dp, Color.White.copy(alpha = 0.7f), CircleShape),
+            )
+        } else {
+            GradientAvatar(
+                gradient = listOf(room.accent, room.accent.copy(alpha = 0.55f)),
+                initial = room.hostName.ifBlank { "?" }.first().toString(),
+                size = 46.dp,
+            )
+        }
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .offset(x = 3.dp, y = 3.dp)
-                .size(20.dp)
-                .background(room.accent, CircleShape)
-                .border(2.dp, NexusSurface, CircleShape),
+                .offset(x = 2.dp, y = 2.dp)
+                .size(16.dp)
+                .background(NexusOnline, CircleShape)
+                .border(2.dp, Color.Black.copy(alpha = 0.5f), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                imageVector = Icons.Filled.Campaign,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(12.dp),
-            )
+            Icon(Icons.Filled.Mic, null, tint = Color.White, modifier = Modifier.size(9.dp))
         }
     }
 }

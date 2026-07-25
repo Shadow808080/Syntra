@@ -96,6 +96,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
@@ -182,11 +183,17 @@ fun ShortsScreen(
     // A reel opened full-screen from a notification deep-link (comment reply etc.).
     var deepLinkReel by remember { mutableStateOf<NetReel?>(null) }
 
-    // Notification tap → open that reel full-screen. Fetch it, then clear the request.
+    // Notification tap → open that reel full-screen. Fetch FIRST, clear the request
+    // AFTER: clearing it before the fetch changed this effect's key and cancelled the
+    // getReel call mid-flight, so the reel never opened and you were left on the feed.
     LaunchedEffect(ReelNavRequest.reelId) {
         val rid = ReelNavRequest.reelId ?: return@LaunchedEffect
+        val reel = runCatching { SyntraClient.getReel(rid) }
+            .onFailure { android.util.Log.w("Shorts", "deep-link getReel failed", it) }
+            .getOrNull()
         ReelNavRequest.reelId = null
-        runCatching { SyntraClient.getReel(rid) }.getOrNull()?.let { deepLinkReel = it }
+        if (reel != null) deepLinkReel = reel
+        else Toast.makeText(context, "Postingan tidak bisa dibuka.", Toast.LENGTH_SHORT).show()
     }
     LaunchedEffect(deepLinkReel) { onOverlayChange(deepLinkReel != null) }
 
@@ -1491,12 +1498,12 @@ private fun ShortsHeader(
             .windowInsetsPadding(WindowInsets.statusBars)
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
-        // Left: teal create/upload button.
+        // Left: white round create/upload button.
         Box(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .size(38.dp)
-                .background(ShortsTeal, RoundedCornerShape(11.dp))
+                .background(Color.White, CircleShape)
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
@@ -1853,12 +1860,16 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
         if (body.isEmpty()) return
         // 1-level threading: a reply always attaches to the top-level ancestor, so
         // replying to a reply still lands in the same thread (not a deeper level).
-        val parent = replyingTo?.let { it.parentId ?: it.id }
+        // replyTo keeps the EXACT comment answered (even a reply inside the thread)
+        // so it can be quoted inside the new reply.
+        val target = replyingTo
+        val parent = target?.let { it.parentId ?: it.id }
+        val replyTo = target?.id
         sending = true
         input = ""
         replyingTo = null
         scope.launch {
-            runCatching { SyntraClient.postReelComment(reel.id, body, parent) }
+            runCatching { SyntraClient.postReelComment(reel.id, body, parent, replyTo) }
                 .onSuccess {
                     onPosted() // bump the rail's comment count live
                     refresh()  // pull the server copy (correct name/time/id/parent)
@@ -1961,25 +1972,54 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                 }
             }
             Spacer(Modifier.height(8.dp))
-            // "Replying to …" banner, shown only while composing a reply.
+            // "Replying to …" banner — a quoted preview of the exact comment being
+            // answered (accent bar + @name + a snippet of its text), so it's clear
+            // which message you're replying to, even a specific reply inside a thread.
             replyingTo?.let { r ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 4.dp),
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White.copy(alpha = 0.06f)),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        "Membalas @${r.username.ifBlank { r.displayName }}",
-                        color = NexusAccentSoft,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.weight(1f),
+                    Box(
+                        Modifier
+                            .padding(start = 10.dp)
+                            .width(3.dp)
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(NexusAccentSoft),
                     )
+                    Spacer(Modifier.width(10.dp))
+                    Column(
+                        modifier = Modifier.weight(1f).padding(vertical = 7.dp),
+                    ) {
+                        Text(
+                            "Membalas @${r.username.ifBlank { r.displayName }.ifBlank { "pengguna" }}",
+                            color = NexusAccentSoft,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (r.body.isNotBlank()) {
+                            Text(
+                                r.body,
+                                color = NexusTextSecondary,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
                     Icon(
                         Icons.Filled.Close, "Batal balas",
                         tint = NexusTextSecondary,
                         modifier = Modifier
+                            .padding(end = 12.dp)
                             .size(18.dp)
                             .clickable(
                                 indication = null,
@@ -2051,7 +2091,13 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                                 // Deleting a top-level comment removes its replies too
                                 // (the server cascades); drop the comment AND anything
                                 // whose parent is it, so the UI matches immediately.
+                                val hadReplies = comments.any { it.parentId == c.id }
                                 comments.removeAll { it.id == c.id || it.parentId == c.id }
+                                Toast.makeText(
+                                    context,
+                                    if (hadReplies) "Komentar & balasannya dihapus" else "Komentar dihapus",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
                             }
                             .onFailure { Toast.makeText(context, "Gagal hapus: ${it.message}", Toast.LENGTH_SHORT).show() }
                     }
@@ -2160,6 +2206,50 @@ private fun CommentRow(
                 if (rel.isNotBlank()) {
                     Spacer(Modifier.width(8.dp))
                     Text("· $rel", color = NexusTextSecondary, fontSize = 11.sp, maxLines = 1)
+                }
+            }
+            // A faded quote of the EXACT comment this reply answers — same shape as a
+            // reply, just a subtle background and lowered opacity — so it's clear which
+            // message is being replied to (a specific reply inside the thread, too).
+            if (c.replyToId != null && (c.replyToUsername.isNotBlank() || c.replyToBody.isNotBlank())) {
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.White.copy(alpha = 0.05f))
+                        .alpha(0.72f),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier
+                            .padding(start = 8.dp)
+                            .width(2.5.dp)
+                            .height(24.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(NexusAccentSoft),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.padding(top = 5.dp, bottom = 5.dp, end = 10.dp)) {
+                        if (c.replyToUsername.isNotBlank()) {
+                            Text(
+                                "@${c.replyToUsername}",
+                                color = NexusAccentSoft,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (c.replyToBody.isNotBlank()) {
+                            Text(
+                                c.replyToBody,
+                                color = NexusTextSecondary,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(3.dp))

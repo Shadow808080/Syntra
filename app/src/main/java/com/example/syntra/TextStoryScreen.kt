@@ -229,6 +229,12 @@ fun PhotoStoryPreview(
     var editingOverlay by remember { mutableStateOf(false) }
     // Crop toggle: false = original shape, true = centre square (1:1). Reversible.
     var cropSquare by remember { mutableStateOf(false) }
+    // How the attached song appears, and where. Draggable + pinch-resizable widget;
+    // "none" plays the audio with no visible widget.
+    var musicMode by remember { mutableStateOf("card") }
+    var musicPosX by remember { mutableStateOf(0.5f) }
+    var musicPosY by remember { mutableStateOf(0.72f) }
+    var musicScale by remember { mutableStateOf(1f) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val textFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     // The bitmap actually shown/baked: a centred square crop, or the original.
@@ -329,23 +335,50 @@ fun PhotoStoryPreview(
                 )
             }
         }
-        // Chosen-song chip, so it's clear a track is attached.
+        // Chosen-song chip + how it shows (Kartu / Teks / Tanpa).
         music?.let { m ->
             Row(
-                modifier = Modifier
-                    .padding(horizontal = 14.dp)
-                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                modifier = Modifier.padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(14.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    "${m.title} · ${m.artist}",
-                    color = Color.White, fontSize = 12.sp, maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 220.dp),
-                )
+                Row(
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "${m.title} · ${m.artist}",
+                        color = Color.White, fontSize = 12.sp, maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 140.dp),
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                // Display-mode chips.
+                listOf("card" to "Kartu", "text" to "Teks", "none" to "Tanpa").forEach { (mode, label) ->
+                    val active = musicMode == mode
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 6.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(if (active) Color.White else Color.White.copy(alpha = 0.14f))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { musicMode = mode }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                    ) {
+                        Text(
+                            label,
+                            color = if (active) Color(0xFF141726) else Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
             }
         }
         if (showMusicPicker) {
@@ -438,6 +471,42 @@ fun PhotoStoryPreview(
                         )
                     }
                 }
+
+                // Music widget — drag to move, pinch to resize. Rendered live so the
+                // author places it exactly where it will show; not baked into the photo
+                // (it's carried on the story and drawn by the viewer).
+                music?.let { m ->
+                    if (musicMode != "none" && !editingOverlay) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .graphicsLayer {
+                                    translationX = (musicPosX - 0.5f) * boxW
+                                    translationY = (musicPosY - 0.5f) * boxH
+                                    scaleX = musicScale
+                                    scaleY = musicScale
+                                }
+                                .pointerInput(musicMode) {
+                                    detectDragGestures { change, drag ->
+                                        change.consume()
+                                        musicPosX = (musicPosX + drag.x / boxW).coerceIn(0.05f, 0.95f)
+                                        musicPosY = (musicPosY + drag.y / boxH).coerceIn(0.05f, 0.95f)
+                                    }
+                                }
+                                .transformable(
+                                    androidx.compose.foundation.gestures.rememberTransformableState { zoom, _, _ ->
+                                        musicScale = (musicScale * zoom).coerceIn(0.5f, 2f)
+                                    },
+                                ),
+                        ) {
+                            if (musicMode == "text") {
+                                StoryMusicText(music = m, playing = true)
+                            } else {
+                                StoryMusicCard(music = m, playing = true)
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -477,7 +546,16 @@ fun PhotoStoryPreview(
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
-                        ) { onDone(bakePhoto(shown, overlayText.trim(), posX, posY, rotation, scale, caption.trim()), music) },
+                        ) {
+                            // Carry the music's chosen style + placement with the story.
+                            val placed = music?.copy(
+                                mode = musicMode,
+                                posX = musicPosX,
+                                posY = musicPosY,
+                                scale = musicScale,
+                            )
+                            onDone(bakePhoto(shown, overlayText.trim(), posX, posY, rotation, scale, caption.trim()), placed)
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(

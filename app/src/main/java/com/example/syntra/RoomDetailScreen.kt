@@ -17,6 +17,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,9 +26,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
@@ -42,6 +45,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -49,14 +54,21 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
@@ -67,6 +79,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,10 +88,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -85,8 +101,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
+import coil.compose.AsyncImage
+import io.livekit.android.renderer.TextureViewRenderer
+import io.livekit.android.room.track.VideoTrack
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
 import com.example.syntra.net.NetRoomMessage
@@ -154,6 +174,17 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
 
     // Live microphone loudness (0..1) per user id, straight from LiveKit.
     val audioLevels by VoiceEngine.audioLevels.collectAsState()
+    // Camera video tracks per user id, and whether MY camera is on. A room becomes a
+    // video room the moment anyone turns their camera on.
+    val videoTracks by VoiceEngine.videoTracks.collectAsState()
+    val cameraOn by VoiceEngine.cameraOn.collectAsState()
+
+    // Bottom sheets reachable from the control bar / top bar.
+    var showMore by remember { mutableStateOf(false) }
+    var showPeople by remember { mutableStateOf(false) }
+
+    // Elapsed time since the room UI went live, shown as a call timer in the top bar.
+    var elapsed by remember(room.id) { mutableIntStateOf(0) }
 
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -162,9 +193,22 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
             Toast.makeText(context, "Izin mikrofon ditolak.", Toast.LENGTH_SHORT).show()
         }
     }
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            scope.launch { VoiceEngine.setCameraEnabled(true) }
+        } else {
+            Toast.makeText(context, "Izin kamera ditolak.", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     fun hasMic() = ContextCompat.checkSelfPermission(
         context, Manifest.permission.RECORD_AUDIO,
+    ) == PackageManager.PERMISSION_GRANTED
+
+    fun hasCamera() = ContextCompat.checkSelfPermission(
+        context, Manifest.permission.CAMERA,
     ) == PackageManager.PERMISSION_GRANTED
 
     /**
@@ -309,6 +353,16 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
         if (chat.isNotEmpty()) chatListState.animateScrollToItem(chat.lastIndex)
     }
 
+    // Room timer — starts ticking once we're connected.
+    LaunchedEffect(joinState) {
+        if (joinState == JoinState.CONNECTED) {
+            while (true) {
+                delay(1000)
+                elapsed += 1
+            }
+        }
+    }
+
     fun toggleMute() {
         if (!canPublish) {
             Toast.makeText(context, "Kamu belum jadi speaker.", Toast.LENGTH_SHORT).show()
@@ -324,6 +378,22 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
             VoiceEngine.setMicrophoneEnabled(!next)
             runCatching { SyntraClient.setRoomMuted(room.id, next) }
         }
+    }
+
+    fun toggleCamera() {
+        if (!canPublish) {
+            Toast.makeText(context, "Kamu belum jadi speaker.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (cameraOn) {
+            scope.launch { VoiceEngine.setCameraEnabled(false) }
+            return
+        }
+        if (!hasCamera()) {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+            return
+        }
+        scope.launch { VoiceEngine.setCameraEnabled(true) }
     }
 
     fun toggleHand() {
@@ -397,22 +467,10 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
             RoomTopBar(
                 room = room,
                 count = participants.size,
-                live = true,
+                elapsed = elapsed,
                 onMinimize = { requestLeave() },
+                onPeople = { showPeople = true },
             )
-
-            VolumeBar(
-                volume = volume,
-                loudspeaker = loudspeaker,
-                onVolume = { applyVolume(it) },
-                onToggleLoudspeaker = {
-                    loudspeaker = !loudspeaker
-                    VoiceEngine.setLoudspeaker(loudspeaker)
-                },
-            )
-
-            // No hand-raise queue: everyone joins as a speaker and can just
-            // unmute, so there's nothing to approve.
 
             androidx.compose.animation.Crossfade(
                 targetState = showChat,
@@ -420,64 +478,23 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 modifier = Modifier.weight(1f),
                 label = "room-body",
             ) { chatMode ->
-            if (chatMode) {
-                RoomChatPane(
-                    lines = chat,
-                    listState = chatListState,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
-                ) {
-                    if (participants.isEmpty()) {
-                        item(span = { GridItemSpan(4) }) {
-                            Text(
-                                text = "Belum ada peserta.",
-                                color = NexusTextSecondary,
-                                fontSize = 13.sp,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 24.dp),
-                            )
-                        }
-                    }
-                    if (speakers.isNotEmpty()) {
-                        item(span = { GridItemSpan(4) }) { SectionLabel("Speaker · ${speakers.size}") }
-                        items(speakers) { p ->
-                            ParticipantTile(
-                                p,
-                                big = true,
-                                level = audioLevels[p.userId] ?: 0f,
-                                manageable = isHost && p.role != "host",
-                            ) {
-                                manageTarget = p
-                            }
-                        }
-                    }
-                    if (listeners.isNotEmpty()) {
-                        item(span = { GridItemSpan(4) }) {
-                            Column {
-                                Spacer(Modifier.height(4.dp))
-                                SectionLabel("Pendengar · ${listeners.size}")
-                            }
-                        }
-                        items(listeners) { p ->
-                            ParticipantTile(
-                                p,
-                                big = false,
-                                level = audioLevels[p.userId] ?: 0f,
-                                manageable = isHost,
-                            ) { manageTarget = p }
-                        }
-                    }
+                if (chatMode) {
+                    RoomChatPane(
+                        lines = chat,
+                        listState = chatListState,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    RoomStage(
+                        speakers = speakers,
+                        listeners = listeners,
+                        audioLevels = audioLevels,
+                        videoTracks = videoTracks,
+                        myId = SyntraClient.myUserId,
+                        isHost = isHost,
+                        onManage = { manageTarget = it },
+                    )
                 }
-            }
             } // end Crossfade room-body
 
             if (showChat) {
@@ -491,11 +508,11 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
             RoomControlBar(
                 muted = muted,
                 canPublish = canPublish,
-                handRaised = handRaised,
-                chatOpen = showChat,
+                cameraOn = cameraOn,
                 onToggleMute = { toggleMute() },
-                onToggleHand = { toggleHand() },
+                onToggleCamera = { toggleCamera() },
                 onToggleChat = { showChat = !showChat },
+                onMore = { showMore = true },
                 onLeave = { requestLeave() },
             )
         }
@@ -536,6 +553,37 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 onDismiss = { manageTarget = null },
                 onMakeSpeaker = { setRole(target, "speaker") },
                 onMakeListener = { setRole(target, "listener") },
+            )
+        }
+
+        // People list (top-right button).
+        if (showPeople) {
+            RoomPeopleSheet(
+                speakers = speakers,
+                listeners = listeners,
+                isHost = isHost,
+                onManage = { showPeople = false; manageTarget = it },
+                onDismiss = { showPeople = false },
+            )
+        }
+
+        // "More" — volume, loudspeaker, switch camera, chat, and (host) end room.
+        if (showMore) {
+            RoomMoreSheet(
+                volume = volume,
+                loudspeaker = loudspeaker,
+                cameraOn = cameraOn,
+                chatOpen = showChat,
+                isHost = isHost,
+                onVolume = { applyVolume(it) },
+                onToggleLoudspeaker = {
+                    loudspeaker = !loudspeaker
+                    VoiceEngine.setLoudspeaker(loudspeaker)
+                },
+                onSwitchCamera = { VoiceEngine.switchCamera() },
+                onToggleChat = { showMore = false; showChat = !showChat },
+                onEndRoom = { showMore = false; confirmLeave = true },
+                onDismiss = { showMore = false },
             )
         }
     }
@@ -773,6 +821,154 @@ private fun SheetAction(label: String, icon: ImageVector, tint: Color, onClick: 
     }
 }
 
+/** The people list opened from the top-right button — speakers then listeners. */
+@Composable
+private fun RoomPeopleSheet(
+    speakers: List<NetRoomParticipant>,
+    listeners: List<NetRoomParticipant>,
+    isHost: Boolean,
+    onManage: (NetRoomParticipant) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
+                .padding(vertical = 18.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp),
+            ) {
+                Icon(Icons.Filled.Groups, null, tint = NexusAccentSoft, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(10.dp))
+                Text("Peserta", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Text("${speakers.size + listeners.size}", color = NexusTextSecondary, fontSize = 13.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            Column(
+                Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+            ) {
+                if (speakers.isNotEmpty()) {
+                    Box(Modifier.padding(horizontal = 22.dp)) { SectionLabel("Speaker · ${speakers.size}") }
+                    speakers.forEach { p ->
+                        RoomPersonRow(p, manageable = isHost && p.role != "host", onClick = { onManage(p) })
+                    }
+                }
+                if (listeners.isNotEmpty()) {
+                    Box(Modifier.padding(horizontal = 22.dp)) { SectionLabel("Pendengar · ${listeners.size}") }
+                    listeners.forEach { p ->
+                        RoomPersonRow(p, manageable = isHost, onClick = { onManage(p) })
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RoomPersonRow(p: NetRoomParticipant, manageable: Boolean, onClick: () -> Unit) {
+    val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                enabled = manageable,
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 22.dp, vertical = 8.dp),
+    ) {
+        RoomAvatar(p = p, size = 40.dp)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(name, color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                text = when (p.role) {
+                    "host" -> "Host"
+                    "moderator" -> "Moderator"
+                    "listener" -> "Pendengar"
+                    else -> "Speaker"
+                },
+                color = NexusTextSecondary,
+                fontSize = 11.sp,
+            )
+        }
+        if (p.role != "listener") {
+            Icon(
+                imageVector = if (p.isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
+                contentDescription = null,
+                tint = if (p.isMuted) NexusTextSecondary else NexusOnline,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        if (manageable) {
+            Spacer(Modifier.width(10.dp))
+            Icon(Icons.Filled.MoreHoriz, "Kelola", tint = NexusTextSecondary, modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+/** The "more" sheet from the control bar: volume, loudspeaker, camera, chat, end. */
+@Composable
+private fun RoomMoreSheet(
+    volume: Float,
+    loudspeaker: Boolean,
+    cameraOn: Boolean,
+    chatOpen: Boolean,
+    isHost: Boolean,
+    onVolume: (Float) -> Unit,
+    onToggleLoudspeaker: () -> Unit,
+    onSwitchCamera: () -> Unit,
+    onToggleChat: () -> Unit,
+    onEndRoom: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
+                .padding(vertical = 18.dp),
+        ) {
+            Text(
+                "Opsi room",
+                color = NexusTextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 22.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            VolumeBar(
+                volume = volume,
+                loudspeaker = loudspeaker,
+                onVolume = onVolume,
+                onToggleLoudspeaker = onToggleLoudspeaker,
+            )
+            Spacer(Modifier.height(6.dp))
+            SheetAction(
+                if (chatOpen) "Tutup chat" else "Buka chat",
+                Icons.Filled.Chat,
+                NexusTextPrimary,
+                onToggleChat,
+            )
+            if (cameraOn) {
+                SheetAction("Ganti kamera", Icons.Filled.Cameraswitch, NexusTextPrimary, onSwitchCamera)
+            }
+            if (isHost) {
+                SheetAction("Akhiri room", Icons.Filled.CallEnd, Color(0xFFFF5D5D), onEndRoom)
+            }
+            SheetAction("Tutup", Icons.Filled.Close, NexusTextSecondary, onDismiss)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Join gate
 // ---------------------------------------------------------------------------
@@ -919,64 +1115,88 @@ private fun SpeakingStatusBanner(
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun RoomTopBar(room: Room, count: Int, live: Boolean, onMinimize: () -> Unit) {
+private fun RoomTopBar(
+    room: Room,
+    count: Int,
+    elapsed: Int,
+    onMinimize: () -> Unit,
+    onPeople: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
+        // Row 1 — back · live timer (center) · people. Mirrors a call screen.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            RoundControl(Icons.Filled.ExpandMore, "Minimize", size = 38.dp, onClick = onMinimize)
+            RoundControl(Icons.Filled.ExpandMore, "Minimize", size = 40.dp, onClick = onMinimize)
             Spacer(Modifier.weight(1f))
             Row(
                 modifier = Modifier
                     .background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(50))
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .background(if (live) Color(0xFFFF5D5D) else NexusTextSecondary, CircleShape),
-                )
-                Spacer(Modifier.width(6.dp))
+                Box(Modifier.size(7.dp).background(Color(0xFFFF5D5D), CircleShape))
+                Spacer(Modifier.width(7.dp))
                 Text(
-                    text = if (live) "LIVE" else "OFF",
+                    text = formatElapsed(elapsed),
                     color = NexusTextPrimary,
-                    fontSize = 11.sp,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                 )
-                Spacer(Modifier.width(10.dp))
-                Icon(Icons.Filled.Headphones, null, tint = NexusTextSecondary, modifier = Modifier.size(13.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("$count", color = NexusTextSecondary, fontSize = 11.sp)
             }
             Spacer(Modifier.weight(1f))
-            Spacer(Modifier.size(38.dp))
-        }
-        Spacer(Modifier.height(14.dp))
-        if (room.topic.isNotBlank()) {
-            Box(
-                modifier = Modifier
-                    .background(room.accent.copy(alpha = 0.15f), RoundedCornerShape(50))
-                    .padding(horizontal = 12.dp, vertical = 5.dp),
-            ) {
-                Text(room.topic, color = room.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            // People button, with the count as a small badge.
+            Box(contentAlignment = Alignment.TopEnd) {
+                RoundControl(Icons.Filled.PersonAdd, "Peserta", size = 40.dp, onClick = onPeople)
+                if (count > 0) {
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 1.dp)
+                            .background(NexusAccent, CircleShape)
+                            .border(2.dp, Color(0xFF17131F), CircleShape)
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                    ) {
+                        Text("$count", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
-            Spacer(Modifier.height(8.dp))
         }
-        Text(
-            text = room.title,
-            color = NexusTextPrimary,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            lineHeight = 28.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
+        // Row 2 — compact identity: title + optional topic chip.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = room.title,
+                color = NexusTextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (room.topic.isNotBlank()) {
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .background(room.accent.copy(alpha = 0.15f), RoundedCornerShape(50))
+                        .padding(horizontal = 10.dp, vertical = 3.dp),
+                ) {
+                    Text(room.topic, color = room.accent, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
     }
+}
+
+/** Seconds → "M:SS" or "H:MM:SS" for the live room timer. */
+private fun formatElapsed(total: Int): String {
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
 // ---------------------------------------------------------------------------
@@ -995,75 +1215,116 @@ private fun SectionLabel(text: String) {
 }
 
 /**
- * A ring of thin bars around an avatar that pulse with the voice — the ChatGPT
- * "talking" look. Each bar has its own phase so the ring ripples; amplitude
- * follows [level] (0..1) with a low idle shimmer so a live-but-quiet mic still
- * breathes gently.
+ * The room "stage": speakers as a 2-column grid of video tiles (camera feed, or a
+ * photo/gradient fallback when the camera is off), with listeners tucked into a
+ * compact avatar strip at the bottom. This is the layout that turns a voice room
+ * into a video room the moment anyone turns their camera on.
  */
 @Composable
-private fun VoiceWaveRing(level: Float, ringSize: androidx.compose.ui.unit.Dp) {
-    val bars = 28
-    val transition = rememberInfiniteTransition(label = "wave")
-    val phase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * Math.PI).toFloat(),
-        animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Restart),
-        label = "wave-phase",
-    )
-    Canvas(modifier = Modifier.size(ringSize)) {
-        val radius = size.minDimension / 2f
-        val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
-        val idle = 0.12f
-        val amp = idle + level * 0.88f
-        val baseLen = radius * 0.10f
-        val strokeW = 3.2f
-        for (i in 0 until bars) {
-            val angle = (i.toFloat() / bars) * 2f * Math.PI.toFloat()
-            // Per-bar wave — two offset sines make it feel organic, not uniform.
-            val wave = (kotlin.math.sin(phase + i * 0.7f) * 0.5f + 0.5f) *
-                (kotlin.math.sin(phase * 0.6f + i * 0.3f) * 0.5f + 0.5f)
-            val len = baseLen + radius * 0.28f * amp * wave
-            val inner = radius - baseLen * 0.3f
-            val outer = inner + len
-            val sx = center.x + kotlin.math.cos(angle) * inner
-            val sy = center.y + kotlin.math.sin(angle) * inner
-            val ex = center.x + kotlin.math.cos(angle) * outer
-            val ey = center.y + kotlin.math.sin(angle) * outer
-            drawLine(
-                color = NexusOnline.copy(alpha = 0.35f + 0.5f * amp),
-                start = androidx.compose.ui.geometry.Offset(sx, sy),
-                end = androidx.compose.ui.geometry.Offset(ex, ey),
-                strokeWidth = strokeW,
-                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+private fun RoomStage(
+    speakers: List<NetRoomParticipant>,
+    listeners: List<NetRoomParticipant>,
+    audioLevels: Map<String, Float>,
+    videoTracks: Map<String, VideoTrack>,
+    myId: String?,
+    isHost: Boolean,
+    onManage: (NetRoomParticipant) -> Unit,
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (speakers.isEmpty() && listeners.isEmpty()) {
+            item(span = { GridItemSpan(2) }) {
+                Text(
+                    text = "Belum ada peserta.",
+                    color = NexusTextSecondary,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                )
+            }
+        }
+        items(speakers, key = { it.userId }) { p ->
+            RoomVideoTile(
+                p = p,
+                level = audioLevels[p.userId] ?: 0f,
+                video = videoTracks[p.userId],
+                isMe = p.userId == myId,
+                manageable = isHost && p.role != "host",
+                onManage = { onManage(p) },
             )
+        }
+        if (listeners.isNotEmpty()) {
+            item(span = { GridItemSpan(2) }) {
+                RoomListenerStrip(listeners = listeners, videoTracks = videoTracks)
+            }
         }
     }
 }
 
+/** A compact, horizontally scrolling strip of everyone who is only listening. */
 @Composable
-private fun ParticipantTile(
+private fun RoomListenerStrip(listeners: List<NetRoomParticipant>, videoTracks: Map<String, VideoTrack>) {
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+        SectionLabel("Mendengarkan · ${listeners.size}")
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            listeners.forEach { p ->
+                val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(56.dp)) {
+                    RoomAvatar(p = p, size = 48.dp)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        name.substringBefore(' '),
+                        color = NexusTextSecondary,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One speaker tile. Full-bleed camera video when they're publishing; otherwise a
+ * profile photo (or gradient + initial). A modern speaking indicator — an animated
+ * glowing border plus a mini equalizer in the name chip — replaces the old ring.
+ */
+@Composable
+private fun RoomVideoTile(
     p: NetRoomParticipant,
-    big: Boolean,
-    level: Float = 0f,
-    manageable: Boolean = false,
-    onManage: () -> Unit = {},
+    level: Float,
+    video: VideoTrack?,
+    isMe: Boolean,
+    manageable: Boolean,
+    onManage: () -> Unit,
 ) {
-    val size = if (big) 64.dp else 48.dp
     val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
-    // Mic on (server state) vs. how loud they are right now (LiveKit, 0..1).
     val micOn = p.role != "listener" && !p.isMuted
-    // Normalise: real speech rarely fills 0..1, so lift the low end and clamp,
-    // then smooth so the ring glides with the voice instead of jittering.
-    val loudness = (level.coerceIn(0f, 1f) * 2.4f).coerceIn(0f, 1f)
+    val loud = (level.coerceIn(0f, 1f) * 2.4f).coerceIn(0f, 1f)
     val glow by animateFloatAsState(
-        targetValue = if (micOn) loudness else 0f,
-        animationSpec = tween(durationMillis = 110),
-        label = "loudness",
+        targetValue = if (micOn) loud else 0f,
+        animationSpec = tween(120),
+        label = "tile-glow",
     )
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
+    val cover = p.coverUrl?.takeIf { it.isNotBlank() }
+    val grad = gradientForId(p.userId)
+    val shape = RoundedCornerShape(20.dp)
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
+            .aspectRatio(0.82f)
+            .clip(shape)
+            .background(Color(0xFF14141B))
             .clickable(
                 enabled = manageable,
                 indication = null,
@@ -1071,68 +1332,238 @@ private fun ParticipantTile(
                 onClick = onManage,
             ),
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            // Soft breathing glow behind the avatar, scaled by loudness.
-            if (glow > 0.01f) {
-                Box(
-                    modifier = Modifier
-                        .size(size + 4.dp + 26.dp * glow)
-                        .background(NexusOnline.copy(alpha = 0.10f + 0.28f * glow), CircleShape),
+        // Background: live camera → the person's PROFILE BACKGROUND (cover) →
+        // gradient with initial. Never the profile photo, so a camera-off tile shows
+        // the real profile background.
+        when {
+            video != null -> VideoTileRenderer(track = video, mirror = isMe, modifier = Modifier.fillMaxSize())
+            cover != null -> AsyncImage(
+                model = cover,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            else -> Box(
+                Modifier.fillMaxSize().background(Brush.linearGradient(grad)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = name.first().uppercase(),
+                    color = Color.White,
+                    fontSize = 42.sp,
+                    fontWeight = FontWeight.Bold,
                 )
             }
-            // ChatGPT-style voice bars arranged around the avatar — each bar
-            // dances to the live audio level (with a subtle idle shimmer when mic
-            // is on but quiet), so an active speaker reads instantly.
-            if (micOn) {
-                VoiceWaveRing(level = glow, ringSize = size + 20.dp)
-            }
-            GradientAvatar(
-                gradient = gradientForId(p.userId),
-                initial = name.first().toString(),
-                size = size,
+        }
+        // Bottom scrim so the name chip stays legible over any background.
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(0.55f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.6f)),
+            ),
+        )
+        // Modern speaking indicator: an animated glowing border, brighter as they
+        // get louder. Replaces the old radial "wave ring" with something at home on
+        // a video tile.
+        if (micOn && glow > 0.01f) {
+            SpeakingBorder(glow = glow, colors = grad, shape = shape, modifier = Modifier.fillMaxSize())
+        } else {
+            Box(Modifier.fillMaxSize().border(1.dp, NexusStroke, shape))
+        }
+
+        // Name chip (bottom-start) — small avatar + first name.
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(8.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color.Black.copy(alpha = 0.42f))
+                .padding(start = 4.dp, end = 10.dp, top = 3.dp, bottom = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RoomAvatar(p = p, size = 22.dp)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                name.substringBefore(' '),
+                color = Color.White,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-            if (p.role != "listener") {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(22.dp)
-                        .background(if (micOn) NexusOnline else Color(0xFF3A3A44), CircleShape)
-                        .border(2.dp, NexusSurface, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = if (p.isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(12.dp),
-                    )
-                }
-            }
-            if (p.hasRaisedHand && p.role == "listener") {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .size(20.dp)
-                        .background(Color(0xFFF2994A), CircleShape)
-                        .border(2.dp, NexusSurface, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Filled.PanTool, null, tint = Color.White, modifier = Modifier.size(10.dp))
-                }
+            if (micOn) {
+                Spacer(Modifier.width(6.dp))
+                MiniEqualizer(level = glow)
             }
         }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = name.substringBefore(' '),
-            color = NexusTextPrimary,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
+
+        // Mic badge (bottom-end).
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(8.dp)
+                .size(26.dp)
+                .background(if (micOn) NexusOnline else Color.Black.copy(alpha = 0.5f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+
+        // Manage "..." (top-end) for hosts; raised hand otherwise.
+        if (manageable) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .size(26.dp)
+                    .background(Color.Black.copy(alpha = 0.42f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.MoreHoriz, "Kelola", tint = Color.White, modifier = Modifier.size(15.dp))
+            }
+        }
+
+        // Role badge (top-start).
+        val roleLabel = when (p.role) {
+            "host" -> "HOST"
+            "moderator" -> "MOD"
+            else -> null
+        }
+        if (roleLabel != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(NexusAccent.copy(alpha = 0.9f))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+            ) {
+                Text(roleLabel, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+/** Avatar helper for room UI: photo when available, gradient + initial otherwise. */
+@Composable
+private fun RoomAvatar(p: NetRoomParticipant, size: androidx.compose.ui.unit.Dp) {
+    val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
+    val avatar = p.avatarMediaId?.takeIf { it.startsWith("http") }
+    if (avatar != null) {
+        AsyncImage(
+            model = avatar,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.size(size).clip(CircleShape),
         )
-        when (p.role) {
-            "host" -> Text("HOST", color = NexusAccentSoft, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-            "moderator" -> Text("MOD", color = NexusAccentSoft, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+    } else {
+        GradientAvatar(gradient = gradientForId(p.userId), initial = name.first().toString(), size = size)
+    }
+}
+
+/**
+ * Renders a LiveKit video track into the tile. Keyed by track so a re-published
+ * camera swaps the surface cleanly; releases the renderer on dispose.
+ */
+@Composable
+private fun VideoTileRenderer(track: VideoTrack, mirror: Boolean, modifier: Modifier = Modifier) {
+    key(track) {
+        AndroidView(
+            modifier = modifier,
+            factory = { ctx ->
+                TextureViewRenderer(ctx).apply {
+                    VoiceEngine.initRenderer(this)
+                    setMirror(mirror)
+                    runCatching { track.addRenderer(this) }
+                }
+            },
+            onRelease = { view ->
+                runCatching { track.removeRenderer(view) }
+                runCatching { view.release() }
+            },
+        )
+    }
+}
+
+/**
+ * A modern speaking indicator: an animated rounded-rect glow that traces the tile
+ * edge, its width and brightness rising with [glow] (0..1). The old ChatGPT-style
+ * radial bars didn't sit well on a video tile; this reads as "live" at a glance.
+ */
+@Composable
+private fun SpeakingBorder(
+    glow: Float,
+    colors: List<Color>,
+    shape: RoundedCornerShape,
+    modifier: Modifier = Modifier,
+) {
+    val transition = rememberInfiniteTransition(label = "speak")
+    val shimmer by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1600, easing = LinearEasing), RepeatMode.Reverse),
+        label = "speak-shimmer",
+    )
+    val strokeW = 2f + 3.5f * glow
+    val alpha = (0.45f + 0.5f * glow).coerceIn(0f, 1f)
+    val brush = Brush.sweepGradient(
+        listOf(
+            colors.first().copy(alpha = alpha),
+            colors.last().copy(alpha = alpha),
+            NexusOnline.copy(alpha = alpha),
+            colors.first().copy(alpha = alpha),
+        ),
+    )
+    Canvas(modifier = modifier) {
+        val inset = strokeW
+        val r = 20.dp.toPx()
+        // A soft outer halo that breathes with the shimmer.
+        drawRoundRect(
+            color = NexusOnline.copy(alpha = 0.10f * glow * (0.7f + 0.3f * shimmer)),
+            topLeft = androidx.compose.ui.geometry.Offset(0f, 0f),
+            size = size,
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW * 3f),
+        )
+        drawRoundRect(
+            brush = brush,
+            topLeft = androidx.compose.ui.geometry.Offset(inset / 2f, inset / 2f),
+            size = androidx.compose.ui.geometry.Size(size.width - inset, size.height - inset),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW),
+        )
+    }
+}
+
+/** Three little bars that dance with the voice — a modern mini "wave" for the chip. */
+@Composable
+private fun MiniEqualizer(level: Float, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "eq")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(700, easing = LinearEasing), RepeatMode.Restart),
+        label = "eq-phase",
+    )
+    Canvas(modifier = modifier.size(width = 14.dp, height = 12.dp)) {
+        val bars = 3
+        val gap = size.width / (bars * 2f)
+        val barW = gap
+        val amp = 0.25f + level * 0.75f
+        for (i in 0 until bars) {
+            val h = size.height * (0.35f + 0.65f * amp * (kotlin.math.sin(phase + i * 1.3f) * 0.5f + 0.5f))
+            val x = gap + i * (barW + gap)
+            drawLine(
+                color = Color.White,
+                start = androidx.compose.ui.geometry.Offset(x, size.height),
+                end = androidx.compose.ui.geometry.Offset(x, size.height - h),
+                strokeWidth = barW,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+            )
         }
     }
 }
@@ -1252,104 +1683,99 @@ private fun RoomChatInput(value: String, onValueChange: (String) -> Unit, onSend
 private fun RoomControlBar(
     muted: Boolean,
     canPublish: Boolean,
-    handRaised: Boolean,
-    chatOpen: Boolean,
+    cameraOn: Boolean,
     onToggleMute: () -> Unit,
-    onToggleHand: () -> Unit,
+    onToggleCamera: () -> Unit,
     onToggleChat: () -> Unit,
+    onMore: () -> Unit,
     onLeave: () -> Unit,
 ) {
+    val micLive = canPublish && !muted
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFF16161C))
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Box(
-            modifier = Modifier
-                .background(Color(0xFF3A1620), RoundedCornerShape(50))
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                    onClick = onLeave,
-                )
-                .padding(horizontal = 18.dp, vertical = 12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.CallEnd, "Leave", tint = Color(0xFFFF5D5D), modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Keluar", color = Color(0xFFFF5D5D), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            }
-        }
-        Spacer(Modifier.weight(1f))
-        RoundControl(
-            icon = if (chatOpen) Icons.Filled.People else Icons.Filled.Chat,
-            description = if (chatOpen) "Peserta" else "Chat",
+        // Mic — filled green when live, red when muted, dimmed when listener-only.
+        CircleControl(
+            icon = if (micLive) Icons.Filled.Mic else Icons.Filled.MicOff,
+            description = "Mikrofon",
+            background = when {
+                !canPublish -> Color(0xFF24242C)
+                micLive -> NexusOnline
+                else -> Color(0xFF3A1620)
+            },
+            tint = when {
+                !canPublish -> NexusTextSecondary
+                micLive -> Color.White
+                else -> Color(0xFFFF5D5D)
+            },
+            onClick = onToggleMute,
+        )
+        // Camera — turns the room into a video room.
+        CircleControl(
+            icon = if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+            description = "Kamera",
+            background = if (cameraOn) NexusAccent else Color(0xFF24242C),
+            tint = if (cameraOn) Color.White else NexusTextPrimary,
+            onClick = onToggleCamera,
+        )
+        // Hang up — the big red center button.
+        CircleControl(
+            icon = Icons.Filled.CallEnd,
+            description = "Keluar",
+            size = 64.dp,
+            iconSize = 28.dp,
+            background = Color(0xFFFF3B48),
+            tint = Color.White,
+            onClick = onLeave,
+        )
+        // Chat.
+        CircleControl(
+            icon = Icons.Filled.Chat,
+            description = "Chat",
             background = Color(0xFF24242C),
+            tint = NexusTextPrimary,
             onClick = onToggleChat,
         )
-        // No raise-hand button: everyone can speak the moment they join.
-        // Mic: green + "ON" when live, red-outlined + "OFF" when muted. The label
-        // removes any doubt about which state you are in.
-        val live = canPublish && !muted
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .size(56.dp)
-                    .background(
-                        color = when {
-                            !canPublish -> Color(0xFF24242C)
-                            live -> NexusOnline
-                            else -> Color(0xFF3A1620)
-                        },
-                        shape = CircleShape,
-                    )
-                    .border(
-                        width = 2.dp,
-                        color = when {
-                            !canPublish -> Color(0xFF33333C)
-                            live -> NexusOnline
-                            else -> Color(0xFFFF5D5D)
-                        },
-                        shape = CircleShape,
-                    )
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                        onClick = onToggleMute,
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = if (live) Icons.Filled.Mic else Icons.Filled.MicOff,
-                    contentDescription = if (live) "Matikan mikrofon" else "Nyalakan mikrofon",
-                    tint = when {
-                        !canPublish -> NexusTextSecondary
-                        live -> Color.White
-                        else -> Color(0xFFFF5D5D)
-                    },
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-            Spacer(Modifier.height(3.dp))
-            Text(
-                text = when {
-                    !canPublish -> "TERKUNCI"
-                    live -> "MIC ON"
-                    else -> "MIC OFF"
-                },
-                color = when {
-                    !canPublish -> NexusTextSecondary
-                    live -> NexusOnline
-                    else -> Color(0xFFFF5D5D)
-                },
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
+        // More — volume, loudspeaker, switch camera, end room.
+        CircleControl(
+            icon = Icons.Filled.MoreHoriz,
+            description = "Lainnya",
+            background = Color(0xFF24242C),
+            tint = NexusTextPrimary,
+            onClick = onMore,
+        )
+    }
+}
+
+/** A circular control button used across the room control bar. */
+@Composable
+private fun CircleControl(
+    icon: ImageVector,
+    description: String,
+    background: Color,
+    tint: Color,
+    size: androidx.compose.ui.unit.Dp = 52.dp,
+    iconSize: androidx.compose.ui.unit.Dp = 23.dp,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .background(background, CircleShape)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, description, tint = tint, modifier = Modifier.size(iconSize))
     }
 }
 

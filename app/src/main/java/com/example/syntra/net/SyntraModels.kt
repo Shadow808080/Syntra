@@ -7,11 +7,28 @@ data class NetUser(
     val username: String,
     val displayName: String,
     val avatarMediaId: String? = null,
+    /** Ready-to-use URL of the profile background/cover, or null for the gradient. */
+    val coverUrl: String? = null,
     val followerCount: Int = 0,
     val followingCount: Int = 0,
     /** "" = not followed · "pending" · "accepted" */
     val followStatus: String = "",
     val isSelf: Boolean = false,
+)
+
+/** One person who visited your profile. [avatarUrl] is a ready-to-use image URL. */
+data class NetVisitor(
+    val userId: String,
+    val username: String,
+    val displayName: String,
+    val avatarUrl: String? = null,
+    val visitedAt: String = "",
+)
+
+/** The "who viewed me" payload: recent visitors plus the grand total. */
+data class NetVisitors(
+    val total: Int = 0,
+    val visitors: List<NetVisitor> = emptyList(),
 )
 
 data class NetConversation(
@@ -74,12 +91,18 @@ data class NetStory(
     val music: StoryMusic? = null,
 )
 
-/** A song stuck to a story: 30-second preview + display info. */
+/** A song stuck to a story: 30-second preview + display info + how it's shown. */
 data class StoryMusic(
     val title: String,
     val artist: String,
     val previewUrl: String,
     val artworkUrl: String? = null,
+    /** How the song appears on the story: "card" | "text" | "none" (audio only). */
+    val mode: String = "card",
+    /** Widget centre as a fraction of the frame (0..1), and its scale. */
+    val posX: Float = 0.5f,
+    val posY: Float = 0.5f,
+    val scale: Float = 1f,
 )
 
 // Voice rooms — shapes taken from docs/voice-rooms.md + rest/handler/room.go.
@@ -90,6 +113,8 @@ data class NetRoom(
     val hostUsername: String = "",
     val hostName: String = "",
     val hostAvatarMediaId: String? = null,
+    /** Host's profile background/cover URL — used as the room card background. */
+    val hostCoverUrl: String? = null,
     val title: String,
     val topic: String = "",
     val visibility: String = "public",
@@ -111,6 +136,8 @@ data class NetRoomParticipant(
     val username: String = "",
     val displayName: String = "",
     val avatarMediaId: String? = null,
+    /** Profile background/cover URL — the tile background when the camera is off. */
+    val coverUrl: String? = null,
     val role: String = "listener",
     val isMuted: Boolean = true,
     val hasRaisedHand: Boolean = false,
@@ -179,8 +206,13 @@ data class NetReelComment(
     val avatarUrl: String? = null,
     val body: String = "",
     val createdAt: String = "",
-    /** Non-null when this comment is a reply to another comment. */
+    /** Non-null when this comment is a reply to another comment (top-level thread). */
     val parentId: String? = null,
+    /** The exact comment this one answers (may be a reply inside the thread) — drives
+     *  the quoted preview shown inside the reply. Username/body are for display. */
+    val replyToId: String? = null,
+    val replyToUsername: String = "",
+    val replyToBody: String = "",
 )
 
 // Calls (audio & video) — docs/api.md §Calls. Audio/video ride LiveKit; the

@@ -13,6 +13,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
@@ -52,6 +53,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -71,6 +73,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -176,6 +179,8 @@ private data class StoryItem(
     val viewed: Boolean = false,
     /** RFC3339 UTC; stories expire 24h after this. */
     val createdAt: String = "",
+    /** Music stuck to this story (overlays.music) — actually played in the viewer. */
+    val music: com.example.syntra.net.StoryMusic? = null,
 )
 
 private data class ActivePerson(
@@ -355,6 +360,7 @@ private fun NetStoryGroup.toUi(): ActivePerson? {
                 image = StoryImage.Url(it.mediaUrl, it.mediaKind == "video"),
                 viewed = it.viewed,
                 createdAt = it.createdAt,
+                music = it.music,
             )
         },
     )
@@ -1642,11 +1648,13 @@ private fun ConversationRow(
                     Text(
                         text = convo.name,
                         color = NexusTextPrimary,
-                        fontSize = 16.sp,
+                        fontSize = 17.sp,
                         fontWeight = if (unread) FontWeight.Bold else FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        // weight(1f) pushes the time to the far right — name left, time
+                        // right (justify-between); the name ellipsizes if it's too long.
+                        modifier = Modifier.weight(1f),
                     )
                     if (pinned) {
                         Icon(
@@ -1806,25 +1814,28 @@ private fun StoryAvatar(
 private fun StoryPhoto(
     photo: StoryImage,
     modifier: Modifier = Modifier,
+    // Full-screen story media passes Fit so the WHOLE picture is contained (never
+    // cropped); avatars keep the default Crop.
+    contentScale: ContentScale = ContentScale.Crop,
 ) {
     when (photo) {
         is StoryImage.Res -> Image(
             painter = painterResource(photo.id),
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = contentScale,
             modifier = modifier,
         )
         is StoryImage.Bitmap -> Image(
             bitmap = photo.image,
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = contentScale,
             modifier = modifier,
         )
         is StoryImage.Video -> Image(
             // Static thumbnail; the full-screen viewer plays the actual video.
             bitmap = photo.thumbnail,
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = contentScale,
             modifier = modifier,
         )
         is StoryImage.Url -> Box(modifier) {
@@ -1833,8 +1844,123 @@ private fun StoryPhoto(
             AsyncImage(
                 model = photo.url,
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = contentScale,
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+/**
+ * A centered "now playing" card for a story's song: artwork, title/artist, and a
+ * live sound-wave equalizer that dances while the story plays (freezes on pause).
+ */
+@Composable
+internal fun StoryMusicCard(music: com.example.syntra.net.StoryMusic, playing: Boolean) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.Black.copy(alpha = 0.42f))
+            .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(46.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(alpha = 0.08f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (!music.artworkUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = music.artworkUrl,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(22.dp))
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(
+                music.title.ifBlank { "Musik" },
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (music.artist.isNotBlank()) {
+                Text(
+                    music.artist,
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        SoundWave(playing = playing, modifier = Modifier.size(width = 34.dp, height = 22.dp))
+    }
+}
+
+/** Text-only music style: a compact pill with a note, "title · artist", and wave. */
+@Composable
+internal fun StoryMusicText(music: com.example.syntra.net.StoryMusic, playing: Boolean) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.Black.copy(alpha = 0.38f))
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(7.dp))
+        Text(
+            text = buildString {
+                append(music.title.ifBlank { "Musik" })
+                if (music.artist.isNotBlank()) append(" · ").append(music.artist)
+            },
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 220.dp),
+        )
+        Spacer(Modifier.width(9.dp))
+        SoundWave(playing = playing, modifier = Modifier.size(width = 24.dp, height = 14.dp))
+    }
+}
+
+/** A row of bars that rise and fall like an audio equalizer. Still when [playing] is false. */
+@Composable
+internal fun SoundWave(playing: Boolean, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "wave")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Restart),
+        label = "wave-phase",
+    )
+    Canvas(modifier = modifier) {
+        val bars = 5
+        val gap = size.width / (bars * 2f)
+        val barW = gap
+        for (i in 0 until bars) {
+            val h = if (playing) {
+                size.height * (0.25f + 0.75f * (kotlin.math.sin(phase + i * 0.9f) * 0.5f + 0.5f))
+            } else {
+                size.height * 0.3f
+            }
+            val x = gap + i * (barW + gap)
+            drawLine(
+                color = Color.White,
+                start = Offset(x, size.height),
+                end = Offset(x, size.height - h),
+                strokeWidth = barW,
+                cap = StrokeCap.Round,
             )
         }
     }
@@ -2040,6 +2166,7 @@ internal fun GradientAvatar(
 // ---------------------------------------------------------------------------
 
 private const val STORY_DURATION_MS = 5000L
+private const val MUSIC_STORY_DURATION_MS = 15000L
 private const val STORY_TICK_MS = 40L
 
 /** How far sideways counts as "show me a different person". */
@@ -2074,6 +2201,13 @@ private fun StoryViewer(
     var replyText by remember { mutableStateOf("") }
     var replySending by remember { mutableStateOf(false) }
     val storyContext = LocalContext.current
+
+    // Music attached to a story is actually played here (not just shown). One player
+    // for the whole viewer; re-pointed as segments change, paused when a finger holds.
+    val storyPlayer = remember { MediaPlayer() }
+    DisposableEffect(Unit) {
+        onDispose { runCatching { storyPlayer.stop() }; runCatching { storyPlayer.release() } }
+    }
 
     // Vertical drag offset (negative = dragging up) used for the scale-to-dismiss transition.
     val scope = rememberCoroutineScope()
@@ -2141,18 +2275,46 @@ private fun StoryViewer(
         if (!current.image.isVideoStory()) {
             // Photos count as watched the moment they're shown.
             onViewed(personIndex, segment)
+            // A song gets more time on screen so it's actually heard, not a 5s blip.
+            val total = if (current.music != null) MUSIC_STORY_DURATION_MS else STORY_DURATION_MS
             var elapsed = 0L
-            while (elapsed < STORY_DURATION_MS) {
+            while (elapsed < total) {
                 delay(STORY_TICK_MS)
                 // Read state directly so pause / active typing freeze it live.
                 if (paused || replyText.isNotBlank()) continue
                 elapsed += STORY_TICK_MS
-                progress.snapTo((elapsed.toFloat() / STORY_DURATION_MS).coerceAtMost(1f))
+                progress.snapTo((elapsed.toFloat() / total).coerceAtMost(1f))
             }
             goNext()
         }
         // Videos are marked watched from onProgress once they truly start playing —
         // a video that never plays is NOT counted as viewed.
+    }
+
+    // Point the music player at the current segment's song (if any), and actually
+    // play it. Re-runs on every segment/person change so the right track plays.
+    LaunchedEffect(personIndex, segment) {
+        runCatching { storyPlayer.reset() }
+        val m = person.items.getOrNull(segment)?.music
+        if (m != null && m.previewUrl.isNotBlank()) {
+            com.example.syntra.net.MusicPlayer.pauseForExternalAudio() // a story song takes over audio
+            runCatching {
+                storyPlayer.setDataSource(m.previewUrl)
+                storyPlayer.isLooping = true
+                storyPlayer.setOnPreparedListener { mp -> if (!paused) runCatching { mp.start() } }
+                storyPlayer.prepareAsync()
+            }
+        }
+    }
+    // Holding a finger pauses the story — pause/resume the song with it.
+    LaunchedEffect(paused) {
+        runCatching {
+            if (paused) {
+                if (storyPlayer.isPlaying) storyPlayer.pause()
+            } else if (person.items.getOrNull(segment)?.music != null) {
+                storyPlayer.start()
+            }
+        }
     }
 
     // View counts only exist for my own stories, so fetch them lazily.
@@ -2261,9 +2423,36 @@ private fun StoryViewer(
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
-                    StoryPhoto(media, Modifier.fillMaxSize())
+                    StoryPhoto(media, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                 }
-                else -> StoryPhoto(media, Modifier.fillMaxSize())
+                else -> StoryPhoto(media, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            }
+
+            // A story's song shows its widget wherever the author placed it, in the
+            // style they chose (card / text / none). "none" plays audio with no UI.
+            current.music?.let { m ->
+                if (m.mode != "none") {
+                    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+                        val wPx = constraints.maxWidth.toFloat()
+                        val hPx = constraints.maxHeight.toFloat()
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Box(
+                                modifier = Modifier.graphicsLayer {
+                                    translationX = (m.posX - 0.5f) * wPx
+                                    translationY = (m.posY - 0.5f) * hPx
+                                    scaleX = m.scale
+                                    scaleY = m.scale
+                                },
+                            ) {
+                                if (m.mode == "text") {
+                                    StoryMusicText(music = m, playing = !paused)
+                                } else {
+                                    StoryMusicCard(music = m, playing = !paused)
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Gestures over the media: tap edges to step, hold to pause, swipe

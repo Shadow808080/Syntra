@@ -481,6 +481,8 @@ object ProfileStore {
     private const val KEY_USERNAME = "username"
     private const val KEY_AVATAR_URL = "avatar_url"
     private const val KEY_AVATAR_MEDIA = "avatar_media_id"
+    private const val KEY_COVER_URL = "cover_url"
+    private const val KEY_COVER_MEDIA = "cover_media_id"
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -507,6 +509,17 @@ object ProfileStore {
         prefs(context).edit()
             .putString(KEY_AVATAR_URL, url)
             .putString(KEY_AVATAR_MEDIA, mediaId)
+            .apply()
+    }
+
+    fun coverUrl(context: Context): String? = prefs(context).getString(KEY_COVER_URL, null)
+
+    fun coverMediaId(context: Context): String? = prefs(context).getString(KEY_COVER_MEDIA, null)
+
+    fun setCover(context: Context, url: String, mediaId: String) {
+        prefs(context).edit()
+            .putString(KEY_COVER_URL, url)
+            .putString(KEY_COVER_MEDIA, mediaId)
             .apply()
     }
 }

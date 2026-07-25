@@ -27,7 +27,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -366,6 +369,36 @@ private fun MainTabs(onSignOut: () -> Unit) {
 
     fun goTo(tab: NexusTab) {
         scope.launch { pager.animateScrollToPage(tabOrder.indexOf(tab)) }
+    }
+
+    // Android back button: instead of quitting from any tab, retrace the tabs you
+    // visited; once that history runs out, land on the home tab (Chat); only there
+    // does back leave the app. Overlays (chat detail, reel viewer, room, profile…)
+    // register their own BackHandler later in the tree, so those close first.
+    val chatIndex = remember { tabOrder.indexOf(NexusTab.CHAT).coerceAtLeast(0) }
+    val tabHistory = remember { mutableStateListOf<Int>() }
+    var lastPage by remember { mutableIntStateOf(pager.currentPage) }
+    var poppingBack by remember { mutableStateOf(false) }
+    // Record tab changes (swipe or tap) into history — but a back-driven change is
+    // the pop itself, so it must not be re-recorded. settledPage (not currentPage)
+    // ignores the pages an animated jump sweeps across on its way to the target.
+    LaunchedEffect(pager) {
+        snapshotFlow { pager.settledPage }.collect { cur ->
+            if (cur != lastPage) {
+                if (poppingBack) {
+                    poppingBack = false
+                } else {
+                    tabHistory.add(lastPage)
+                    if (tabHistory.size > 16) tabHistory.removeAt(0)
+                }
+                lastPage = cur
+            }
+        }
+    }
+    androidx.activity.compose.BackHandler(enabled = pager.currentPage != chatIndex) {
+        val target = if (tabHistory.isNotEmpty()) tabHistory.removeAt(tabHistory.lastIndex) else chatIndex
+        poppingBack = true
+        scope.launch { pager.animateScrollToPage(target) }
     }
 
     // A tapped message notification asks to open a specific chat: jump to the CHAT

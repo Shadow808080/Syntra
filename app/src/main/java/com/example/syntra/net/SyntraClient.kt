@@ -431,7 +431,11 @@ object SyntraClient {
                         .put("title", music.title)
                         .put("artist", music.artist)
                         .put("url", music.previewUrl)
-                        .put("artwork", music.artworkUrl ?: ""),
+                        .put("artwork", music.artworkUrl ?: "")
+                        .put("mode", music.mode)
+                        .put("x", music.posX.toDouble())
+                        .put("y", music.posY.toDouble())
+                        .put("scale", music.scale.toDouble()),
                 ),
             )
         }
@@ -491,6 +495,20 @@ object SyntraClient {
     suspend fun getUser(username: String): NetUser =
         (getData("/api/v1/users/$username") as JSONObject).toUser()
 
+    /**
+     * Who recently viewed my profile, plus the grand total. Visiting someone's
+     * profile is recorded server-side automatically on [getUser]; this reads the
+     * list back for my own header. Best-effort — callers fall back to empty.
+     */
+    suspend fun getProfileVisitors(limit: Int = 20): NetVisitors {
+        val obj = getData("/api/v1/users/me/visitors?limit=$limit") as JSONObject
+        val arr = obj.optJSONArray("visitors") ?: JSONArray()
+        return NetVisitors(
+            total = obj.optInt("total", arr.length()),
+            visitors = arr.mapObjects { it.toVisitor() },
+        )
+    }
+
     // Assumed fixed per catatan-untuk-backend.md §3 (endpoint path may differ).
     suspend fun follow(username: String) {
         postData("/api/v1/users/$username/follow", JSONObject())
@@ -507,20 +525,26 @@ object SyntraClient {
         displayName: String? = null,
         avatarMediaId: String? = null,
         username: String? = null,
+        coverMediaId: String? = null,
     ): NetUser = withContext(Dispatchers.IO) {
         val payload = JSONObject()
         if (displayName != null) payload.put("display_name", displayName)
         if (avatarMediaId != null) payload.put("avatar_media_id", avatarMediaId)
+        if (coverMediaId != null) payload.put("cover_media_id", coverMediaId)
         if (username != null) payload.put("username", username)
         val data = patchData("/api/v1/users/me", payload) as JSONObject
         NetUser(
             id = data.optString("id", ""),
             username = data.optString("username", ""),
             displayName = data.optString("display_name", ""),
-            // The response carries a ready URL under avatar_url.
+            // The response carries ready URLs under avatar_url / cover_url.
             avatarMediaId = data.optString("avatar_url", "").ifBlank { data.optString("avatar_media_id", "") },
+            coverUrl = data.optString("cover_url", "").ifBlank { null },
         )
     }
+
+    /** Removes my profile background/cover. The caller deletes the old media file. */
+    suspend fun deleteCover() = delete("/api/v1/users/me/cover")
 
     /**
      * My own profile from `GET /users/me`. The server resolves the photo to a ready
@@ -534,6 +558,7 @@ object SyntraClient {
             username = data.optString("username", ""),
             displayName = data.optString("display_name", ""),
             avatarMediaId = data.optString("avatar_url", "").ifBlank { data.optString("avatar_media_id", "") },
+            coverUrl = data.optString("cover_url", "").ifBlank { null },
             followerCount = data.optInt("follower_count", 0),
             followingCount = data.optInt("following_count", 0),
             isSelf = true,
@@ -642,12 +667,22 @@ object SyntraClient {
                 body = it.optString("body", ""),
                 createdAt = it.optString("created_at", ""),
                 parentId = it.optString("parent_comment_id", "").ifBlank { null },
+                replyToId = it.optString("reply_to_comment_id", "").ifBlank { null },
+                replyToUsername = it.optString("reply_to_username", ""),
+                replyToBody = it.optString("reply_to_body", ""),
             )
         }
 
-    suspend fun postReelComment(reelId: String, body: String, parentId: String? = null) {
+    suspend fun postReelComment(
+        reelId: String,
+        body: String,
+        parentId: String? = null,
+        replyToId: String? = null,
+    ) {
         val payload = JSONObject().put("body", body)
         if (!parentId.isNullOrBlank()) payload.put("parent_id", parentId)
+        // The exact comment being answered — lets the reply render a quote of it.
+        if (!replyToId.isNullOrBlank()) payload.put("reply_to_id", replyToId)
         postData("/api/v1/reels/$reelId/comments", payload)
     }
 
@@ -1236,6 +1271,7 @@ private fun JSONObject.toRoom() = NetRoom(
     hostUsername = optString("host_username", ""),
     hostName = optString("host_name", ""),
     hostAvatarMediaId = strOrNull("host_avatar_url") ?: strOrNull("host_avatar_media_id"),
+    hostCoverUrl = strOrNull("host_cover_url"),
     title = optString("title", ""),
     topic = optString("topic", ""),
     visibility = optString("visibility", "public"),
@@ -1250,6 +1286,7 @@ private fun JSONObject.toParticipant() = NetRoomParticipant(
     username = optString("username", ""),
     displayName = optString("display_name", ""),
     avatarMediaId = strOrNull("avatar_url") ?: strOrNull("avatar_media_id"),
+    coverUrl = strOrNull("cover_url"),
     role = optString("role", "listener"),
     isMuted = optBoolean("is_muted", true),
     hasRaisedHand = optBoolean("has_raised_hand", false),
@@ -1262,10 +1299,19 @@ private fun JSONObject.toUser() = NetUser(
     displayName = optString("display_name", ""),
     // Backend now sends a ready-to-use URL; the old id is kept as a fallback.
     avatarMediaId = strOrNull("avatar_url") ?: strOrNull("avatar_media_id"),
+    coverUrl = strOrNull("cover_url"),
     followerCount = optInt("follower_count", 0),
     followingCount = optInt("following_count", 0),
     followStatus = optString("follow_status", ""),
     isSelf = optBoolean("is_self", false),
+)
+
+private fun JSONObject.toVisitor() = NetVisitor(
+    userId = optString("user_id", ""),
+    username = optString("username", ""),
+    displayName = optString("display_name", ""),
+    avatarUrl = strOrNull("avatar_url"),
+    visitedAt = optString("visited_at", ""),
 )
 
 private fun JSONObject.toStory(): NetStory {
@@ -1277,6 +1323,10 @@ private fun JSONObject.toStory(): NetStory {
             artist = m.optString("artist", ""),
             previewUrl = url,
             artworkUrl = m.optString("artwork", "").ifBlank { null },
+            mode = m.optString("mode", "card").ifBlank { "card" },
+            posX = m.optDouble("x", 0.5).toFloat(),
+            posY = m.optDouble("y", 0.5).toFloat(),
+            scale = m.optDouble("scale", 1.0).toFloat(),
         )
     }
     return NetStory(

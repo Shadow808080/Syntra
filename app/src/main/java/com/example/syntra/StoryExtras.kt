@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
+import android.media.MediaPlayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -29,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,6 +40,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -80,6 +83,29 @@ fun MusicPickerSheet(onDismiss: () -> Unit, onPick: (StoryMusic) -> Unit) {
     var query by remember { mutableStateOf("") }
     val results = remember { mutableStateListOf<MusicTrack>() }
     var loading by remember { mutableStateOf(false) }
+
+    // Preview player — tap a row's play button to hear the 30s clip before choosing.
+    var previewId by remember { mutableStateOf<String?>(null) }
+    val player = remember { MediaPlayer() }
+    DisposableEffect(Unit) {
+        onDispose { runCatching { player.stop() }; runCatching { player.release() } }
+    }
+    fun togglePreview(t: MusicTrack) {
+        if (previewId == t.id) {
+            runCatching { player.stop() }
+            previewId = null
+            return
+        }
+        if (t.previewUrl.isNullOrBlank()) return
+        runCatching {
+            player.reset()
+            player.setDataSource(t.previewUrl)
+            player.setOnPreparedListener { it.start() }
+            player.setOnCompletionListener { previewId = null }
+            player.prepareAsync()
+            previewId = t.id
+        }.onFailure { previewId = null }
+    }
 
     // Seed with the trending chart; then live-search as the user types (debounced).
     LaunchedEffect(query) {
@@ -149,6 +175,8 @@ fun MusicPickerSheet(onDismiss: () -> Unit, onPick: (StoryMusic) -> Unit) {
                                     indication = null,
                                     interactionSource = remember { MutableInteractionSource() },
                                 ) {
+                                    runCatching { player.stop() }
+                                    previewId = null
                                     onPick(
                                         StoryMusic(
                                             title = t.title,
@@ -176,7 +204,27 @@ fun MusicPickerSheet(onDismiss: () -> Unit, onPick: (StoryMusic) -> Unit) {
                                 Text(t.title, color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(t.artist, color = NexusTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            Icon(Icons.Filled.PlayArrow, null, tint = NexusAccentSoft, modifier = Modifier.size(22.dp))
+                            // Preview button (separate tap from picking the row).
+                            val playing = previewId == t.id
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(if (playing) NexusAccent else NexusAccent.copy(alpha = 0.15f))
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        onClick = { togglePreview(t) },
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                    contentDescription = if (playing) "Hentikan pratinjau" else "Dengarkan pratinjau",
+                                    tint = if (playing) Color.White else NexusAccentSoft,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
                         }
                     }
                 }
@@ -243,8 +291,10 @@ private fun drawCentreCrop(canvas: Canvas, bmp: Bitmap, dst: RectF, paint: Paint
 }
 
 /**
- * A pure "music story" background: a vibrant gradient with the album art, song
- * title and artist — used when the user posts a song with no photo of their own.
+ * An atmospheric "music story" BACKGROUND: a vibrant gradient (colour derived from
+ * the song) with the album art bled across it at low opacity behind a dark scrim.
+ * The title/artist/wave are NOT baked here — the viewer overlays a live music card
+ * on top, so the song actually plays and the wave animates instead of being a still.
  */
 fun buildMusicStory(music: StoryMusic, artwork: Bitmap?): Bitmap {
     val out = Bitmap.createBitmap(STORY_W, STORY_H, Bitmap.Config.ARGB_8888)
@@ -262,36 +312,21 @@ fun buildMusicStory(music: StoryMusic, artwork: Bitmap?): Bitmap {
     }
     canvas.drawRect(0f, 0f, STORY_W.toFloat(), STORY_H.toFloat(), bg)
 
-    // Album art card, centred.
-    val artSize = 640f
-    val left = (STORY_W - artSize) / 2f
-    val top = STORY_H / 2f - artSize - 40f
-    val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    // Album art bled full-bleed at low opacity for atmosphere (no hard card/text).
     if (artwork != null) {
-        val dst = RectF(left, top, left + artSize, top + artSize)
-        drawCentreCrop(canvas, artwork, dst, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
-    } else {
-        cardPaint.color = 0x33FFFFFF
-        canvas.drawRoundRect(RectF(left, top, left + artSize, top + artSize), 28f, 28f, cardPaint)
+        val dst = RectF(0f, 0f, STORY_W.toFloat(), STORY_H.toFloat())
+        val faint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply { alpha = 60 }
+        drawCentreCrop(canvas, artwork, dst, faint)
     }
-
-    // Title + artist below the art.
-    val title = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.WHITE
-        textSize = 68f
-        textAlign = Paint.Align.CENTER
-        isFakeBoldText = true
+    // Dark scrim so the live card on top stays legible over any artwork.
+    val scrim = Paint().apply {
+        shader = LinearGradient(
+            0f, 0f, 0f, STORY_H.toFloat(),
+            intArrayOf(0x33000000, 0x00000000, 0x66000000),
+            floatArrayOf(0f, 0.5f, 1f),
+            Shader.TileMode.CLAMP,
+        )
     }
-    val artist = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xCCFFFFFF.toInt()
-        textSize = 48f
-        textAlign = Paint.Align.CENTER
-    }
-    val cx = STORY_W / 2f
-    canvas.drawText(ellipsize(music.title, 22), cx, top + artSize + 110f, title)
-    canvas.drawText(ellipsize(music.artist, 26), cx, top + artSize + 180f, artist)
+    canvas.drawRect(0f, 0f, STORY_W.toFloat(), STORY_H.toFloat(), scrim)
     return out
 }
-
-private fun ellipsize(s: String, max: Int): String =
-    if (s.length <= max) s else s.take(max - 1) + "…"

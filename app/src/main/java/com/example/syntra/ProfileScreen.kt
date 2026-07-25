@@ -1,9 +1,16 @@
 package com.example.syntra
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +22,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -44,8 +52,10 @@ import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -76,6 +86,7 @@ import com.example.syntra.net.NetStory
 import com.example.syntra.net.NetStoryGroup
 import com.example.syntra.net.NetReel
 import com.example.syntra.net.NetUser
+import com.example.syntra.net.NetVisitor
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusAccent
@@ -86,7 +97,9 @@ import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class ProfileTab { SHORTS, SAVED }
 
@@ -95,6 +108,7 @@ private enum class ProfileTab { SHORTS, SAVED }
  * the Saved tab and lets you delete your shorts); a non-null username shows
  * someone else's public profile.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(
     username: String?,
@@ -126,17 +140,94 @@ fun ProfileScreen(
     var showStory by remember { mutableStateOf(false) }
     var showAvatarChoice by remember { mutableStateOf(false) }
 
+    // "Who viewed my profile" — own profile only. Stacked avatars in the header;
+    // tapping opens the full list.
+    val visitors = remember(username) { mutableStateListOf<NetVisitor>() }
+    var visitorTotal by remember(username) { mutableIntStateOf(0) }
+    var showVisitors by remember { mutableStateOf(false) }
+
     val isMe = username == null
+
+    // Profile background/cover. Shows the server value; on the own profile it can be
+    // changed inline — pick → crop → upload → PATCH → delete the OLD cover from storage.
+    var coverUrlState by remember(username) { mutableStateOf<String?>(null) }
+    var coverUploading by remember { mutableStateOf(false) }
+    // A picked-but-not-yet-cropped background photo. While non-null, the crop editor
+    // is shown full-screen so the user frames which part becomes the cover.
+    var coverToCrop by remember { mutableStateOf<Bitmap?>(null) }
+    // When a cover already exists, tapping it offers change/remove.
+    var showCoverOptions by remember { mutableStateOf(false) }
+
+    fun deleteCover() {
+        scope.launch {
+            runCatching { SyntraClient.deleteCover() }
+                .onSuccess {
+                    val prev = ProfileStore.coverMediaId(context)
+                    if (!prev.isNullOrBlank()) runCatching { SyntraClient.deleteMedia(prev) }
+                    ProfileStore.setCover(context, "", "")
+                    coverUrlState = null
+                    android.widget.Toast.makeText(context, "Background dihapus.", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                .onFailure {
+                    android.widget.Toast.makeText(context, "Gagal hapus background: ${it.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+        }
+    }
+
+    fun uploadCover(bitmap: Bitmap) {
+        scope.launch {
+            coverUploading = true
+            runCatching {
+                val jpeg = withContext(Dispatchers.Default) { bitmapToJpeg(bitmap, 1600, 85) }
+                val prev = ProfileStore.coverMediaId(context)
+                val (mid, url) = SyntraClient.uploadMediaFull("image", "jpg", "image/jpeg", jpeg)
+                val me = SyntraClient.updateProfile(coverMediaId = mid)
+                val newUrl = me.coverUrl ?: url
+                ProfileStore.setCover(context, newUrl, mid)
+                // Changing the cover deletes the previous one from storage.
+                if (!prev.isNullOrBlank() && prev != mid) {
+                    runCatching { SyntraClient.deleteMedia(prev) }
+                }
+                newUrl
+            }.onSuccess {
+                coverUrlState = it
+                android.widget.Toast.makeText(context, "Background diperbarui.", android.widget.Toast.LENGTH_SHORT).show()
+            }.onFailure {
+                android.widget.Toast.makeText(context, "Gagal ganti background: ${it.message}", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            coverUploading = false
+        }
+    }
+
+    val coverPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null && isMe) scope.launch {
+            val bmp = withContext(Dispatchers.IO) { decodeBitmap(context, uri, 2400) }
+            if (bmp != null) {
+                coverToCrop = bmp
+            } else {
+                android.widget.Toast.makeText(context, "Gagal baca gambar.", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     suspend fun load() {
         try {
             user = if (isMe) SyntraClient.getMyProfile() else SyntraClient.getUser(username!!)
-            user?.let { following = it.followStatus == "accepted" || it.followStatus == "pending" }
+            user?.let {
+                following = it.followStatus == "accepted" || it.followStatus == "pending"
+                if (coverUrlState == null) coverUrlState = it.coverUrl
+            }
             val myShorts = if (isMe) SyntraClient.getMyReels() else SyntraClient.getUserReels(username!!)
             shorts.clear(); shorts.addAll(myShorts)
             if (isMe) {
                 val sv = SyntraClient.getSavedReels()
                 saved.clear(); saved.addAll(sv)
+                // Who viewed me — best effort, never blocks the profile.
+                runCatching { SyntraClient.getProfileVisitors() }.getOrNull()?.let { v ->
+                    visitors.clear(); visitors.addAll(v.visitors); visitorTotal = v.total
+                }
             }
             // Find this person's story among the ones visible to me (followed + self).
             val uid = user?.id
@@ -171,6 +262,11 @@ fun ProfileScreen(
     }
 
     Box(Modifier.fillMaxSize().background(NexusBackground)) {
+        PullToRefreshBox(
+            isRefreshing = loading,
+            onRefresh = { scope.launch { load() } },
+            modifier = Modifier.fillMaxSize(),
+        ) {
         LazyVerticalGrid(
             columns = GridCells.Fixed(3),
             modifier = Modifier.fillMaxSize(),
@@ -181,13 +277,29 @@ fun ProfileScreen(
             // --- Header spans all three columns ---
             item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(3) }) {
                 Column {
-                    ProfileTopBar(title = user?.username ?: "", onClose = onClose)
-                    ProfileHeader(
+                    ProfileHeaderHero(
                         user = user,
                         isMe = isMe,
                         hasStory = hasStory,
                         storyAllViewed = story?.allViewed == true,
+                        coverUrl = coverUrlState,
+                        coverUploading = coverUploading,
+                        totalLikes = shorts.sumOf { it.likeCount },
+                        lastVisitor = visitors.firstOrNull(),
+                        visitorTotal = visitorTotal,
+                        onClose = onClose,
                         onAvatarTap = { onAvatarTap() },
+                        onEditCover = {
+                            // A cover already there → offer change/remove; else pick one.
+                            if (coverUrlState != null) {
+                                showCoverOptions = true
+                            } else {
+                                coverPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            }
+                        },
+                        onVisitorsClick = { showVisitors = true },
                     )
                     if (!isMe && user != null) {
                         ProfileActions(
@@ -237,7 +349,7 @@ fun ProfileScreen(
             }
 
             val list = if (tab == ProfileTab.SAVED) saved else shorts
-            if (loading) {
+            if (loading && list.isEmpty()) {
                 item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(3) }) {
                     Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp, modifier = Modifier.size(26.dp))
@@ -264,6 +376,19 @@ fun ProfileScreen(
                 }
             }
         }
+        }
+    }
+
+    // Change / remove the profile background.
+    if (showCoverOptions) {
+        CoverOptionsSheet(
+            onChange = {
+                showCoverOptions = false
+                coverPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            onRemove = { showCoverOptions = false; deleteCover() },
+            onDismiss = { showCoverOptions = false },
+        )
     }
 
     // Full-screen swipeable reel viewer (opened by tapping a thumbnail).
@@ -316,123 +441,483 @@ fun ProfileScreen(
     openChatConvo?.let { convo ->
         ChatDetailScreen(conversation = convo, onBack = { openChatConvo = null })
     }
-}
 
-@Composable
-private fun ProfileTopBar(title: String, onClose: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                    onClick = onClose,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Kembali", tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
-        }
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text = if (title.isBlank()) "Profil" else "@$title",
-            color = NexusTextPrimary,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.Bold,
+    // Full list of who viewed my profile.
+    if (showVisitors) {
+        VisitorsSheet(
+            total = visitorTotal,
+            visitors = visitors.toList(),
+            onDismiss = { showVisitors = false },
+        )
+    }
+
+    // Crop editor for a freshly-picked background — frame what becomes the cover.
+    coverToCrop?.let { bmp ->
+        ImageCropScreen(
+            source = bmp,
+            aspectRatio = 2.2f, // wide banner, matches the profile cover
+            title = "Atur background",
+            onCancel = { coverToCrop = null },
+            onConfirm = { cropped ->
+                coverToCrop = null
+                uploadCover(cropped)
+            },
         )
     }
 }
 
+/** Decodes a content URI into a bitmap, downscaled so the longest side <= [maxDim]. */
+private fun decodeBitmap(context: android.content.Context, uri: android.net.Uri, maxDim: Int): Bitmap? {
+    return runCatching {
+        // First pass: bounds only, to pick an integer sample size.
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        while (longest / sample > maxDim) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+    }.getOrNull()
+}
+
+/** Downscales [bitmap] so its longest side <= [maxDim], then JPEG-encodes it. */
+private fun bitmapToJpeg(bitmap: Bitmap, maxDim: Int, quality: Int): ByteArray {
+    val w = bitmap.width
+    val h = bitmap.height
+    val longest = maxOf(w, h)
+    val scaled = if (longest > maxDim) {
+        val ratio = maxDim.toFloat() / longest
+        Bitmap.createScaledBitmap(bitmap, (w * ratio).toInt().coerceAtLeast(1), (h * ratio).toInt().coerceAtLeast(1), true)
+    } else {
+        bitmap
+    }
+    val out = java.io.ByteArrayOutputStream()
+    scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
+    if (scaled !== bitmap) scaled.recycle()
+    return out.toByteArray()
+}
+
+/**
+ * TikTok/Instagram-style profile hero: a real cover photo (or brand gradient) with
+ * a scrim, an avatar overlapping its lower edge, the identity, and clean three-up
+ * stats (Mengikuti / Pengikut / Suka). Own profile can change the cover inline and
+ * shows the most-recent visitor as a bubble at the top-right.
+ */
 @Composable
-private fun ProfileHeader(
+private fun ProfileHeaderHero(
     user: NetUser?,
     isMe: Boolean,
     hasStory: Boolean,
     storyAllViewed: Boolean,
+    coverUrl: String?,
+    coverUploading: Boolean,
+    totalLikes: Int,
+    lastVisitor: NetVisitor?,
+    visitorTotal: Int,
+    onClose: () -> Unit,
     onAvatarTap: () -> Unit,
+    onEditCover: () -> Unit,
+    onVisitorsClick: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        // Avatar — wrapped in a story ring when there's an active story. Bright
-        // gradient ring = unwatched, dim ring = fully watched. Tap runs onAvatarTap.
-        val ringMod = when {
-            hasStory && !storyAllViewed -> Modifier.background(
-                Brush.sweepGradient(listOf(NexusAccentSoft, NexusAccent, NexusAccentSoft)),
-                CircleShape,
-            )
-            hasStory -> Modifier.background(NexusStroke, CircleShape)
-            else -> Modifier
-        }
-        Box(
-            modifier = Modifier
-                .size(if (hasStory) 100.dp else 92.dp)
-                .then(ringMod)
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                    onClick = onAvatarTap,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
+    val coverHeight = 172.dp
+    Box(Modifier.fillMaxWidth()) {
+        // --- Cover / background ---
+        Box(Modifier.fillMaxWidth().height(coverHeight)) {
+            if (!coverUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = coverUrl,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Box(
+                    Modifier.fillMaxSize().background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF4834A6), Color(0xFF6C5CE7), Color(0xFF3B68F5)),
+                        ),
+                    ),
+                )
+            }
+            // Scrim: darken top a touch for the back bar, fade the bottom into the page.
             Box(
-                modifier = Modifier
-                    .size(92.dp)
-                    .padding(if (hasStory) 4.dp else 0.dp)
-                    .clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5))))
-                    .border(2.dp, NexusBackground, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                val avatar = user?.avatarMediaId
-                if (!avatar.isNullOrBlank() && avatar.startsWith("http")) {
-                    AsyncImage(
-                        model = avatar,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize().clip(CircleShape),
-                    )
-                } else {
+                Modifier.fillMaxSize().background(
+                    Brush.verticalGradient(
+                        0f to Color.Black.copy(alpha = 0.28f),
+                        0.35f to Color.Transparent,
+                        1f to NexusBackground,
+                    ),
+                ),
+            )
+            // Change-cover control (own profile): a quiet gray hint, no chrome — tap
+            // the cover to pick a new background.
+            if (isMe) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            enabled = !coverUploading,
+                            onClick = onEditCover,
+                        ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (coverUploading) {
+                        CircularProgressIndicator(
+                            color = Color.White.copy(alpha = 0.7f),
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(13.dp),
+                        )
+                        Spacer(Modifier.width(7.dp))
+                    }
                     Text(
-                        text = (user?.displayName?.firstOrNull() ?: user?.username?.firstOrNull() ?: 'S').uppercase(),
-                        color = Color.White,
-                        fontSize = 34.sp,
-                        fontWeight = FontWeight.Bold,
+                        text = if (coverUploading) "Mengunggah…" else "Ketuk untuk mengganti",
+                        color = Color.White.copy(alpha = 0.55f),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
                     )
                 }
             }
         }
-        Spacer(Modifier.height(12.dp))
-        Text(
-            text = user?.displayName?.ifBlank { user.username } ?: "…",
-            color = NexusTextPrimary,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        if (user != null) {
-            Spacer(Modifier.height(2.dp))
-            Text("@${user.username}", color = NexusTextSecondary, fontSize = 13.sp)
+
+        // --- Identity, pushed down so the avatar straddles the cover's lower edge ---
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = coverHeight - 52.dp, bottom = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            AvatarRing(user = user, hasStory = hasStory, storyAllViewed = storyAllViewed, onTap = onAvatarTap)
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = user?.displayName?.ifBlank { user.username } ?: "…",
+                color = NexusTextPrimary,
+                fontSize = 21.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            if (user != null) {
+                Spacer(Modifier.height(3.dp))
+                Text("@${user.username}", color = NexusTextSecondary, fontSize = 13.sp)
+            }
+            Spacer(Modifier.height(18.dp))
+            // Clean three-up stats — no card, big numbers, like TikTok/Instagram.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatCell(user?.followingCount ?: 0, "Mengikuti", Modifier.weight(1f))
+                StatDivider()
+                StatCell(user?.followerCount ?: 0, "Pengikut", Modifier.weight(1f))
+                StatDivider()
+                StatCell(totalLikes, "Suka", Modifier.weight(1f))
+            }
         }
-        Spacer(Modifier.height(16.dp))
-        // Stats
-        Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-            Stat(count = user?.followingCount ?: 0, label = "Mengikuti")
-            Stat(count = user?.followerCount ?: 0, label = "Pengikut")
+
+        // --- Floating top bar over the cover (drawn last so it always taps) ---
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            HeroCircleIcon(Icons.AutoMirrored.Filled.ArrowBack, "Kembali", onClose)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = if ((user?.username ?: "").isBlank()) "Profil" else "@${user!!.username}",
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.weight(1f))
+            // Most-recent visitor bubble (own profile) — tap to see everyone.
+            if (isMe && (lastVisitor != null || visitorTotal > 0)) {
+                LastVisitorBubble(last = lastVisitor, total = visitorTotal, onClick = onVisitorsClick)
+            }
+        }
+    }
+}
+
+/**
+ * The single most-recent profile visitor as an avatar, with a small eye + count
+ * badge at its bottom-right. Tapping opens the full visitor list.
+ */
+@Composable
+private fun LastVisitorBubble(last: NetVisitor?, total: Int, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(46.dp)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+    ) {
+        // Avatar of the last visitor (or an eye placeholder if unknown).
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .size(40.dp)
+                .clip(CircleShape)
+                .border(2.dp, Color.White.copy(alpha = 0.85f), CircleShape)
+                .background(Brush.linearGradient(listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5)))),
+            contentAlignment = Alignment.Center,
+        ) {
+            val a = last?.avatarUrl
+            when {
+                !a.isNullOrBlank() -> AsyncImage(
+                    model = a,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(CircleShape),
+                )
+                last != null -> Text(
+                    (last.displayName.firstOrNull() ?: last.username.firstOrNull() ?: '?').uppercase(),
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                else -> Icon(Icons.Filled.Visibility, null, tint = Color.White, modifier = Modifier.size(18.dp))
+            }
+        }
+        // Eye + count, bottom-right — no chrome, just the icon and number.
+        Row(
+            modifier = Modifier.align(Alignment.BottomEnd),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Visibility, null, tint = Color.White, modifier = Modifier.size(11.dp))
+            Spacer(Modifier.width(2.dp))
+            Text(
+                formatCount(total.coerceAtLeast(1)),
+                color = Color.White,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+/** The avatar with its story ring, shared by the hero. */
+@Composable
+private fun AvatarRing(user: NetUser?, hasStory: Boolean, storyAllViewed: Boolean, onTap: () -> Unit) {
+    val ringMod = when {
+        hasStory && !storyAllViewed -> Modifier.background(
+            Brush.sweepGradient(listOf(NexusAccentSoft, NexusAccent, NexusAccentSoft)),
+            CircleShape,
+        )
+        hasStory -> Modifier.background(NexusStroke, CircleShape)
+        else -> Modifier
+    }
+    Box(
+        modifier = Modifier
+            .size(if (hasStory) 104.dp else 96.dp)
+            .then(ringMod)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onTap,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(96.dp)
+                .padding(if (hasStory) 4.dp else 0.dp)
+                .clip(CircleShape)
+                .background(Brush.linearGradient(listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5))))
+                .border(3.dp, NexusBackground, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            val avatar = user?.avatarMediaId
+            if (!avatar.isNullOrBlank() && avatar.startsWith("http")) {
+                AsyncImage(
+                    model = avatar,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(CircleShape),
+                )
+            } else {
+                Text(
+                    text = (user?.displayName?.firstOrNull() ?: user?.username?.firstOrNull() ?: 'S').uppercase(),
+                    color = Color.White,
+                    fontSize = 34.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+}
+
+/** A round translucent icon button that sits on the banner. */
+@Composable
+private fun HeroCircleIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    desc: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.28f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, desc, tint = Color.White, modifier = Modifier.size(20.dp))
+    }
+}
+
+@Composable
+private fun StatCell(count: Int, label: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(formatCount(count), color = NexusTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(3.dp))
+        Text(label, color = NexusTextSecondary, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun StatDivider() {
+    Box(Modifier.width(1.dp).height(22.dp).background(NexusStroke.copy(alpha = 0.5f)))
+}
+
+/** 1234 -> "1,2rb", 1_500_000 -> "1,5jt". Keeps the stats card compact. */
+private fun formatCount(n: Int): String = when {
+    n >= 1_000_000 -> String.format("%.1fjt", n / 1_000_000.0).replace(".0", "").replace(".", ",")
+    n >= 1_000 -> String.format("%.1frb", n / 1_000.0).replace(".0", "").replace(".", ",")
+    else -> n.toString()
+}
+
+
+/** Bottom sheet listing everyone who recently viewed my profile. */
+@Composable
+private fun VisitorsSheet(total: Int, visitors: List<NetVisitor>, onDismiss: () -> Unit) {
+    BackHandler(onBack = onDismiss)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onDismiss,
+            ),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                .background(NexusSurface)
+                .border(1.dp, NexusStroke, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                .clickable(enabled = false) {}
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+        ) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .width(40.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(NexusStroke),
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Visibility, null, tint = NexusAccentSoft, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Pengunjung profil", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Text("$total total", color = NexusTextSecondary, fontSize = 13.sp)
+            }
+            Spacer(Modifier.height(8.dp))
+            if (visitors.isEmpty()) {
+                Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                    Text("Belum ada yang mengunjungi profilmu.", color = NexusTextSecondary, fontSize = 13.sp)
+                }
+            } else {
+                Column(
+                    Modifier
+                        .heightIn(max = 440.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    visitors.forEach { v -> VisitorRow(v) }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
         }
     }
 }
 
 @Composable
-private fun Stat(count: Int, label: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("$count", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        Text(label, color = NexusTextSecondary, fontSize = 12.sp)
+private fun VisitorRow(v: NetVisitor) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(Brush.linearGradient(listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5)))),
+            contentAlignment = Alignment.Center,
+        ) {
+            val a = v.avatarUrl
+            if (!a.isNullOrBlank()) {
+                AsyncImage(
+                    model = a,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(CircleShape),
+                )
+            } else {
+                Text(
+                    (v.displayName.firstOrNull() ?: v.username.firstOrNull() ?: '?').uppercase(),
+                    color = Color.White,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                v.displayName.ifBlank { v.username }.ifBlank { "pengguna" },
+                color = NexusTextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (v.username.isNotBlank()) {
+                Text("@${v.username}", color = NexusTextSecondary, fontSize = 12.sp)
+            }
+        }
+        val ago = relativeTimeId(v.visitedAt)
+        if (ago.isNotBlank()) {
+            Text(ago, color = NexusTextSecondary, fontSize = 11.sp)
+        }
+    }
+}
+
+/** ISO-8601 -> short Indonesian relative time ("baru saja", "5 mnt", "2 jam", "3 hr"). */
+private fun relativeTimeId(iso: String): String {
+    if (iso.isBlank()) return ""
+    return try {
+        val then = java.time.Instant.parse(iso).toEpochMilli()
+        val secs = ((System.currentTimeMillis() - then) / 1000).coerceAtLeast(0)
+        when {
+            secs < 60 -> "baru saja"
+            secs < 3600 -> "${secs / 60} mnt"
+            secs < 86400 -> "${secs / 3600} jam"
+            secs < 604800 -> "${secs / 86400} hr"
+            else -> "${secs / 604800} mgg"
+        }
+    } catch (_: Exception) {
+        ""
     }
 }
 
@@ -705,6 +1190,56 @@ private fun AvatarChoiceSheet(onDismiss: () -> Unit, onStory: () -> Unit, onPhot
                 ChoiceTile(Icons.Filled.Photo, "Foto profil", Color.White.copy(alpha = 0.10f), Modifier.weight(1f), onPhoto)
             }
         }
+    }
+}
+
+/** Change or remove the profile background. */
+@Composable
+private fun CoverOptionsSheet(onChange: () -> Unit, onRemove: () -> Unit, onDismiss: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurface, RoundedCornerShape(22.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
+                .padding(vertical = 18.dp),
+        ) {
+            Text(
+                "Background profil",
+                color = NexusTextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 22.dp),
+            )
+            Spacer(Modifier.height(10.dp))
+            CoverOptionRow(Icons.Filled.Photo, "Ganti background", NexusTextPrimary, onChange)
+            CoverOptionRow(Icons.Filled.Delete, "Hapus background", Color(0xFFFF5D5D), onRemove)
+            CoverOptionRow(Icons.Filled.Close, "Batal", NexusTextSecondary, onDismiss)
+        }
+    }
+}
+
+@Composable
+private fun CoverOptionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    tint: Color,
+    onClick: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 22.dp, vertical = 14.dp),
+    ) {
+        Icon(icon, null, tint = tint, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(label, color = tint, fontSize = 15.sp)
     }
 }
 
