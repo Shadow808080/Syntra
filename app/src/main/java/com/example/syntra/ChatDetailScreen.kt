@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -147,6 +148,8 @@ private data class Message(
     val text: String,
     val fromMe: Boolean,
     val time: String,
+    /** Epoch millis of when the message was sent; drives the per-day date chips. */
+    val at: Long = System.currentTimeMillis(),
     /**
      * Media the server attached to this message. Kept apart from [text] so a
      * photo is never shown as a raw URL in the bubble.
@@ -209,6 +212,7 @@ private fun NetMessage.toUi(): Message {
         },
         fromMe = senderId == SyntraClient.myUserId,
         time = formatClock(createdAt),
+        at = parseEpoch(createdAt),
         media = if (isDeleted) null else attachment ?: legacyUrl,
         isDeleted = isDeleted,
         storyReplyUrl = storyUrl,
@@ -223,6 +227,38 @@ private fun formatClock(iso: String): String {
         val local = java.time.Instant.parse(iso).atZone(java.time.ZoneId.systemDefault())
         java.time.format.DateTimeFormatter.ofPattern("HH:mm").format(local)
     }.getOrDefault("")
+}
+
+/** RFC3339 UTC → epoch millis; now() when blank/unparseable (optimistic sends). */
+private fun parseEpoch(iso: String): Long {
+    if (iso.isBlank()) return System.currentTimeMillis()
+    return runCatching { java.time.Instant.parse(iso).toEpochMilli() }
+        .getOrDefault(System.currentTimeMillis())
+}
+
+/** yyy-MM-dd key for grouping messages by calendar day (local time). */
+private fun dayKey(at: Long): String =
+    java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale("id")).format(at)
+
+/**
+ * Date-chip label in Indonesian: "Hari ini" / "Kemarin", the day name within the
+ * last week (Senin, Selasa…), else a full date (12 Juli 2026).
+ */
+private fun dayLabel(at: Long): String {
+    val now = java.util.Calendar.getInstance()
+    val then = java.util.Calendar.getInstance().apply { timeInMillis = at }
+    fun sameDay(a: java.util.Calendar, b: java.util.Calendar) =
+        a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR) &&
+            a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR)
+    val yesterday = (now.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_YEAR, -1) }
+    val id = java.util.Locale("id")
+    return when {
+        sameDay(now, then) -> "Hari ini"
+        sameDay(yesterday, then) -> "Kemarin"
+        (now.timeInMillis - at) in 0 until 7L * 24 * 3600_000 ->
+            java.text.SimpleDateFormat("EEEE", id).format(at) // Senin, Selasa…
+        else -> java.text.SimpleDateFormat("d MMMM yyyy", id).format(at)
+    }
 }
 
 private fun sampleMessages(convo: Conversation): List<Message> = listOf(
@@ -379,13 +415,13 @@ fun ChatDetailScreen(
     }
 
     // First landing: jump straight to the first unread message (or the very last
-    // when all are read), with no visible scroll from the top. Item 0 is the date
-    // chip, so message i sits at list index i+1.
+    // when all are read), with no visible scroll from the top. Each message is one
+    // lazy item now (the date chip renders inside it), so message i == lazy index i.
     var landed by remember(conversation) { mutableStateOf(false) }
     LaunchedEffect(messages.isNotEmpty()) {
         if (messages.isNotEmpty() && !landed) {
             val firstUnread = (messages.size - conversation.unread).coerceIn(0, messages.lastIndex)
-            val target = if (conversation.unread > 0) firstUnread + 1 else messages.size
+            val target = if (conversation.unread > 0) firstUnread else messages.lastIndex
             listState.scrollToItem(target)
             landed = true
         }
@@ -459,22 +495,23 @@ fun ChatDetailScreen(
                                 if (older.isEmpty() || older.size < MESSAGE_PAGE_SIZE) hasMore = false
                                 if (older.isNotEmpty()) {
                                     MessageCache.merge(context, conversation.id, older)
-                                    // Keep the user's scroll position: remember the first
-                                    // item, prepend the older batch, then restore anchor.
-                                    val anchorId = messages.firstOrNull()?.id
                                     val ordered = older.reversed().map { it.toUi() } // oldest-first
                                     val existing = messages.map { it.id }.toSet()
                                     val toAdd = ordered.filter { it.id !in existing }
                                     messages.addAll(0, toAdd)
                                     oldestId = older.minByOrNull { it.id }?.id ?: oldestId
-                                    // Anchor: the previously-first message is now at
-                                    // index (toAdd.size) + 1 (date chip at 0).
-                                    if (anchorId != null) {
-                                        runCatching { listState.scrollToItem(toAdd.size + 1) }
+                                    // Hide the skeleton FIRST so index math is clean, then
+                                    // anchor to the previously-first message (now at lazy
+                                    // index toAdd.size) so the view doesn't jump.
+                                    loadingOlder = false
+                                    if (toAdd.isNotEmpty()) {
+                                        runCatching { listState.scrollToItem(toAdd.size) }
                                     }
+                                } else {
+                                    loadingOlder = false
                                 }
                             }
-                        loadingOlder = false
+                            .onFailure { loadingOlder = false }
                     }
                 }
         }
@@ -815,8 +852,14 @@ fun ChatDetailScreen(
             if (loadingOlder) {
                 item(key = "skeleton") { MessagesSkeleton() }
             }
-            item { DateChip("Today") }
-            items(messages, key = { it.id }) { msg ->
+            // Messages grouped by calendar day, each group preceded by a date chip
+            // ("Hari ini" / "Kemarin" / "Senin" / "12 Juli 2026"). The chip is keyed by
+            // the day so a new day inserts a fresh header as history scrolls in.
+            itemsIndexed(messages, key = { _, m -> m.id }) { index, msg ->
+                val prev = messages.getOrNull(index - 1)
+                if (prev == null || dayKey(prev.at) != dayKey(msg.at)) {
+                    DateChip(dayLabel(msg.at))
+                }
                 MessageBubble(
                     msg = msg,
                     reactions = aggregateReactions(reactions[msg.id]),
