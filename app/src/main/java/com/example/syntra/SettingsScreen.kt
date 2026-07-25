@@ -32,7 +32,6 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DataUsage
-import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Notifications
@@ -149,7 +148,6 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
     var readReceipts by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.READ_RECEIPTS, true)) }
     var showPresence by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.SHOW_PRESENCE, true)) }
     var autoPlay by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.AUTO_PLAY_VIDEO, true)) }
-    var autoScrollReels by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true)) }
     var loudSpeaker by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.LOUD_SPEAKER, true)) }
 
     fun save(key: String, value: Boolean) = SettingsStore.setBool(context, key, value)
@@ -277,14 +275,6 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                         subtitle = "Story video langsung diputar saat dibuka",
                         checked = autoPlay,
                         onChange = { autoPlay = it; save(SettingsStore.AUTO_PLAY_VIDEO, it) },
-                    )
-                    Divider()
-                    ToggleRow(
-                        icon = Icons.Filled.SwapVert,
-                        title = "Geser otomatis di Shorts",
-                        subtitle = "Lanjut ke video berikutnya setelah selesai menonton",
-                        checked = autoScrollReels,
-                        onChange = { autoScrollReels = it; save(SettingsStore.AUTO_SCROLL_REELS, it) },
                     )
                     Divider()
                     ToggleRow(

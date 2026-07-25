@@ -68,6 +68,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.outlined.ModeComment
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -162,6 +163,9 @@ fun ShortsScreen(
     // whenever the tab comes back so a change in Settings takes effect immediately.
     var autoScroll by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true)) }
     LaunchedEffect(visible) { if (visible) autoScroll = SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true) }
+    // Long-press on a reel opens this playback-settings sheet (moved out of the
+    // app-wide Settings so it lives right where you watch).
+    var showReelSettings by remember { mutableStateOf(false) }
     // Tell the notifier we're on Shorts, so a "comment reply" toast is suppressed
     // here (it shows live) but still fires on every other screen.
     DisposableEffect(visible) {
@@ -469,6 +473,7 @@ fun ShortsScreen(
                                     scope.launch { pager.animateScrollToPage(page + 1) }
                                 }
                             },
+                            onLongPress = { showReelSettings = true },
                         )
                     }
                 }
@@ -553,6 +558,17 @@ fun ShortsScreen(
                 val i = reels.indexOfFirst { it.id == reel.id }
                 if (i >= 0) reels[i] = reels[i].copy(commentCount = reels[i].commentCount + 1)
             },
+        )
+    }
+
+    if (showReelSettings) {
+        ReelSettingsSheet(
+            autoScroll = autoScroll,
+            onAutoScrollChange = { on ->
+                autoScroll = on
+                SettingsStore.setBool(context, SettingsStore.AUTO_SCROLL_REELS, on)
+            },
+            onDismiss = { showReelSettings = false },
         )
     }
 
@@ -643,6 +659,8 @@ private fun ReelPage(
     /** When true, the clip plays once and [onVideoEnded] advances to the next reel. */
     autoScroll: Boolean = false,
     onVideoEnded: () -> Unit = {},
+    /** Long-press on the video opens the playback settings (auto-scroll). */
+    onLongPress: () -> Unit = {},
 ) {
     // Tap-to-pause, per reel. Reset when the reel scrolls off so coming back plays.
     var paused by remember { mutableStateOf(false) }
@@ -670,15 +688,17 @@ private fun ReelPage(
 
         // Tap layer toggles pause — but only over the upper video area. The
         // bottom strip (caption, username, action rail) is left out so tapping
-        // those never pauses the video.
+        // those never pauses the video. Long-press opens the playback settings.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(bottom = 200.dp)
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                ) { paused = !paused },
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { paused = !paused },
+                        onLongPress = { onLongPress() },
+                    )
+                },
         )
 
         // Paused indicator.
@@ -749,6 +769,93 @@ private fun ReelPage(
                 onScrubEnd = { scrubbing = false; paused = true },
                 modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
             )
+        }
+    }
+}
+
+/**
+ * Playback-settings sheet for Shorts, opened by long-pressing a reel. Currently
+ * hosts the "auto-scroll" toggle that used to live in the app-wide Settings —
+ * it belongs here, right where you're watching.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun ReelSettingsSheet(
+    autoScroll: Boolean,
+    onAutoScrollChange: (Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Color(0xFF15151C),
+        dragHandle = { androidx.compose.material3.BottomSheetDefaults.DragHandle() },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 20.dp),
+        ) {
+            Text(
+                "Pengaturan pemutaran",
+                color = NexusTextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { onAutoScrollChange(!autoScroll) }
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(ShortsTeal.copy(alpha = 0.16f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.SwapVert,
+                        contentDescription = null,
+                        tint = ShortsTeal,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Geser otomatis",
+                        color = NexusTextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "Lanjut ke video berikutnya setelah selesai menonton",
+                        color = NexusTextSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                androidx.compose.material3.Switch(
+                    checked = autoScroll,
+                    onCheckedChange = { onAutoScrollChange(it) },
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = ShortsTeal,
+                        uncheckedThumbColor = Color.White,
+                        uncheckedTrackColor = Color(0xFF3A3A44),
+                        uncheckedBorderColor = Color.Transparent,
+                    ),
+                )
+            }
         }
     }
 }
