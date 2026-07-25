@@ -70,6 +70,16 @@ data class NetStory(
     val viewed: Boolean = false,
     val createdAt: String = "",
     val expiresAt: String = "",
+    /** Music attached to this story (from overlays.music), or null. */
+    val music: StoryMusic? = null,
+)
+
+/** A song stuck to a story: 30-second preview + display info. */
+data class StoryMusic(
+    val title: String,
+    val artist: String,
+    val previewUrl: String,
+    val artworkUrl: String? = null,
 )
 
 // Voice rooms — shapes taken from docs/voice-rooms.md + rest/handler/room.go.

@@ -18,8 +18,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -37,6 +39,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Visibility
@@ -792,10 +795,33 @@ private fun ProfileStoryViewer(
     val current = stories.getOrNull(index) ?: run { onClose(); return }
     val isVideo = current.mediaKind == "video"
 
-    // Mark viewed + auto-advance. Images use a fixed 5s; videos use their duration.
+    // Play the story's attached song (30s preview) while it's on screen. One player,
+    // swapped when the segment changes, released on close.
+    val music = current.music
+    DisposableEffect(current.id) {
+        var mp: android.media.MediaPlayer? = null
+        if (music != null && music.previewUrl.isNotBlank() && !isVideo) {
+            runCatching {
+                mp = android.media.MediaPlayer().apply {
+                    setDataSource(music.previewUrl)
+                    isLooping = true
+                    setOnPreparedListener { it.start() }
+                    prepareAsync()
+                }
+            }
+        }
+        onDispose { runCatching { mp?.release() } }
+    }
+
+    // Mark viewed + auto-advance. A music story lingers for the preview length; plain
+    // images 5s; videos use their own duration.
     LaunchedEffect(index) {
         onViewed(current.id)
-        val dur = if (isVideo && current.durationMs > 0) current.durationMs else 5000L
+        val dur = when {
+            isVideo && current.durationMs > 0 -> current.durationMs
+            music != null -> 15000L
+            else -> 5000L
+        }
         kotlinx.coroutines.delay(dur)
         if (index < stories.lastIndex) index++ else onClose()
     }
@@ -894,6 +920,28 @@ private fun ProfileStoryViewer(
             contentAlignment = Alignment.Center,
         ) {
             Icon(Icons.Filled.Close, "Tutup", tint = Color.White, modifier = Modifier.size(24.dp))
+        }
+
+        // "Now playing" music pill at the bottom, when this story has a song.
+        music?.let { m ->
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(bottom = 24.dp)
+                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${m.title} · ${m.artist}",
+                    color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 260.dp),
+                )
+            }
         }
     }
 }

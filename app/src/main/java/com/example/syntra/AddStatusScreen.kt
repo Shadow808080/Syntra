@@ -155,6 +155,10 @@ fun AddStatusScreen(
     onSelectUri: (Uri) -> Unit,
     onCaptureBitmap: (Bitmap) -> Unit,
     onTextStory: () -> Unit = {},
+    /** "Musik" — build a music story (pick a song). */
+    onMusicStory: () -> Unit = {},
+    /** "Tata letak" — build a collage from several photos. */
+    onCollage: () -> Unit = {},
 ) {
     BackHandler(onBack = onClose)
 
@@ -260,6 +264,8 @@ fun AddStatusScreen(
                             when (action.label) {
                                 "Galeri" -> openSystemPicker()
                                 "Teks" -> onTextStory()
+                                "Musik" -> onMusicStory()
+                                "Tata letak" -> onCollage()
                             }
                         }
                     }

@@ -8,6 +8,9 @@ import android.net.Uri
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
@@ -423,8 +426,23 @@ private fun formatClock(iso: String?): String {
     }.getOrDefault("")
 }
 
+/** Downloads a remote image into a Bitmap (for a music story's album art). */
+private suspend fun loadRemoteBitmap(context: Context, url: String): android.graphics.Bitmap? =
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        runCatching {
+            val loader = coil.ImageLoader(context)
+            val req = coil.request.ImageRequest.Builder(context).data(url).allowHardware(false).build()
+            (loader.execute(req) as? coil.request.SuccessResult)?.drawable
+                ?.let { (it as? android.graphics.drawable.BitmapDrawable)?.bitmap }
+        }.getOrNull()
+    }
+
 /** Uploads a locally created story to the backend (media 3-step + POST /stories). */
-private suspend fun uploadStory(context: Context, media: StoryImage) {
+private suspend fun uploadStory(
+    context: Context,
+    media: StoryImage,
+    music: com.example.syntra.net.StoryMusic? = null,
+) {
     when (media) {
         is StoryImage.Bitmap -> {
             val bmp = media.image.asAndroidBitmap()
@@ -433,12 +451,12 @@ private suspend fun uploadStory(context: Context, media: StoryImage) {
             val id = SyntraClient.uploadMedia(
                 "image", "jpg", "image/jpeg", out.toByteArray(), bmp.width, bmp.height,
             )
-            SyntraClient.createStory(id)
+            SyntraClient.createStory(id, music = music)
         }
         is StoryImage.Video -> {
             val bytes = context.contentResolver.openInputStream(media.uri)?.use { it.readBytes() } ?: return
             val id = SyntraClient.uploadMedia("video", "mp4", "video/mp4", bytes)
-            SyntraClient.createStory(id)
+            SyntraClient.createStory(id, music = music)
         }
         else -> Unit
     }
@@ -511,6 +529,7 @@ fun ChatScreen(
     // Whether the "Tambah status" sheet is open.
     var showAddStatus by remember { mutableStateOf(false) }
     var showTextStory by remember { mutableStateOf(false) }
+    var showMusicStoryPicker by remember { mutableStateOf(false) }
     var pendingPhoto by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var pendingVideo by remember { mutableStateOf<android.net.Uri?>(null) }
     // Conversation the user long-pressed and may want to remove.
@@ -528,6 +547,17 @@ fun ChatScreen(
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    // Collage: pick several photos, compose them into one portrait bitmap, then send
+    // it through the normal photo-story preview.
+    val collagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(4),
+    ) { uris ->
+        if (uris.isNotEmpty()) scope.launch {
+            val bitmaps = uris.mapNotNull { runCatching { loadStoryBitmap(context, it)?.asAndroidBitmap() }.getOrNull() }
+            if (bitmaps.isNotEmpty()) pendingPhoto = buildCollage(bitmaps)
+        }
+    }
 
     LaunchedEffect(Unit) {
         archivedIds = ChatFlags.archived(context)
@@ -801,7 +831,7 @@ fun ChatScreen(
         }
     }
 
-    fun addStory(media: StoryImage) {
+    fun addStory(media: StoryImage, music: com.example.syntra.net.StoryMusic? = null) {
         // Local (optimistic) story; id is a client id until the backend acks it.
         val storyId = newLocalId()
         val item = StoryItem(storyId, media, viewed = true)
@@ -818,7 +848,7 @@ fun ChatScreen(
         }
         showAddStatus = false
         if (ApiConfig.ENABLED) scope.launch {
-            runCatching { uploadStory(context, media) }
+            runCatching { uploadStory(context, media, music) }
                 .onSuccess {
                     // Reconcile with the server so the story carries its real id +
                     // resolved media URL (and shows for the rest of the app).
@@ -1251,6 +1281,25 @@ fun ChatScreen(
                 },
                 onCaptureBitmap = { bmp -> showAddStatus = false; pendingPhoto = bmp },
                 onTextStory = { showAddStatus = false; showTextStory = true },
+                onMusicStory = { showAddStatus = false; showMusicStoryPicker = true },
+                onCollage = { showAddStatus = false; collagePicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                ) },
+            )
+        }
+
+        // "Musik": pick a song, render a music-story card, post it (with the track).
+        if (showMusicStoryPicker) {
+            MusicPickerSheet(
+                onDismiss = { showMusicStoryPicker = false },
+                onPick = { music ->
+                    showMusicStoryPicker = false
+                    scope.launch {
+                        val art = music.artworkUrl?.let { runCatching { loadRemoteBitmap(context, it) }.getOrNull() }
+                        val card = buildMusicStory(music, art)
+                        addStory(StoryImage.Bitmap(card.asImageBitmap()), music)
+                    }
+                },
             )
         }
 
@@ -1260,9 +1309,9 @@ fun ChatScreen(
             PhotoStoryPreview(
                 photo = bmp,
                 onCancel = { pendingPhoto = null; showAddStatus = true },
-                onDone = { edited ->
+                onDone = { edited, music ->
                     pendingPhoto = null
-                    addStory(StoryImage.Bitmap(edited.asImageBitmap()))
+                    addStory(StoryImage.Bitmap(edited.asImageBitmap()), music)
                 },
             )
         }

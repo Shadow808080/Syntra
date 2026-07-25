@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,6 +43,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.CropSquare
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -206,9 +208,16 @@ fun TextStoryScreen(onClose: () -> Unit, onDone: (Bitmap) -> Unit) {
  * On post, both are baked onto the photo at their on-screen positions.
  */
 @Composable
-fun PhotoStoryPreview(photo: Bitmap, onCancel: () -> Unit, onDone: (Bitmap) -> Unit) {
+fun PhotoStoryPreview(
+    photo: Bitmap,
+    onCancel: () -> Unit,
+    onDone: (Bitmap, com.example.syntra.net.StoryMusic?) -> Unit,
+) {
     BackHandler(onBack = onCancel)
     var overlayText by remember { mutableStateOf("") }
+    // A song attached to this photo story (via the music tool), or null.
+    var music by remember { mutableStateOf<com.example.syntra.net.StoryMusic?>(null) }
+    var showMusicPicker by remember { mutableStateOf(false) }
     var caption by remember { mutableStateOf("") }
     // Overlay position as a fraction of the photo frame (0..1), starts centred.
     var posX by remember { mutableStateOf(0.5f) }
@@ -300,6 +309,50 @@ fun PhotoStoryPreview(photo: Bitmap, onCancel: () -> Unit, onDone: (Bitmap) -> U
                     modifier = Modifier.size(24.dp),
                 )
             }
+            Spacer(Modifier.width(10.dp))
+            // Music tool — attach a song to this photo story (highlighted once chosen).
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .background(if (music != null) Color.White else Color.White.copy(alpha = 0.18f), CircleShape)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { showMusicPicker = true },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.MusicNote,
+                    contentDescription = "Tambah musik",
+                    tint = if (music != null) Color(0xFF141726) else Color.White,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        }
+        // Chosen-song chip, so it's clear a track is attached.
+        music?.let { m ->
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = 14.dp)
+                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "${m.title} · ${m.artist}",
+                    color = Color.White, fontSize = 12.sp, maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 220.dp),
+                )
+            }
+        }
+        if (showMusicPicker) {
+            MusicPickerSheet(
+                onDismiss = { showMusicPicker = false },
+                onPick = { music = it; showMusicPicker = false },
+            )
         }
 
         // Image area: fills the space between the bars. The photo frame is 1:1 when
@@ -424,7 +477,7 @@ fun PhotoStoryPreview(photo: Bitmap, onCancel: () -> Unit, onDone: (Bitmap) -> U
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
-                        ) { onDone(bakePhoto(shown, overlayText.trim(), posX, posY, rotation, scale, caption.trim())) },
+                        ) { onDone(bakePhoto(shown, overlayText.trim(), posX, posY, rotation, scale, caption.trim()), music) },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(

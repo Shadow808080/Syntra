@@ -419,8 +419,23 @@ object SyntraClient {
         postData("/api/v1/stories/$storyId/view", JSONObject())
     }
 
-    suspend fun createStory(mediaId: String, visibility: String = "followers") {
-        postData("/api/v1/stories", JSONObject().put("media_id", mediaId).put("visibility", visibility))
+    suspend fun createStory(mediaId: String, visibility: String = "followers", music: StoryMusic? = null) {
+        val payload = JSONObject().put("media_id", mediaId).put("visibility", visibility)
+        // Attach a song via the story overlays (backend stores/returns overlays jsonb).
+        if (music != null) {
+            payload.put(
+                "overlays",
+                JSONObject().put(
+                    "music",
+                    JSONObject()
+                        .put("title", music.title)
+                        .put("artist", music.artist)
+                        .put("url", music.previewUrl)
+                        .put("artwork", music.artworkUrl ?: ""),
+                ),
+            )
+        }
+        postData("/api/v1/stories", payload)
     }
 
     /**
@@ -1253,16 +1268,29 @@ private fun JSONObject.toUser() = NetUser(
     isSelf = optBoolean("is_self", false),
 )
 
-private fun JSONObject.toStory() = NetStory(
-    id = getString("id"),
-    mediaId = optString("media_id", ""),
-    mediaKind = optString("media_kind", "image"),
-    mediaUrl = optString("media_url", ""),
-    durationMs = optLong("duration_ms", 0),
-    viewed = optBoolean("viewed", false),
-    createdAt = optString("created_at", ""),
-    expiresAt = optString("expires_at", ""),
-)
+private fun JSONObject.toStory(): NetStory {
+    val music = optJSONObject("overlays")?.optJSONObject("music")?.let { m ->
+        val url = m.optString("url", "")
+        if (url.isBlank()) null
+        else StoryMusic(
+            title = m.optString("title", ""),
+            artist = m.optString("artist", ""),
+            previewUrl = url,
+            artworkUrl = m.optString("artwork", "").ifBlank { null },
+        )
+    }
+    return NetStory(
+        id = getString("id"),
+        mediaId = optString("media_id", ""),
+        mediaKind = optString("media_kind", "image"),
+        mediaUrl = optString("media_url", ""),
+        durationMs = optLong("duration_ms", 0),
+        viewed = optBoolean("viewed", false),
+        createdAt = optString("created_at", ""),
+        expiresAt = optString("expires_at", ""),
+        music = music,
+    )
+}
 
 private fun JSONObject.toStoryGroup() = NetStoryGroup(
     authorId = getString("author_id"),
