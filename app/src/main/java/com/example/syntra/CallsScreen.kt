@@ -196,6 +196,8 @@ fun CallsScreen(
     onTabSelected: (NexusTab) -> Unit = {},
     /** True while this tab is on screen; used to re-read the log live. */
     visible: Boolean = true,
+    /** Reported true while a full-screen overlay (open chat) is up, so the host hides the bottom bar. */
+    onOverlayChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -213,6 +215,9 @@ fun CallsScreen(
     // Long-press "Info" opens a call-detail sheet; "Kirim pesan" opens a chat.
     var detailEntry by remember { mutableStateOf<CallEntry?>(null) }
     var openChat by remember { mutableStateOf<Conversation?>(null) }
+
+    // Opening a chat covers the whole screen — tell the host to hide the bottom bar.
+    LaunchedEffect(openChat) { onOverlayChange(openChat != null) }
 
     // A call placed or received anywhere in the app appends to the log; re-read it
     // whenever this tab comes back — or the moment a call finishes — so the history

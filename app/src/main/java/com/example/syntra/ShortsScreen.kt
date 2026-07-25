@@ -161,6 +161,12 @@ fun ShortsScreen(
     // whenever the tab comes back so a change in Settings takes effect immediately.
     var autoScroll by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true)) }
     LaunchedEffect(visible) { if (visible) autoScroll = SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true) }
+    // Tell the notifier we're on Shorts, so a "comment reply" toast is suppressed
+    // here (it shows live) but still fires on every other screen.
+    DisposableEffect(visible) {
+        com.example.syntra.net.AppForeground.inShorts = visible
+        onDispose { com.example.syntra.net.AppForeground.inShorts = false }
+    }
     val reels = remember { mutableStateListOf<NetReel>() }
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }

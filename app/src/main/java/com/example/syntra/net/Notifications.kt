@@ -200,4 +200,13 @@ object AppForeground {
     /** The conversation the user currently has open, or null. Set by the chat screen. */
     @Volatile
     var openConversationId: String? = null
+
+    /**
+     * True only while the Shorts tab is the one on screen. A "your comment got a
+     * reply" notification is redundant only there (the reply shows live in the
+     * open comment sheet); anywhere else in the app the user has no idea, so it
+     * must still notify. Set by the Shorts screen.
+     */
+    @Volatile
+    var inShorts: Boolean = false
 }

@@ -333,6 +333,7 @@ private fun MainTabs(onSignOut: () -> Unit) {
     var roomOverlay by remember { mutableStateOf(false) }
     var shortsOverlay by remember { mutableStateOf(false) }
     var musicOverlay by remember { mutableStateOf(false) }
+    var callsOverlay by remember { mutableStateOf(false) }
     // True while a full-screen call is up (not minimized) — used to pause Shorts.
     val callBusy = CallController.isBusy
 
@@ -397,7 +398,7 @@ private fun MainTabs(onSignOut: () -> Unit) {
     // One fixed bottom bar below the pager — it never slides with the pages, only
     // its highlight follows. It hides when a full-screen overlay is up so chat
     // detail / story viewer / voice room can cover the whole screen.
-    val overlay = chatOverlay || roomOverlay || shortsOverlay || musicOverlay
+    val overlay = chatOverlay || roomOverlay || shortsOverlay || musicOverlay || callsOverlay
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(
@@ -433,6 +434,7 @@ private fun MainTabs(onSignOut: () -> Unit) {
                     NexusTab.CALLS -> CallsScreen(
                         modifier = Modifier.fillMaxSize(),
                         visible = tabOrder[pager.currentPage] == NexusTab.CALLS,
+                        onOverlayChange = { callsOverlay = it },
                     )
                 }
             }

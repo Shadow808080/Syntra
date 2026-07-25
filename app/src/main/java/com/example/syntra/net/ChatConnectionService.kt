@@ -65,10 +65,12 @@ class ChatConnectionService : Service() {
         }
 
         // Social activity (comment reply, like, follow…) — post a system
-        // notification so a reply reaches the user even when the app is backgrounded.
-        // Skipped while that user is actively in the app (they'll see the live badge).
+        // notification. Previously this was skipped whenever the app was in the
+        // foreground, so a user on ANY other screen (chat, music, calls…) never
+        // learned their comment got a reply. Now it always notifies, except while
+        // the user is actually on Shorts, where the reply is already visible live.
         override fun onNotification(kind: String) {
-            if (AppForeground.isForeground) return
+            if (AppForeground.inShorts) return
             Notifications.showSocial(applicationContext, kind)
         }
     }
