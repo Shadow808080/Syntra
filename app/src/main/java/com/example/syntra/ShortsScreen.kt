@@ -1991,8 +1991,38 @@ private fun CommentRow(
                     Modifier
                 },
             )
-            .padding(start = if (isReply) 50.dp else 18.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
+            .padding(start = if (isReply) 26.dp else 18.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
     ) {
+        if (isReply) {
+            // Thread connector: an L-shaped line from the parent's avatar column down
+            // to this reply, so it's clear which comment a reply belongs to.
+            Box(
+                modifier = Modifier
+                    .width(24.dp)
+                    .height(30.dp),
+            ) {
+                // Vertical stroke.
+                Box(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 1.dp)
+                        .width(1.5.dp)
+                        .height(16.dp)
+                        .background(Color.White.copy(alpha = 0.16f)),
+                )
+                // Horizontal elbow into the avatar.
+                Box(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .offset(y = 15.dp)
+                        .padding(start = 1.dp)
+                        .width(12.dp)
+                        .height(1.5.dp)
+                        .background(Color.White.copy(alpha = 0.16f)),
+                )
+            }
+            Spacer(Modifier.width(4.dp))
+        }
         CommentAvatar(url = c.avatarUrl, name = name, size = if (isReply) 30.dp else 38.dp)
         Spacer(Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {

@@ -1,48 +1,44 @@
 package com.example.syntra.ui.theme
 
 import androidx.compose.material3.Typography
-import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import com.example.syntra.R
 
-// Raleway is shipped as a single variable font (weight axis); each weight is a
-// named instance created via FontVariation on the same resource.
-@OptIn(ExperimentalTextApi::class)
-private fun ralewayFont(weight: Int) = Font(
-    resId = R.font.raleway_variable,
-    weight = FontWeight(weight),
-    variationSettings = FontVariation.Settings(FontVariation.weight(weight)),
+// Plus Jakarta Sans — a modern, friendly geometric sans (by an Indonesian type
+// designer). Shipped as static weight files so no variable-font axis handling is
+// needed; each named instance maps to its own ttf.
+val AppFontFamily = FontFamily(
+    Font(R.font.plus_jakarta_sans_light, FontWeight.Light),
+    Font(R.font.plus_jakarta_sans_regular, FontWeight.Normal),
+    Font(R.font.plus_jakarta_sans_medium, FontWeight.Medium),
+    Font(R.font.plus_jakarta_sans_semibold, FontWeight.SemiBold),
+    Font(R.font.plus_jakarta_sans_bold, FontWeight.Bold),
+    Font(R.font.plus_jakarta_sans_extrabold, FontWeight.ExtraBold),
 )
 
-val Raleway = FontFamily(
-    ralewayFont(300), // Light
-    ralewayFont(400), // Normal
-    ralewayFont(500), // Medium
-    ralewayFont(600), // SemiBold
-    ralewayFont(700), // Bold
-    ralewayFont(800), // ExtraBold
-)
+// Kept as an alias so existing references to `Raleway` keep compiling; both now
+// point at the current app font.
+val Raleway = AppFontFamily
 
-// Base Material 3 typography, re-pointed so every text style uses Raleway.
+// Base Material 3 typography, re-pointed so every text style uses the app font.
 private val base = Typography()
 
 val Typography = Typography(
-    displayLarge = base.displayLarge.copy(fontFamily = Raleway),
-    displayMedium = base.displayMedium.copy(fontFamily = Raleway),
-    displaySmall = base.displaySmall.copy(fontFamily = Raleway),
-    headlineLarge = base.headlineLarge.copy(fontFamily = Raleway),
-    headlineMedium = base.headlineMedium.copy(fontFamily = Raleway),
-    headlineSmall = base.headlineSmall.copy(fontFamily = Raleway),
-    titleLarge = base.titleLarge.copy(fontFamily = Raleway),
-    titleMedium = base.titleMedium.copy(fontFamily = Raleway),
-    titleSmall = base.titleSmall.copy(fontFamily = Raleway),
-    bodyLarge = base.bodyLarge.copy(fontFamily = Raleway),
-    bodyMedium = base.bodyMedium.copy(fontFamily = Raleway),
-    bodySmall = base.bodySmall.copy(fontFamily = Raleway),
-    labelLarge = base.labelLarge.copy(fontFamily = Raleway),
-    labelMedium = base.labelMedium.copy(fontFamily = Raleway),
-    labelSmall = base.labelSmall.copy(fontFamily = Raleway),
+    displayLarge = base.displayLarge.copy(fontFamily = AppFontFamily),
+    displayMedium = base.displayMedium.copy(fontFamily = AppFontFamily),
+    displaySmall = base.displaySmall.copy(fontFamily = AppFontFamily),
+    headlineLarge = base.headlineLarge.copy(fontFamily = AppFontFamily),
+    headlineMedium = base.headlineMedium.copy(fontFamily = AppFontFamily),
+    headlineSmall = base.headlineSmall.copy(fontFamily = AppFontFamily),
+    titleLarge = base.titleLarge.copy(fontFamily = AppFontFamily),
+    titleMedium = base.titleMedium.copy(fontFamily = AppFontFamily),
+    titleSmall = base.titleSmall.copy(fontFamily = AppFontFamily),
+    bodyLarge = base.bodyLarge.copy(fontFamily = AppFontFamily),
+    bodyMedium = base.bodyMedium.copy(fontFamily = AppFontFamily),
+    bodySmall = base.bodySmall.copy(fontFamily = AppFontFamily),
+    labelLarge = base.labelLarge.copy(fontFamily = AppFontFamily),
+    labelMedium = base.labelMedium.copy(fontFamily = AppFontFamily),
+    labelSmall = base.labelSmall.copy(fontFamily = AppFontFamily),
 )

@@ -63,6 +63,14 @@ class ChatConnectionService : Service() {
             // NEXT message from it is labelled.
             if (!names.containsKey(message.conversationId)) scope.launch { refreshNames() }
         }
+
+        // Social activity (comment reply, like, follow…) — post a system
+        // notification so a reply reaches the user even when the app is backgrounded.
+        // Skipped while that user is actively in the app (they'll see the live badge).
+        override fun onNotification(kind: String) {
+            if (AppForeground.isForeground) return
+            Notifications.showSocial(applicationContext, kind)
+        }
     }
 
     override fun onCreate() {

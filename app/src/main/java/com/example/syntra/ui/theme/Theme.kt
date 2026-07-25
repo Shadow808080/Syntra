@@ -43,10 +43,10 @@ fun SyntraTheme(content: @Composable () -> Unit) {
         colorScheme = colorScheme,
         typography = Typography,
     ) {
-        // Make Raleway the default family for any Text that doesn't set its own,
-        // while preserving each call's own size/weight.
+        // Make the app font the default family for any Text that doesn't set its
+        // own, while preserving each call's own size/weight.
         CompositionLocalProvider(
-            LocalTextStyle provides LocalTextStyle.current.copy(fontFamily = Raleway),
+            LocalTextStyle provides LocalTextStyle.current.copy(fontFamily = AppFontFamily),
             content = content,
         )
     }

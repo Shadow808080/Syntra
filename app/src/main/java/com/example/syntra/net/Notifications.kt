@@ -24,6 +24,7 @@ object Notifications {
 
     const val MESSAGES_CHANNEL = "syntra_messages"
     const val SERVICE_CHANNEL = "syntra_service"
+    const val SOCIAL_CHANNEL = "syntra_social"
     const val SERVICE_NOTIFICATION_ID = 1001
 
     /** Creates the notification channels once; safe to call repeatedly. */
@@ -39,6 +40,18 @@ object Notifications {
                     NotificationManager.IMPORTANCE_HIGH,
                 ).apply {
                     description = "Notifikasi pesan chat masuk"
+                    enableVibration(true)
+                },
+            )
+        }
+        if (mgr.getNotificationChannel(SOCIAL_CHANNEL) == null) {
+            mgr.createNotificationChannel(
+                NotificationChannel(
+                    SOCIAL_CHANNEL,
+                    "Aktivitas",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ).apply {
+                    description = "Balasan komentar, suka, pengikut baru"
                     enableVibration(true)
                 },
             )
@@ -122,6 +135,41 @@ object Notifications {
 
         // Stable id per conversation so repeated messages update in place.
         val id = 2000 + (conversationId.hashCode() and 0x7FFF)
+        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+    }
+
+    /**
+     * A social-activity notification (comment reply, like, follow…). Generic by
+     * design: the realtime event carries only a type, which is enough to tell the
+     * user something happened and pull them back into the app.
+     */
+    fun showSocial(context: Context, type: String) {
+        ensureChannels(context)
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
+
+        val (title, body) = when (type) {
+            "comment" -> "Balasan komentar" to "Seseorang membalas komentar kamu"
+            "like" -> "Suka baru" to "Seseorang menyukai konten kamu"
+            "follow" -> "Pengikut baru" to "Seseorang mulai mengikuti kamu"
+            "mention" -> "Kamu disebut" to "Seseorang menyebut kamu di komentar"
+            "story_reply" -> "Balasan story" to "Seseorang membalas story kamu"
+            "room_live" -> "Room dimulai" to "Sebuah room yang kamu ikuti sedang live"
+            else -> "Aktivitas baru" to "Ada aktivitas baru di Syntra"
+        }
+
+        val notification = NotificationCompat.Builder(context, SOCIAL_CHANNEL)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setAutoCancel(true)
+            .setContentIntent(openAppIntent(context, null))
+            .build()
+
+        // A distinct id per type so a reply and a like don't overwrite each other,
+        // but repeats of the same type collapse instead of stacking endlessly.
+        val id = 3000 + (type.hashCode() and 0x0FFF)
         runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
     }
 
