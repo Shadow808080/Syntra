@@ -273,8 +273,7 @@ fun RoomsScreen(
             ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                // Clears the floating bottom bar overlay.
-                contentPadding = PaddingValues(bottom = 96.dp),
+                contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 item { HubTitle() }
                 item {

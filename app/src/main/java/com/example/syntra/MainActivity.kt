@@ -427,21 +427,24 @@ private fun MainTabs(onSignOut: () -> Unit) {
         onDispose { SyntraClient.removeListener(listener) }
     }
 
-    // One fixed bottom bar below the pager — it never slides with the pages, only
-    // its highlight follows. It hides when a full-screen overlay is up so chat
-    // detail / story viewer / voice room can cover the whole screen.
+    // One bottom bar below the pager — it never slides with the pages, only its
+    // highlight follows. Hidden when a full-screen overlay is up (chat detail /
+    // story viewer / voice room). It is STICKY: part of the layout, so content sits
+    // above it and it never covers UI (FABs, action rails, last list item).
     val overlay = chatOverlay || roomOverlay || shortsOverlay || musicOverlay || callsOverlay
+    LaunchedEffect(pager.currentPage) { BottomBarVisibility.visible = true }
+    // Auto-hide is INSTANT (not an animated height): it relayouts only when the
+    // scroll direction flips, not every frame — that per-frame relayout of five
+    // kept-alive pages (incl. a video surface) was the jank.
+    val barShown = !overlay && BottomBarVisibility.visible
     Box(modifier = Modifier.fillMaxSize()) {
-        // The pager fills the WHOLE box and never resizes when the bottom bar shows/
-        // hides — the bar is an overlay that slides over it. Resizing the pager (with
-        // five kept-alive tabs + a video surface) on every scroll was the jank.
-        Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(
                 state = pager,
                 userScrollEnabled = !overlay,
                 // Keep all four tabs alive so swiping back doesn't reload/reconnect.
                 beyondViewportPageCount = tabOrder.size,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f),
             ) { page ->
                 when (tabOrder[page]) {
                     NexusTab.CHAT -> ChatScreen(
@@ -475,27 +478,9 @@ private fun MainTabs(onSignOut: () -> Unit) {
                     )
                 }
             }
-        }
-
-        // Auto-hide on scroll (chat & shorts): the bar slides down when content
-        // scrolls down, back up when it scrolls up. Reset to visible on tab change.
-        LaunchedEffect(pager.currentPage) { BottomBarVisibility.visible = true }
-        if (!overlay) {
-            var barHeightPx by remember { mutableStateOf(0) }
-            // Smooth: only the bar's translationY animates (no relayout of content).
-            val translate by androidx.compose.animation.core.animateFloatAsState(
-                targetValue = if (BottomBarVisibility.visible) 0f else barHeightPx.toFloat(),
-                animationSpec = androidx.compose.animation.core.tween(220),
-                label = "bottomBarSlide",
-            )
-            Column(
-                modifier = Modifier
-                    .align(androidx.compose.ui.Alignment.BottomCenter)
-                    .onSizeChanged { barHeightPx = it.height }
-                    .graphicsLayer { translationY = translate },
-            ) {
-                // Persistent music mini-player above the nav bar (renders only when a
-                // track is loaded). Tapping it opens the full now-playing screen.
+            // Sticky bottom section: mini-player + nav bar, in the layout so content
+            // above never gets covered. Shown/hidden instantly by the scroll watcher.
+            if (barShown) {
                 MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
                 NexusBottomBar(
                     selected = tabOrder[pager.currentPage],
