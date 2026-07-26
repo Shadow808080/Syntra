@@ -585,11 +585,20 @@ fun ChatDetailScreen(
                     // copy still carries its client id. Reconcile instead of appending,
                     // otherwise the sender sees the message twice.
                     if (message.senderId == SyntraClient.myUserId) {
+                        // Reconcile against the optimistic copy. Match on the *display*
+                        // text: toUi() strips the markers (VIEWONCE / STICKER /
+                        // STORYREPLY), so a view-once photo or sticker finally matches
+                        // its own broadcast. Without this the marker made every such
+                        // send fail to match, get appended a second time, and then
+                        // collide with the ack into a duplicate LazyColumn key — a hard
+                        // crash ("Key … was already used") the moment you sent one.
+                        val incoming = message.toUi()
                         val pending = messages.indexOfFirst {
-                            it.id.startsWith(LOCAL_ID_PREFIX) && it.text == message.body
+                            it.id.startsWith(LOCAL_ID_PREFIX) && it.text == incoming.text &&
+                                (it.media == null) == (incoming.media == null)
                         }
                         if (pending >= 0) {
-                            messages[pending] = message.toUi()
+                            messages[pending] = incoming
                             return
                         }
                     }
@@ -788,14 +797,21 @@ fun ChatDetailScreen(
                 val sent = SyntraClient.sendMessageRest(conversation.id, body, listOf(mediaId))
                 val i = messages.indexOfFirst { it.id == ref }
                 if (i >= 0) {
-                    val authoritative = sent.toUi()
-                    // The immediate send response may not have resolved the attachment
-                    // URL yet — keep the one we already uploaded so the bubble isn't
-                    // blank until a refresh.
-                    messages[i] = if (authoritative.media.isNullOrBlank() && url.isNotBlank()) {
-                        authoritative.copy(media = url)
+                    // The broadcast may have raced ahead and already inserted this id;
+                    // replacing would then leave two rows with the same key (a crash).
+                    // Drop the optimistic row and let the broadcast copy stand.
+                    if (messages.any { it.id == sent.id }) {
+                        messages.removeAt(i)
                     } else {
-                        authoritative
+                        val authoritative = sent.toUi()
+                        // The immediate send response may not have resolved the attachment
+                        // URL yet — keep the one we already uploaded so the bubble isn't
+                        // blank until a refresh.
+                        messages[i] = if (authoritative.media.isNullOrBlank() && url.isNotBlank()) {
+                            authoritative.copy(media = url)
+                        } else {
+                            authoritative
+                        }
                     }
                 }
             }.onFailure {
@@ -924,7 +940,12 @@ fun ChatDetailScreen(
                     runCatching { SyntraClient.sendMessageRest(conversation.id, text, replyToId = replyId) }
                         .onSuccess { sent ->
                             val i = messages.indexOfFirst { it.id == ref }
-                            if (i >= 0) messages[i] = sent.toUi()
+                            if (i >= 0) {
+                                // Guard against the broadcast beating this ack: dropping
+                                // the optimistic row avoids a duplicate LazyColumn key.
+                                if (messages.any { it.id == sent.id }) messages.removeAt(i)
+                                else messages[i] = sent.toUi()
+                            }
                         }
                 }
             } else {
