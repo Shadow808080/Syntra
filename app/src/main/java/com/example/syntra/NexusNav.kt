@@ -136,7 +136,7 @@ fun NexusBottomBar(
             // Shorts to the visual centre.
             NavItem(NexusTab.CHAT, Icons.Outlined.Forum, Icons.Rounded.Forum, "Chat", selected, onSelect, Modifier.weight(1f))
             NavItem(NexusTab.MUSIC, Icons.Outlined.Headphones, Icons.Rounded.Headphones, "Musik", selected, onSelect, Modifier.weight(1f))
-            NavItem(NexusTab.SHORTS, Icons.Outlined.SmartDisplay, Icons.Rounded.SmartDisplay, "Shorts", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.SHORTS, Icons.Outlined.SmartDisplay, Icons.Rounded.SmartDisplay, "Shorts", selected, onSelect, Modifier.weight(1f), featured = true)
             NavItem(NexusTab.ROOMS, Icons.Outlined.Podcasts, Icons.Rounded.Podcasts, "Rooms", selected, onSelect, Modifier.weight(1f))
             NavItem(NexusTab.CALLS, Icons.Outlined.Call, Icons.Rounded.Call, "Calls", selected, onSelect, Modifier.weight(1f))
         }
@@ -152,21 +152,22 @@ private fun NavItem(
     selected: NexusTab,
     onSelect: (NexusTab) -> Unit,
     modifier: Modifier = Modifier,
+    /** The centre tab (Shorts): rendered as a distinctive gradient button. */
+    featured: Boolean = false,
 ) {
     val isSelected = tab == selected
 
     // Colour and the pill width animate on select — transform/opacity-class only,
     // no layout thrash, no bounce. Instant enough to feel snappy (180ms).
     val color by animateColorAsState(
-        // Idle used to be the muted grey NexusTextSecondary — too dim. Use a lightly
-        // dimmed near-white so idle icons/labels read bright, still a step below the
-        // accent-coloured selected tab. Theme-aware (goes dark on the light theme).
-        targetValue = if (isSelected) NexusAccentSoft else NexusTextPrimary.copy(alpha = 0.72f),
+        // Idle is a near-white (only lightly dimmed) so icons/labels read bright,
+        // still a step below the accent-coloured selected tab. Theme-aware.
+        targetValue = if (isSelected) NexusAccentSoft else NexusTextPrimary.copy(alpha = 0.9f),
         animationSpec = tween(180),
         label = "nav-color",
     )
     val pillWidth by animateDpAsState(
-        targetValue = if (isSelected) 50.dp else 34.dp,
+        targetValue = if (isSelected) 48.dp else 34.dp,
         animationSpec = tween(220),
         label = "nav-pill",
     )
@@ -180,20 +181,40 @@ private fun NavItem(
             ) { onSelect(tab) }
             .padding(horizontal = 6.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .width(pillWidth)
-                .height(30.dp)
-                .clip(RoundedCornerShape(15.dp))
-                .background(if (isSelected) NexusAccent.copy(alpha = 0.16f) else Color.Transparent),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = if (isSelected) iconActive else iconIdle,
-                contentDescription = label,
-                tint = color,
-                modifier = Modifier.size(26.dp),
-            )
+        if (featured) {
+            // The centre tab stands out: a filled brand-gradient button with a white
+            // glyph, always accented so it reads as the app's signature action.
+            Box(
+                modifier = Modifier
+                    .width(54.dp)
+                    .height(30.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(BrandGradient),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = iconActive,
+                    contentDescription = label,
+                    tint = Color.White,
+                    modifier = Modifier.size(23.dp),
+                )
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .width(pillWidth)
+                    .height(30.dp)
+                    .clip(RoundedCornerShape(15.dp))
+                    .background(if (isSelected) NexusAccent.copy(alpha = 0.16f) else Color.Transparent),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (isSelected) iconActive else iconIdle,
+                    contentDescription = label,
+                    tint = color,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
         }
         Spacer(Modifier.height(1.dp))
         Text(
