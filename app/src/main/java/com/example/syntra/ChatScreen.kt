@@ -1623,17 +1623,18 @@ private fun ConversationRow(
     val online = convo.presence == Presence.ONLINE
     val typing = convo.presence == Presence.TYPING
 
-    // Flat, card-less row — clean and professional. Only a picked row (selection
-    // mode) gets a soft accent wash; everything else sits directly on the
-    // background so the list reads like a real messenger, not a stack of cards.
-    val rowBg = if (selected) NexusAccent.copy(alpha = 0.14f) else Color.Transparent
+    // Each conversation is its own rounded card with a hairline border, separated by
+    // a small gap — a clean, tidy "boxed" list. A picked row (selection mode) gets a
+    // soft accent wash instead of the plain surface fill.
+    val rowBg = if (selected) NexusAccent.copy(alpha = 0.14f) else NexusSurface
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(rowBg)
+            .border(1.dp, NexusStroke, RoundedCornerShape(16.dp))
             .combinedClickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
@@ -1660,15 +1661,15 @@ private fun ConversationRow(
                             .align(Alignment.BottomEnd)
                             .size(20.dp)
                             .background(NexusAccent, CircleShape)
-                            .border(2.dp, NexusBackground, CircleShape),
+                            .border(2.dp, NexusSurface, CircleShape),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(12.dp))
                     }
                     // Green = online now. Accent = away/typing but present. The gap
-                    // ring is the page background since there's no card behind it.
-                    online -> PresenceDot(NexusOnline, NexusBackground)
-                    typing -> PresenceDot(NexusAccentSoft, NexusBackground)
+                    // ring matches the card fill the avatar now sits on.
+                    online -> PresenceDot(NexusOnline, NexusSurface)
+                    typing -> PresenceDot(NexusAccentSoft, NexusSurface)
                 }
             }
             Spacer(Modifier.width(14.dp))
