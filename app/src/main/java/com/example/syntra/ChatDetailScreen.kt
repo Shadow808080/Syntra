@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
@@ -424,6 +425,9 @@ fun ChatDetailScreen(
     var confirmClear by remember(conversation) { mutableStateOf(false) }
     var pendingMessage by remember(conversation) { mutableStateOf<Message?>(null) }
     var fullscreenImage by remember(conversation) { mutableStateOf<String?>(null) }
+    // Caption shown with the full-screen photo. For a view-once photo this is the
+    // ONLY place it appears — the bubble deliberately hides it until it's opened.
+    var fullscreenCaption by remember(conversation) { mutableStateOf("") }
     // Overflow-menu actions.
     var showReport by remember(conversation) { mutableStateOf(false) }
     var confirmBlock by remember(conversation) { mutableStateOf(false) }
@@ -1173,7 +1177,7 @@ fun ChatDetailScreen(
                     reactions = aggregateReactions(reactions[msg.id]),
                     outgoingColor = chatTheme.bubble,
                     onLongPress = { pendingMessage = msg },
-                    onImageClick = { fullscreenImage = it },
+                    onImageClick = { fullscreenCaption = msg.text; fullscreenImage = it },
                     onReply = { replyingTo = msg },
                     // Spent from THIS side's point of view: for a received photo that's
                     // my own open; for one I sent it's the recipient having opened it
@@ -1190,7 +1194,7 @@ fun ChatDetailScreen(
                                 }
                             }
                         }
-                        msg.media?.let { fullscreenImage = it }
+                        msg.media?.let { fullscreenCaption = msg.text; fullscreenImage = it }
                     },
                     translation = translations[msg.id],
                     onHideTranslation = { translations.remove(msg.id) },
@@ -1633,12 +1637,26 @@ fun ChatDetailScreen(
                 ) { fullscreenImage = null },
             contentAlignment = Alignment.Center,
         ) {
-            AsyncImage(
+            // Same skeleton + ETA bar as the bubble, so a slow reveal (a view-once photo
+            // being fetched for its single view) shows progress instead of a black void.
+            ChatMediaImage(
                 model = url,
                 contentDescription = "Foto layar penuh",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
             )
+            if (fullscreenCaption.isNotBlank()) {
+                Text(
+                    text = fullscreenCaption,
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .padding(horizontal = 20.dp, vertical = 24.dp),
+                )
+            }
         }
     }
 
@@ -1987,18 +2005,106 @@ private fun MessagesSkeleton() {
     }
 }
 
+/**
+ * The "still downloading" placeholder used by every downloadable thing in a chat —
+ * photos, GIFs, view-once reveals, the full-screen viewer.
+ *
+ * A shimmering skeleton fills the space (so a slow image is never a dead black gap)
+ * with an ETA-shaped bar under it: a time-based fraction that eases toward ~92% and
+ * only completes when the media actually arrives. No fake percentage numbers — just
+ * honest "this is moving" feedback.
+ */
+@Composable
+private fun MediaLoadingSkeleton(modifier: Modifier = Modifier, etaMs: Long = 4000L) {
+    val start = remember { System.currentTimeMillis() }
+    var now by remember { mutableStateOf(start) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(80)
+        }
+    }
+    val target = ((now - start).toFloat() / etaMs.toFloat()).coerceIn(0.06f, 0.92f)
+    val frac by animateFloatAsState(targetValue = target, animationSpec = tween(300), label = "media-eta")
+
+    Box(modifier = modifier) {
+        ShimmerFill(Modifier.matchParentSize())
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .fillMaxWidth()
+                .height(3.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.18f)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(frac)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(50))
+                    .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent))),
+            )
+        }
+    }
+}
+
+/**
+ * A chat image that shows [MediaLoadingSkeleton] while it downloads and a quiet
+ * retry-able notice if it fails. Every in-message image goes through here so the
+ * download feedback is identical everywhere.
+ */
+@Composable
+private fun ChatMediaImage(
+    model: Any?,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Crop,
+) {
+    SubcomposeAsyncImage(
+        model = model,
+        contentDescription = contentDescription,
+        contentScale = contentScale,
+        modifier = modifier,
+        loading = { MediaLoadingSkeleton(Modifier.matchParentSize()) },
+        error = {
+            Box(Modifier.matchParentSize().background(NexusSurface), contentAlignment = Alignment.Center) {
+                Text("Gagal memuat", color = NexusTextSecondary, fontSize = 12.sp)
+            }
+        },
+    )
+}
+
 /** A "sekali lihat" photo placeholder — tap to open once, then locked as "Dibuka". */
 @Composable
-private fun ViewOnceBubble(opened: Boolean, textColor: Color, onOpen: () -> Unit) {
-    // Once opened (by either side) there's no icon at all — just an italic
-    // "sudah dibuka", like a spent message.
+private fun ViewOnceBubble(
+    opened: Boolean,
+    textColor: Color,
+    onOpen: () -> Unit,
+    /**
+     * Whether tapping still opens the photo. True for the sender — they may re-view
+     * what they sent as often as they like, even after the recipient has opened it,
+     * so their bubble is NEVER a dead, disabled label.
+     */
+    canOpen: Boolean = false,
+) {
+    val tapModifier = Modifier.clickable(
+        indication = null,
+        interactionSource = remember { MutableInteractionSource() },
+        onClick = onOpen,
+    )
+    // Once opened there's no icon at all — just an italic "sudah dibuka". Still
+    // tappable for the sender.
     if (opened) {
         Text(
             text = "sudah dibuka",
             color = textColor.copy(alpha = 0.6f),
             fontSize = 14.sp,
             fontStyle = FontStyle.Italic,
-            modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp),
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .then(if (canOpen) tapModifier else Modifier)
+                .padding(vertical = 6.dp, horizontal = 4.dp),
         )
         return
     }
@@ -2006,11 +2112,7 @@ private fun ViewOnceBubble(opened: Boolean, textColor: Color, onOpen: () -> Unit
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = onOpen,
-            )
+            .then(tapModifier)
             .padding(vertical = 6.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2226,24 +2328,28 @@ private fun MessageBubble(
                         opened = viewOnceOpened,
                         textColor = textColor,
                         onOpen = onOpenViewOnce,
+                        // My own view-once photo stays openable forever.
+                        canOpen = msg.fromMe,
                     )
                     media != null && media.substringBefore('?').endsWith(".gif", ignoreCase = true) ->
                         // GIF: show the WHOLE thing (contain), sized to its own aspect
                         // ratio and capped to the bubble — no crop, no background box.
-                        AsyncImage(
+                        ChatMediaImage(
                             model = media,
                             contentDescription = "GIF",
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
-                                .widthIn(max = 220.dp)
-                                .heightIn(max = 280.dp)
+                                .size(width = 220.dp, height = 220.dp)
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable(
                                     indication = null,
                                     interactionSource = remember { MutableInteractionSource() },
                                 ) { onImageClick(media) },
                         )
-                    media != null -> Box(
+                    media != null -> ChatMediaImage(
+                        model = media,
+                        contentDescription = "Foto",
+                        contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .size(width = 220.dp, height = 260.dp)
                             .clip(RoundedCornerShape(12.dp))
@@ -2251,17 +2357,7 @@ private fun MessageBubble(
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
                             ) { onImageClick(media) },
-                    ) {
-                        // Shimmer behind the photo so the bubble never shows an empty
-                        // grey box while it loads.
-                        com.example.syntra.ShimmerFill(Modifier.matchParentSize())
-                        SubcomposeAsyncImage(
-                            model = media,
-                            contentDescription = "Foto",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.matchParentSize(),
-                        )
-                    }
+                    )
                     else -> Text(
                         text = msg.text,
                         color = if (msg.isDeleted) textColor.copy(alpha = 0.6f) else textColor,
@@ -2270,7 +2366,10 @@ private fun MessageBubble(
                         lineHeight = 20.sp,
                     )
                 }
-                if (media != null && msg.text.isNotBlank()) {
+                // Caption. Hidden for a view-once photo — the caption is part of what
+                // the single view reveals, so it only shows once the photo is opened
+                // (full screen). Ordinary photos keep their caption right here.
+                if (media != null && msg.text.isNotBlank() && !msg.viewOnce) {
                     Spacer(Modifier.height(6.dp))
                     Text(text = msg.text, color = textColor, fontSize = 15.sp, lineHeight = 20.sp)
                 }

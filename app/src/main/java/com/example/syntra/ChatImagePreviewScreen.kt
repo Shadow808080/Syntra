@@ -100,8 +100,6 @@ fun ChatImagePreviewScreen(
                 working = rotate(working, 90f)
             }
             Spacer(Modifier.width(4.dp))
-            TopIcon(Icons.Filled.Crop, "Potong") { cropping = true }
-            Spacer(Modifier.width(4.dp))
             ViewOnceToggle(on = viewOnce) { viewOnce = !viewOnce }
         }
 
@@ -183,24 +181,34 @@ private fun ViewOnceToggle(on: Boolean, onToggle: () -> Unit) {
             ),
         contentAlignment = Alignment.Center,
     ) {
+        // Half the old size — a small, unobtrusive marker rather than a big badge.
         Box(
             modifier = Modifier
-                .size(26.dp)
+                .size(13.dp)
                 .drawBehind {
                     val d = size.minDimension
                     if (on) drawCircle(color = accent, radius = d / 2f)
                     drawCircle(
                         color = if (on) Color.White else Color.White.copy(alpha = 0.85f),
-                        radius = d / 2f - 1.dp.toPx(),
+                        radius = d / 2f - 0.5.dp.toPx(),
                         style = Stroke(
-                            width = 1.6.dp.toPx(),
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(5f, 5f), 0f),
+                            width = 1.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f, 3f), 0f),
                         ),
                     )
                 },
             contentAlignment = Alignment.Center,
         ) {
-            Text("1", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "1",
+                color = Color.White,
+                fontSize = 7.sp,
+                fontWeight = FontWeight.Bold,
+                style = TextStyle(
+                    platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false),
+                    lineHeight = 8.sp,
+                ),
+            )
         }
     }
 }
