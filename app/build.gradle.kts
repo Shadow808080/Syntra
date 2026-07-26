@@ -63,6 +63,12 @@ dependencies {
     // run on devices/installers that don't do it automatically, so the hot app
     // paths are AOT-compiled from the start — smoother scrolling & faster launch.
     implementation(libs.androidx.profileinstaller)
+    // Media3 ExoPlayer for the reels player: plays a video WHILE writing it to a
+    // shared on-disk cache (CacheDataSource), so a clip is downloaded exactly once
+    // — no separate stream+prefetch double-fetch — and replays come from disk.
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.datasource)
+    implementation(libs.androidx.media3.database)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.ui.graphics)

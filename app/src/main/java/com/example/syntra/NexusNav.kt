@@ -22,16 +22,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.outlined.Call
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.Mic
-import androidx.compose.material.icons.outlined.MusicNote
-import androidx.compose.material.icons.outlined.PlayCircle
+import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.Headphones
+import androidx.compose.material.icons.outlined.Podcasts
+import androidx.compose.material.icons.outlined.SmartDisplay
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Headphones
+import androidx.compose.material.icons.rounded.Podcasts
+import androidx.compose.material.icons.rounded.SmartDisplay
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -128,18 +128,18 @@ fun NexusBottomBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                // Slim, TikTok-style bar: tighter vertical padding keeps it compact.
-                .padding(vertical = 4.dp),
+                // Slim, TikTok-style bar: minimal vertical padding keeps it compact.
+                .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Each tab takes an equal 1/5 slice so they span edge to edge — no
             // empty gutters on the sides. Music sits next to Chat, which pushes
             // Shorts to the visual centre.
-            NavItem(NexusTab.CHAT, Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble, "Chat", selected, onSelect, Modifier.weight(1f))
-            NavItem(NexusTab.MUSIC, Icons.Outlined.MusicNote, Icons.Filled.MusicNote, "Musik", selected, onSelect, Modifier.weight(1f))
-            NavItem(NexusTab.SHORTS, Icons.Outlined.PlayCircle, Icons.Filled.PlayCircle, "Shorts", selected, onSelect, Modifier.weight(1f))
-            NavItem(NexusTab.ROOMS, Icons.Outlined.Mic, Icons.Filled.Mic, "Rooms", selected, onSelect, Modifier.weight(1f))
-            NavItem(NexusTab.CALLS, Icons.Outlined.Call, Icons.Filled.Call, "Calls", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.CHAT, Icons.Outlined.Forum, Icons.Rounded.Forum, "Chat", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.MUSIC, Icons.Outlined.Headphones, Icons.Rounded.Headphones, "Musik", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.SHORTS, Icons.Outlined.SmartDisplay, Icons.Rounded.SmartDisplay, "Shorts", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.ROOMS, Icons.Outlined.Podcasts, Icons.Rounded.Podcasts, "Rooms", selected, onSelect, Modifier.weight(1f))
+            NavItem(NexusTab.CALLS, Icons.Outlined.Call, Icons.Rounded.Call, "Calls", selected, onSelect, Modifier.weight(1f))
         }
     }
 }
@@ -164,7 +164,7 @@ private fun NavItem(
         label = "nav-color",
     )
     val pillWidth by animateDpAsState(
-        targetValue = if (isSelected) 52.dp else 34.dp,
+        targetValue = if (isSelected) 46.dp else 30.dp,
         animationSpec = tween(220),
         label = "nav-pill",
     )
@@ -181,8 +181,8 @@ private fun NavItem(
         Box(
             modifier = Modifier
                 .width(pillWidth)
-                .height(28.dp)
-                .clip(RoundedCornerShape(14.dp))
+                .height(23.dp)
+                .clip(RoundedCornerShape(12.dp))
                 .background(if (isSelected) NexusAccent.copy(alpha = 0.16f) else Color.Transparent),
             contentAlignment = Alignment.Center,
         ) {
@@ -190,15 +190,21 @@ private fun NavItem(
                 imageVector = if (isSelected) iconActive else iconIdle,
                 contentDescription = label,
                 tint = color,
-                modifier = Modifier.size(24.dp),
+                modifier = Modifier.size(20.dp),
             )
         }
-        Spacer(Modifier.height(2.dp))
+        Spacer(Modifier.height(1.dp))
         Text(
             text = label,
             color = color,
-            fontSize = 10.sp,
+            fontSize = 9.5.sp,
             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+            // Strip the font's built-in vertical padding so the label sits right under
+            // the icon (tighter gap) and the whole bar is shorter.
+            style = TextStyle(
+                platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false),
+                lineHeight = 10.sp,
+            ),
         )
     }
 }

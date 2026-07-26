@@ -15,39 +15,35 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Persistent, on-disk cache for remote videos.
+ * Download-once, on-disk store for remote media that plays through a plain
+ * [android.media.MediaPlayer] — voice notes, and chat/profile video messages —
+ * which need a real local FILE PATH to play from. (Reels use [ReelCache], an
+ * ExoPlayer SimpleCache, instead; that one can't hand back a file path.)
  *
- * The backend hands out immutable media URLs — the media id is baked into the
- * path, and replacing a video mints a brand new id (docs/api.md §media) — so a
- * file downloaded once stays valid forever. Every video player in the app
- * resolves its source through here: the first view downloads the file to disk,
- * and every view after that plays straight from the local copy. That turns a
- * feed that re-streamed the same clip on every scroll (the thing that burned
- * through Supabase's cached-egress quota) into a single download per video, and
- * makes re-plays start instantly.
+ * The backend hands out immutable media URLs — the media id is baked into the path
+ * (docs/api.md §media) — so a file downloaded once stays valid forever. Callers
+ * [resolve] a url to its cached file (downloading on the first miss) and play from
+ * disk after; replays cost no egress.
  *
- * Files are evicted least-recently-used once the directory grows past
- * [MAX_BYTES]. Anything that fails to download simply falls back to streaming
- * the original URL, so playback never breaks because of the cache.
+ * STORAGE: this lives in **filesDir (app data), NOT cacheDir** — on purpose, so a
+ * downloaded clip survives "Clear cache"/OS eviction and is never re-downloaded.
+ * Bounded by an LRU ceiling ([MAX_BYTES]); Settings → Penyimpanan shows its size
+ * (together with [ReelCache]) and clears it in-app without a "Clear data".
  */
 object VideoCache {
 
-    private const val DIR = "syntra_videos"
-    private const val MAX_BYTES = 1024L * 1024 * 1024 // 1 GB ceiling, then LRU
+    private const val DIR = "syntra_media"
+    private const val MAX_BYTES = 512L * 1024 * 1024 // 512 MB ceiling, then LRU
 
-    // One lock per URL so the same clip is never downloaded twice at once (e.g.
-    // the on-screen reel and a prefetch of the same id racing).
     private val locks = ConcurrentHashMap<String, Mutex>()
 
-    // Cache fills run here, NOT in the caller's coroutine. A reel's video can be
-    // 20+ MB; tying the download to the composable meant scrolling away mid-download
-    // cancelled it, so nothing was cached and the next view re-downloaded from
-    // scratch (exactly the "loads again like a fresh download" bug). This scope
-    // outlives navigation so a started download always finishes and caches.
+    // Cache fills run here, NOT in the caller's coroutine, so scrolling away
+    // mid-download doesn't cancel the fill.
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // App data (filesDir), not cacheDir — see the class doc.
     private fun dir(context: Context): File =
-        File(context.cacheDir, DIR).apply { mkdirs() }
+        File(context.filesDir, DIR).apply { mkdirs() }
 
     private fun keyFor(url: String): String =
         MessageDigest.getInstance("SHA-256")
@@ -55,8 +51,8 @@ object VideoCache {
             .joinToString("") { "%02x".format(it) }
 
     /**
-     * The local file for [url] if it is fully cached, otherwise null. Touches the
-     * modified time so the freshest files survive LRU eviction.
+     * The local file for [url] if fully cached, else null. Touches the modified time
+     * so the freshest files survive LRU eviction.
      */
     fun cachedFile(context: Context, url: String): File? {
         val f = File(dir(context), keyFor(url))
@@ -70,27 +66,21 @@ object VideoCache {
 
     /**
      * The source to play RIGHT NOW: the local cached file if present, otherwise the
-     * original [url] so playback starts immediately by streaming — while a background
-     * download (in the persistent [scope]) caches it for next time. It never blocks on
-     * the download, so a big clip no longer shows a long "loading" before it starts,
-     * and re-plays come from disk instantly.
+     * original [url] (streamed) while a background download caches it for next time.
+     * Never blocks on the download.
      */
     suspend fun resolve(context: Context, url: String): String = withContext(Dispatchers.IO) {
         if (!url.startsWith("http")) return@withContext url // already a local file/uri
         cachedFile(context, url)?.let { return@withContext it.absolutePath }
-        prefetch(context, url) // fill the cache in the background; play by streaming now
+        prefetch(context, url)
         url
     }
 
-    /**
-     * Warms the cache for [url] in the background (the current clip, or the next reel
-     * in the pager) so a replay — or a scroll to it — comes from disk. Runs in the
-     * persistent scope, so it finishes even if the caller navigates away. Silent.
-     */
+    /** Warms the cache for [url] in the background. Silent & deduped. */
     fun prefetch(context: Context, url: String) {
         if (!url.startsWith("http")) return
         if (cachedFile(context, url) != null) return
-        val app = context.applicationContext // don't hold an Activity in the long-lived scope
+        val app = context.applicationContext
         val lock = locks.getOrPut(url) { Mutex() }
         scope.launch {
             lock.withLock {
@@ -117,10 +107,8 @@ object VideoCache {
             conn.inputStream.use { input ->
                 part.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
             }
-            // Reject a truncated download: if the connection dropped mid-stream the
-            // copy still returns normally, and a half-written file cached as complete
-            // is exactly what made reels play BLACK with no error. Only trust the file
-            // when it fully matches the advertised length.
+            // Reject a truncated download: a half-written file cached as complete is
+            // exactly what made media fail with no error.
             if (part.length() <= 0 || (expected > 0 && part.length() != expected)) {
                 part.delete()
                 return false
@@ -142,13 +130,18 @@ object VideoCache {
         }
     }
 
-    /**
-     * Drop a cached file for [url] — call when playback fails, so a corrupt/partial
-     * entry (from an older build or a bad network) is re-fetched next time instead of
-     * playing black forever.
-     */
+    /** Drop a cached file for [url] — call when playback fails so it re-fetches. */
     fun evict(context: Context, url: String) {
         runCatching { File(dir(context), keyFor(url)).delete() }
+    }
+
+    /** Total bytes on disk — for the Settings storage screen. */
+    fun sizeBytes(context: Context): Long =
+        dir(context).listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
+
+    /** Deletes everything cached here, freeing space without touching session/settings. */
+    fun clear(context: Context) {
+        runCatching { dir(context).listFiles()?.forEach { it.delete() } }
     }
 
     /** Evict least-recently-used files until back under [MAX_BYTES]; never [keep]. */

@@ -850,11 +850,20 @@ fun StorageScreen(onClose: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var cacheSize by remember { mutableStateOf<Long?>(null) }
+    var videoSize by remember { mutableStateOf<Long?>(null) }
     var clearing by remember { mutableStateOf(false) }
+    var clearingVideo by remember { mutableStateOf(false) }
 
     suspend fun measure() {
-        cacheSize = withContext(Dispatchers.IO) {
-            dirSize(context.cacheDir) + dirSize(context.externalCacheDir)
+        withContext(Dispatchers.IO) {
+            // Downloaded videos live in app data (filesDir) — reels in ReelCache
+            // (ExoPlayer), other media in VideoCache — so they're shown and cleared on
+            // their own below, separate from the throwaway "cache" figure.
+            val videoBytes = com.example.syntra.net.ReelCache.sizeBytes(context) +
+                com.example.syntra.net.VideoCache.sizeBytes(context)
+            val cacheBytes = dirSize(context.cacheDir) + dirSize(context.externalCacheDir)
+            videoSize = videoBytes
+            cacheSize = cacheBytes
         }
     }
 
@@ -873,8 +882,8 @@ fun StorageScreen(onClose: () -> Unit) {
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Foto dan video story yang diunduh agar tidak perlu diambil " +
-                        "ulang. Aman dihapus kapan saja.",
+                    text = "Foto, thumbnail, dan berkas sementara. Bisa diambil ulang " +
+                        "dari server — aman dihapus kapan saja.",
                     color = NexusTextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 17.sp,
@@ -895,6 +904,49 @@ fun StorageScreen(onClose: () -> Unit) {
                         measure()
                         clearing = false
                         Toast.makeText(context, "Cache dibersihkan.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // Downloaded videos — stored in app data so they're never re-downloaded.
+            // Shown & cleared separately from cache so the user manages them without a
+            // "Clear data" that would also sign them out.
+            Card {
+                Text("Video tersimpan", color = NexusTextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = videoSize?.let { formatBytes(it) } ?: "Menghitung…",
+                    color = NexusTextPrimary,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Video yang sudah kamu tonton disimpan agar TIDAK diunduh " +
+                        "ulang saat diputar lagi. Kosongkan untuk melepas ruang; video " +
+                        "akan diunduh sekali lagi bila ditonton kembali.",
+                    color = NexusTextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                PrimaryAction(
+                    text = if (clearingVideo) "Mengosongkan…" else "Kosongkan video",
+                    enabled = !clearingVideo && (videoSize ?: 0) > 0,
+                ) {
+                    clearingVideo = true
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            com.example.syntra.net.ReelCache.clear(context)
+                            com.example.syntra.net.VideoCache.clear(context)
+                        }
+                        measure()
+                        clearingVideo = false
+                        Toast.makeText(context, "Video tersimpan dikosongkan.", Toast.LENGTH_SHORT).show()
                     }
                 }
             }

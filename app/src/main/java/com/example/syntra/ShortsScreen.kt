@@ -1,7 +1,6 @@
 package com.example.syntra
 
 import android.graphics.SurfaceTexture
-import android.media.MediaPlayer
 import android.content.Context
 import android.net.Uri
 import android.view.Surface
@@ -127,7 +126,7 @@ import com.example.syntra.net.NetReel
 import com.example.syntra.net.NetReelComment
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
-import com.example.syntra.net.VideoCache
+import com.example.syntra.net.ReelCache
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
@@ -438,7 +437,7 @@ fun ShortsScreen(
                     // Warm the next reel so it's already on disk (and free to
                     // replay) by the time it scrolls into view.
                     displayReels.getOrNull(pager.currentPage + 1)?.mediaUrl?.let {
-                        VideoCache.prefetch(context, it)
+                        ReelCache.prefetch(context, it)
                     }
                 }
                 // Swipe down on the first reel to reload the feed.
@@ -981,7 +980,11 @@ private fun formatClock(ms: Int): String {
  * SurfaceView, which owns its own window layer and on many devices draws *on top
  * of* everything — including the neighbouring tab while the pager is mid-swipe.
  * A TextureView composites like an ordinary view, so it stays inside its page.
+ *
+ * Playback is ExoPlayer (Media3) reading through [ReelCache]'s CacheDataSource, so
+ * a clip is downloaded once and replays from disk.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 private fun ReelVideo(
     url: String,
@@ -1003,99 +1006,83 @@ private fun ReelVideo(
         return
     }
     val context = LocalContext.current
-    val player = remember(url) { MediaPlayer() }
     var ready by remember(url) { mutableStateOf(false) }
     var failed by remember(url) { mutableStateOf(false) }
     // Intrinsic video size, used to centre-crop instead of stretching.
     var videoW by remember(url) { mutableStateOf(0) }
     var videoH by remember(url) { mutableStateOf(0) }
-    // The surface (once the TextureView is laid out) and the resolved playback
-    // source (the on-disk copy once VideoCache has it) arrive independently; the
-    // player is prepared only when both are in hand. `started` keeps that to
-    // exactly one setDataSource/prepare per url.
-    var surface by remember(url) { mutableStateOf<Surface?>(null) }
-    var source by remember(url) { mutableStateOf<String?>(null) }
-    var started by remember(url) { mutableStateOf(false) }
-    // One-shot fallback: if a cached file fails, we drop it and stream the original.
-    var triedStream by remember(url) { mutableStateOf(false) }
-    // Latest callbacks/flags captured so the one-shot prepare below always sees
-    // current values without re-running (which would re-create the player).
+    // Latest callbacks/flags captured so the player's listener always sees current
+    // values without the player being re-created.
     val loopLatest by rememberUpdatedState(loop)
     val onEndedLatest by rememberUpdatedState(onEnded)
     val onDurationLatest by rememberUpdatedState(onDuration)
 
-    // Download-once: play from the local cached file, or stream (and fall back)
-    // if the miss can't be filled. Immutable media urls make this safe forever —
-    // this is what stops the feed re-streaming the same clip on every scroll.
-    LaunchedEffect(url) { source = VideoCache.resolve(context, url) }
-
-    // Bind surface + source to the player.
-    LaunchedEffect(surface, source) {
-        val s = surface ?: return@LaunchedEffect
-        val src = source ?: return@LaunchedEffect
-        if (started) {
-            // Surface was destroyed + recreated (a layout change, or scrolling): the
-            // player kept a dead surface and rendered BLACK. Re-attach the new one.
-            runCatching { player.setSurface(s) }
-            return@LaunchedEffect
-        }
-        started = true
-        runCatching {
-            player.setSurface(s)
-            player.setDataSource(src)
-            player.isLooping = loopLatest
-            player.setOnVideoSizeChangedListener { _, vw, vh -> videoW = vw; videoH = vh }
-            player.setOnPreparedListener {
-                ready = true
-                onDurationLatest(runCatching { it.duration }.getOrDefault(0))
-            }
-            player.setOnErrorListener { _, _, _ ->
-                // A cached file that fails is almost always corrupt/partial (the reason
-                // reels went black): drop it so it re-downloads, and stream the original
-                // url once now as an immediate recovery.
-                if (src != url && !triedStream) {
-                    triedStream = true
-                    VideoCache.evict(context, url)
-                    ready = false
-                    runCatching { player.reset() }
-                    started = false
-                    source = url // re-runs this effect to prepare straight from network
+    // One ExoPlayer per url, playing THROUGH the shared cache: the first view streams
+    // and fills the cache in the SAME pass (download-once, no separate stream+prefetch
+    // double fetch), and replays read from disk. Surface swaps on scroll are handled by
+    // ExoPlayer itself, so the old MediaPlayer black-frame re-attach dance is gone.
+    val player = remember(url) {
+        androidx.media3.exoplayer.ExoPlayer.Builder(context)
+            .setMediaSourceFactory(
+                androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+                    com.example.syntra.net.ReelCache.dataSourceFactory(context),
+                ),
+            )
+            .build().apply {
+                setMediaItem(androidx.media3.common.MediaItem.fromUri(url))
+                repeatMode = if (loopLatest) {
+                    androidx.media3.common.Player.REPEAT_MODE_ONE
                 } else {
-                    failed = true
+                    androidx.media3.common.Player.REPEAT_MODE_OFF
                 }
-                true
+                addListener(object : androidx.media3.common.Player.Listener {
+                    override fun onVideoSizeChanged(size: androidx.media3.common.VideoSize) {
+                        videoW = size.width
+                        videoH = size.height
+                    }
+
+                    override fun onPlaybackStateChanged(state: Int) {
+                        when (state) {
+                            androidx.media3.common.Player.STATE_READY -> {
+                                ready = true
+                                onDurationLatest(duration.coerceAtLeast(0L).toInt())
+                            }
+                            // Only meaningful when NOT looping — the "finished" signal the
+                            // feed uses to auto-advance to the next reel.
+                            androidx.media3.common.Player.STATE_ENDED ->
+                                if (!loopLatest) onEndedLatest()
+                        }
+                    }
+
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        failed = true
+                    }
+                })
+                prepare()
             }
-            // Only fires when NOT looping — that's the "video finished" signal the
-            // feed uses to auto-advance to the next reel.
-            player.setOnCompletionListener { if (!loopLatest) onEndedLatest() }
-            player.prepareAsync()
-        }.onFailure { failed = true }
     }
 
     // Keep looping in sync if the setting flips while a reel is on screen.
-    LaunchedEffect(loop, ready) {
-        if (ready) runCatching { player.isLooping = loop }
+    LaunchedEffect(loop) {
+        player.repeatMode = if (loop) {
+            androidx.media3.common.Player.REPEAT_MODE_ONE
+        } else {
+            androidx.media3.common.Player.REPEAT_MODE_OFF
+        }
     }
 
-    // Seek when the scrubber asks. SEEK_CLOSEST lands on the exact frame (not the
-    // nearest keyframe), so dragging shows a precise preview while paused instead of
-    // appearing to jump/restart. Position updates below reflect it immediately.
+    // Seek when the scrubber asks. ExoPlayer's default seek parameters are exact, so
+    // dragging shows a precise frame while paused instead of jumping to a keyframe.
     LaunchedEffect(seekToMs) {
         val ms = seekToMs ?: return@LaunchedEffect
-        if (ready) runCatching {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                player.seekTo(ms.toLong(), MediaPlayer.SEEK_CLOSEST)
-            } else {
-                player.seekTo(ms)
-            }
-        }
+        if (ready) runCatching { player.seekTo(ms.toLong()) }
     }
 
     // Feed the scrubber: sample the real playback position while it plays.
     LaunchedEffect(ready, playing) {
         if (!ready) return@LaunchedEffect
         while (true) {
-            if (playing) onPosition(runCatching { player.currentPosition }.getOrDefault(0))
+            if (playing) onPosition(runCatching { player.currentPosition.toInt() }.getOrDefault(0))
             delay(200)
         }
     }
@@ -1125,14 +1112,12 @@ private fun ReelVideo(
                 TextureView(ctx).apply {
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                            // Just hand the surface up; the prepare runs from the
-                            // LaunchedEffect above once the cached source resolves too.
-                            surface = Surface(st)
+                            player.setVideoSurface(Surface(st))
                         }
 
                         override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) = Unit
                         override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                            surface = null
+                            player.clearVideoSurface()
                             return true
                         }
                         override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
@@ -1159,11 +1144,12 @@ private fun ReelVideo(
         }
     }
 
-    // Play/pause follows the current page and the tap-to-pause toggle.
-    LaunchedEffect(playing, ready) {
-        if (!ready) return@LaunchedEffect
+    // Play/pause follows the current page and the tap-to-pause toggle. ExoPlayer
+    // honours playWhenReady even before it's buffered, so no `ready` gate is needed —
+    // it starts the instant it can.
+    LaunchedEffect(playing) {
         if (playing) com.example.syntra.net.MusicPlayer.pauseForExternalAudio() // don't talk over music
-        runCatching { if (playing) player.start() else player.pause() }
+        runCatching { player.playWhenReady = playing }
     }
 }
 
@@ -1201,7 +1187,7 @@ fun ReelViewer(
             SyntraClient.fireAndForget { SyntraClient.viewReel(r.id) }
         }
         items.getOrNull(pager.currentPage + 1)?.mediaUrl?.let {
-            VideoCache.prefetch(context, it)
+            ReelCache.prefetch(context, it)
         }
     }
     fun toggleLike(reel: NetReel) {
