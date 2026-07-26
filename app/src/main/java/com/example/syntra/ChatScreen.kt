@@ -385,12 +385,17 @@ private fun previewFallback(type: String): String = when (type) {
 private const val STICKER_MARKER = "STICKER"
 private const val VIEW_ONCE_MARKER = "VIEWONCE"
 private const val STORY_REPLY_MARKER = "STORYREPLY"
+
+/** Home-list preview for a view-once photo, and for one whose single view is spent. */
+private const val VIEW_ONCE_PREVIEW = "[Foto 1x]"
+private const val VIEW_ONCE_OPENED_PREVIEW = "[sudah dibuka]"
+
 private const val MARKER_SEP = '\u0001'
 
 /** Turn a raw stored body into a home-list preview, unwrapping our markers. */
 private fun unwrapMarkers(body: String): String = when {
     body.startsWith(STICKER_MARKER + MARKER_SEP) -> "[Stiker]"
-    body.startsWith(VIEW_ONCE_MARKER + MARKER_SEP) -> "[Foto]"
+    body.startsWith(VIEW_ONCE_MARKER + MARKER_SEP) -> VIEW_ONCE_PREVIEW
     body.startsWith(STORY_REPLY_MARKER + MARKER_SEP) -> "[Balasan story]"
     else -> body
 }
@@ -1699,6 +1704,20 @@ private fun ConversationRow(
     val online = convo.presence == Presence.ONLINE
     val typing = convo.presence == Presence.TYPING
 
+    // A view-once photo previews as "[Foto 1x]" until its single view is spent, then
+    // as "[sudah dibuka]" — matching the bubble inside the chat.
+    val context = LocalContext.current
+    val preview = remember(convo.message, convo.lastMessageId) {
+        val id = convo.lastMessageId
+        if (convo.message == VIEW_ONCE_PREVIEW && id != null &&
+            com.example.syntra.net.ViewOnceStore.isOpened(context, id)
+        ) {
+            VIEW_ONCE_OPENED_PREVIEW
+        } else {
+            convo.message
+        }
+    }
+
     // Flat, plain rows — no card fill, no border. Only a picked row (selection mode)
     // gets a soft accent wash so it's clearly marked.
     val rowBg = if (selected) NexusAccent.copy(alpha = 0.14f) else Color.Transparent
@@ -1779,7 +1798,7 @@ private fun ConversationRow(
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = if (typing) "sedang mengetik…" else convo.message,
+                        text = if (typing) "sedang mengetik…" else preview,
                         color = if (typing) NexusAccentSoft else if (unread) NexusTextPrimary.copy(alpha = 0.85f) else NexusTextSecondary,
                         fontStyle = if (typing) FontStyle.Italic else FontStyle.Normal,
                         fontSize = 14.sp,

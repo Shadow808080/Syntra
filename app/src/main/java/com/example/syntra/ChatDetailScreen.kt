@@ -53,10 +53,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -1115,7 +1111,10 @@ fun ChatDetailScreen(
                     viewOnceOpened = msg.viewOnce &&
                         (viewOnceOpened.contains(msg.id) || ViewOnceStore.isOpened(context, msg.id)),
                     onOpenViewOnce = {
-                        if (!viewOnceOpened.contains(msg.id)) {
+                        // The SENDER can always re-view their own view-once photo —
+                        // opening it never marks it "sudah dibuka" for them. Only when
+                        // the recipient opens it is the single view consumed.
+                        if (!msg.fromMe && !viewOnceOpened.contains(msg.id)) {
                             ViewOnceStore.markOpened(context, msg.id)
                             viewOnceOpened.add(msg.id)
                         }
@@ -1900,60 +1899,40 @@ private fun MessagesSkeleton() {
 /** A "sekali lihat" photo placeholder — tap to open once, then locked as "Dibuka". */
 @Composable
 private fun ViewOnceBubble(opened: Boolean, textColor: Color, onOpen: () -> Unit) {
-    // Compact: just a small dashed "1" ring, no descriptive text. Unopened it's bright
-    // and tappable; once opened it dims and gets a diagonal strike through the "1" — a
-    // distinct "this one view is spent" state.
-    Box(
+    // Once opened (by either side) there's no icon at all — just an italic
+    // "sudah dibuka", like a spent message.
+    if (opened) {
+        Text(
+            text = "sudah dibuka",
+            color = textColor.copy(alpha = 0.6f),
+            fontSize = 14.sp,
+            fontStyle = FontStyle.Italic,
+            modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp),
+        )
+        return
+    }
+    // Unopened: a small SOLID ring with the "1" centred, and "Foto" beside it.
+    Row(
         modifier = Modifier
-            .clip(CircleShape)
-            .then(
-                if (!opened) {
-                    Modifier.clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                        onClick = onOpen,
-                    )
-                } else {
-                    Modifier
-                },
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onOpen,
             )
-            .padding(5.dp),
-        contentAlignment = Alignment.Center,
+            .padding(vertical = 6.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        val ringAlpha = if (opened) 0.45f else 0.95f
         Box(
             modifier = Modifier
-                .size(22.dp)
-                .drawBehind {
-                    val d = size.minDimension
-                    val col = textColor.copy(alpha = ringAlpha)
-                    drawCircle(
-                        color = col,
-                        radius = d / 2f - 1.dp.toPx(),
-                        style = Stroke(
-                            width = 1.4.dp.toPx(),
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f),
-                        ),
-                    )
-                    if (opened) {
-                        // Diagonal strike — the unique "already opened" mark.
-                        drawLine(
-                            color = col,
-                            start = Offset(d * 0.26f, d * 0.74f),
-                            end = Offset(d * 0.74f, d * 0.26f),
-                            strokeWidth = 1.5.dp.toPx(),
-                        )
-                    }
-                },
+                .size(20.dp)
+                .border(1.5.dp, textColor.copy(alpha = 0.85f), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                "1",
-                color = textColor.copy(alpha = if (opened) 0.5f else 1f),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-            )
+            Text("1", color = textColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
+        Spacer(Modifier.width(8.dp))
+        Text("Foto", color = textColor, fontSize = 14.sp)
     }
 }
 
