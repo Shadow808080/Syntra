@@ -18,6 +18,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -103,6 +104,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -133,6 +137,7 @@ import com.example.syntra.net.MessageCache
 import com.example.syntra.net.PinStore
 import com.example.syntra.net.Translate
 import com.example.syntra.net.MediaAutoDownload
+import com.example.syntra.net.OutgoingMediaStore
 import com.example.syntra.net.ViewOnceStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
@@ -851,11 +856,18 @@ fun ChatDetailScreen(
                 }.getOrNull()
             }
             messages.add(Message(ref, caption, fromMe = true, time = "now", media = localPath, viewOnce = viewOnce))
+            // Keep MY OWN copy in app data, keyed by the client id for now. This is what
+            // guarantees the sender can always re-open what they sent — even if the
+            // server never hands back an attachment url for it.
+            withContext(Dispatchers.IO) { OutgoingMediaStore.save(context, ref, ext, bytes) }
             runCatching {
                 val (mediaId, url) = SyntraClient.uploadMediaFull(kind, ext, mime, bytes, durationMs = durationMs)
                 // The message itself carries the media *id*, so the body stays empty
                 // instead of leaking a URL into the conversation.
                 val sent = SyntraClient.sendMessageRest(conversation.id, body, listOf(mediaId))
+                // Move my own copy onto the authoritative id so it still resolves after
+                // the optimistic row is replaced (or dropped for the broadcast copy).
+                OutgoingMediaStore.rekey(context, ref, sent.id)
                 val i = messages.indexOfFirst { it.id == ref }
                 if (i >= 0) {
                     // The broadcast may have raced ahead and already inserted this id;
@@ -1196,7 +1208,15 @@ fun ChatDetailScreen(
                                 }
                             }
                         }
-                        msg.media?.let { fullscreenCaption = msg.text; fullscreenImage = it }
+                        // Same fallback as the bubble: my own saved copy when the server
+                        // gave no attachment, so the sender can always review their photo.
+                        val src = msg.media ?: if (msg.fromMe) OutgoingMediaStore.get(context, msg.id) else null
+                        if (src != null) {
+                            fullscreenCaption = msg.text
+                            fullscreenImage = src
+                        } else {
+                            Toast.makeText(context, "Media tidak tersedia.", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     translation = translations[msg.id],
                     onHideTranslation = { translations.remove(msg.id) },
@@ -2029,27 +2049,68 @@ private fun MediaLoadingSkeleton(modifier: Modifier = Modifier, etaMs: Long = 40
     val target = ((now - start).toFloat() / etaMs.toFloat()).coerceIn(0.06f, 0.92f)
     val frac by animateFloatAsState(targetValue = target, animationSpec = tween(300), label = "media-eta")
 
-    Box(modifier = modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
         ShimmerFill(Modifier.matchParentSize())
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(horizontal = 14.dp, vertical = 12.dp)
-                .fillMaxWidth()
-                .height(3.dp)
-                .clip(RoundedCornerShape(50))
-                .background(Color.White.copy(alpha = 0.18f)),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(frac)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(50))
-                    .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent))),
+        // A donut: a faint full ring with the ETA arc sweeping around it.
+        Canvas(modifier = Modifier.size(44.dp)) {
+            val stroke = 4.dp.toPx()
+            val inset = stroke / 2f
+            val arcSize = androidx.compose.ui.geometry.Size(size.width - stroke, size.height - stroke)
+            val topLeft = Offset(inset, inset)
+            drawArc(
+                color = Color.White.copy(alpha = 0.22f),
+                startAngle = 0f, sweepAngle = 360f, useCenter = false,
+                topLeft = topLeft, size = arcSize,
+                style = Stroke(width = stroke),
+            )
+            drawArc(
+                brush = Brush.sweepGradient(listOf(NexusAccentSoft, NexusAccent, NexusAccentSoft)),
+                startAngle = -90f, sweepAngle = 360f * frac, useCenter = false,
+                topLeft = topLeft, size = arcSize,
+                style = Stroke(width = stroke, cap = StrokeCap.Round),
             )
         }
     }
 }
+
+/** "1,4 MB" — a human-readable byte count for the download placeholder. */
+private fun formatMediaSize(bytes: Long): String = when {
+    bytes <= 0L -> ""
+    bytes >= 1024L * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024 * 1024))
+    bytes >= 1024L * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
+    else -> "%d KB".format(bytes / 1024)
+}
+
+/**
+ * Asks the server how big [url] is (a HEAD request) so an undownloaded bubble can
+ * show its weight before you spend the data. Cached per URL; blank when unknown.
+ */
+@Composable
+private fun rememberMediaSize(url: String?): String {
+    var size by remember(url) { mutableStateOf(mediaSizeCache[url] ?: "") }
+    LaunchedEffect(url) {
+        if (url == null || !url.startsWith("http") || size.isNotEmpty()) return@LaunchedEffect
+        val text = withContext(Dispatchers.IO) {
+            runCatching {
+                val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "HEAD"
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                }
+                val len = conn.contentLengthLong
+                conn.disconnect()
+                formatMediaSize(len)
+            }.getOrDefault("")
+        }
+        if (text.isNotEmpty()) {
+            mediaSizeCache[url] = text
+            size = text
+        }
+    }
+    return size
+}
+
+private val mediaSizeCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
 /**
  * A chat image that shows [MediaLoadingSkeleton] while it downloads and a quiet
@@ -2074,6 +2135,9 @@ private fun ChatMediaImage(
     var manual by remember(model) { mutableStateOf(false) }
     val local = model is String && !model.startsWith("http")
     if (!autoDownload && !manual && !local) {
+        // Not downloaded yet: show the media BLURRED behind its size, so you can see
+        // roughly what it is and what it will cost before choosing to fetch it.
+        val sizeText = rememberMediaSize(model as? String)
         Box(
             modifier = modifier
                 .background(NexusSurface)
@@ -2083,17 +2147,19 @@ private fun ChatMediaImage(
                 ) { manual = true },
             contentAlignment = Alignment.Center,
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    Icons.Filled.Download,
-                    contentDescription = "Unduh $label",
-                    tint = NexusTextPrimary,
-                    modifier = Modifier.size(28.dp),
-                )
-                Spacer(Modifier.height(6.dp))
-                Text("Ketuk untuk unduh", color = NexusTextSecondary, fontSize = 12.sp)
-                Text(label, color = NexusTextSecondary.copy(alpha = 0.7f), fontSize = 11.sp)
-            }
+            AsyncImage(
+                model = model,
+                contentDescription = null,
+                contentScale = contentScale,
+                modifier = Modifier.matchParentSize().blur(22.dp),
+            )
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.35f)))
+            Text(
+                text = sizeText.ifBlank { label },
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+            )
         }
         return
     }
@@ -2352,8 +2418,10 @@ private fun MessageBubble(
                         )
                     }
                 }
-                // Attachments come back as ready URLs; a caption may sit under them.
-                val media = msg.media
+                // Attachments come back as ready URLs. For my OWN messages fall back to
+                // the copy kept at send time, so a missing/unresolved attachment can
+                // never leave the sender with a bubble that shows nothing.
+                val media = msg.media ?: if (msg.fromMe) OutgoingMediaStore.get(context, msg.id) else null
                 when {
                     msg.sticker != null -> Text(
                         text = msg.sticker,
@@ -2361,7 +2429,9 @@ private fun MessageBubble(
                         lineHeight = 74.sp,
                     )
                     media != null && media.isAudioUrl() -> AudioBubble(media, textColor)
-                    media != null && msg.viewOnce -> ViewOnceBubble(
+                    // Not gated on media: a view-once message ALWAYS renders its bubble,
+                    // so it can never collapse into an empty/among-nothing row.
+                    msg.viewOnce -> ViewOnceBubble(
                         opened = viewOnceOpened,
                         textColor = textColor,
                         onOpen = onOpenViewOnce,
@@ -2622,9 +2692,14 @@ private fun AudioBubble(url: String, tint: Color) {
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.width(190.dp),
     ) {
+        // Before it has ever been fetched, a voice note shows its SIZE (big, contained)
+        // instead of a play triangle — you know what it costs before you spend it. Once
+        // played (or when auto-download is on) it becomes the normal transport button.
+        val sizeText = rememberMediaSize(url)
+        val showSize = !prepared && !loading && !MediaAutoDownload.voice(context) && sizeText.isNotEmpty()
         Box(
             modifier = Modifier
-                .size(36.dp)
+                .then(if (showSize) Modifier.widthIn(min = 56.dp).height(36.dp) else Modifier.size(36.dp))
                 .background(tint.copy(alpha = 0.18f), androidx.compose.foundation.shape.CircleShape)
                 .clickable(
                     indication = null,
@@ -2632,7 +2707,16 @@ private fun AudioBubble(url: String, tint: Color) {
                 ) { toggle() },
             contentAlignment = Alignment.Center,
         ) {
-            if (loading) {
+            if (showSize) {
+                Text(
+                    text = sizeText,
+                    color = tint,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 10.dp),
+                )
+            } else if (loading) {
                 CircularProgressIndicator(
                     color = tint,
                     strokeWidth = 2.dp,
