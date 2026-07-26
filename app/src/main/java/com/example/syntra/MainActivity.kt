@@ -2,7 +2,6 @@ package com.example.syntra
 
 import android.content.Intent
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
@@ -38,8 +37,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
+import com.example.syntra.net.AppLock
 import com.example.syntra.net.SyntraClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -63,7 +64,9 @@ object ReelNavRequest {
     var reelId by mutableStateOf<String?>(null)
 }
 
-class MainActivity : ComponentActivity() {
+// FragmentActivity (not plain ComponentActivity) so BiometricPrompt — used by the
+// app-lock unlock screen — has the host it needs.
+class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Paint the saved theme before the first frame so there is no flash.
@@ -106,10 +109,15 @@ class MainActivity : ComponentActivity() {
         // App is on screen → suppress message notifications (the user sees updates live).
         com.example.syntra.net.AppForeground.isForeground = true
         com.example.syntra.net.AppForeground.isForegroundState = true
+        // Re-evaluate the app lock: a cold start (or a real background stint) re-locks;
+        // a quick picker round-trip inside the grace window stays unlocked.
+        AppLock.onForeground(this)
     }
 
     override fun onStop() {
         super.onStop()
+        // Note when we left so the lock knows how long we were away.
+        AppLock.onBackground()
         // App went to the background → let the foreground service post notifications.
         com.example.syntra.net.AppForeground.isForeground = false
         // Pause all media when the app is no longer on screen: music, and — via the
@@ -261,6 +269,10 @@ private fun NexusApp() {
             onAuthenticated = { signedIn = true; deletedNotice = null },
             notice = deletedNotice,
         )
+        // Signed in, but the device-local app lock is on and this session hasn't been
+        // unlocked yet → demand the PIN / fingerprint before the app is reachable.
+        com.example.syntra.net.AppLockStore.isEnabled(context) && !AppLock.unlocked ->
+            AppLockScreen(onUnlocked = {})
         else -> MainTabs(onSignOut = {
             // Sign out: stop the background service and close the socket.
             com.example.syntra.net.ChatConnectionService.stop(context)

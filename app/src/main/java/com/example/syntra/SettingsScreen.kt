@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DataUsage
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Notifications
@@ -103,7 +104,7 @@ object SettingsStore {
     const val AUTO_SCROLL_REELS = "autoscroll_reels"
 }
 
-private enum class SettingsPage { PROFILE, QR, SECURITY, BLOCKED, THEME, STORAGE }
+private enum class SettingsPage { PROFILE, QR, SECURITY, APP_LOCK, BLOCKED, THEME, STORAGE }
 
 @Composable
 fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
@@ -131,6 +132,7 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                 onClose = { open = null },
                 onSignedOut = { open = null; onSignedOut() },
             )
+            SettingsPage.APP_LOCK -> AppLockSettingsScreen { open = null }
             SettingsPage.BLOCKED -> BlockedContactsScreen { open = null }
             SettingsPage.THEME -> ThemeScreen { open = null }
             SettingsPage.STORAGE -> StorageScreen { open = null }
@@ -207,6 +209,12 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                     NavRow(Icons.Filled.Lock, "Keamanan", "Sesi aktif") {
                         open = SettingsPage.SECURITY
                     }
+                    Divider()
+                    NavRow(
+                        Icons.Filled.Fingerprint,
+                        "Kunci aplikasi",
+                        if (com.example.syntra.net.AppLockStore.isEnabled(context)) "Aktif — PIN & sidik jari" else "Nonaktif",
+                    ) { open = SettingsPage.APP_LOCK }
                 }
             }
 

@@ -45,6 +45,8 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.livekit.android)
     implementation(libs.zxing.core)
+    implementation(libs.androidx.biometric)
+    implementation(libs.androidx.fragment)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.ui.graphics)
