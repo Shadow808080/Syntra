@@ -1554,13 +1554,18 @@ private fun ActiveRow(
                 }
             }
         }
-        LazyRow(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp, bottom = 12.dp),
-            contentPadding = PaddingValues(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(18.dp),
-        ) {
+        // The rail sits over a slow, wavy AURORA that flows the full width BEHIND the
+        // avatars (drawn first, so it never covers the story UI — only peeks through
+        // the gaps between profiles).
+        Box(modifier = Modifier.fillMaxWidth()) {
+            StoryAuroraBackground(modifier = Modifier.matchParentSize())
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 12.dp),
+                contentPadding = PaddingValues(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
             itemsIndexed(people, key = { _, person -> person.id }) { index, person ->
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     StoryAvatar(
@@ -1585,7 +1590,66 @@ private fun ActiveRow(
                     )
                 }
             }
+            }
         }
+    }
+}
+
+/**
+ * A slow, wavy aurora that flows the full width behind the story rail. Three soft,
+ * translucent ribbons drift on their own phases so they weave and undulate. Drawn
+ * behind the avatars (very low alpha), it peeks through the gaps without ever
+ * covering the story UI.
+ */
+@Composable
+private fun StoryAuroraBackground(modifier: Modifier = Modifier) {
+    val t = rememberInfiniteTransition(label = "story-aurora")
+    val twoPi = (2.0 * Math.PI).toFloat()
+    val p1 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(9000, easing = LinearEasing)), label = "a1")
+    val p2 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(14000, easing = LinearEasing)), label = "a2")
+    val p3 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(11000, easing = LinearEasing)), label = "a3")
+
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+
+        fun ribbon(centerY: Float, amp: Float, waves: Float, phase: Float, thickness: Float): androidx.compose.ui.graphics.Path {
+            val path = androidx.compose.ui.graphics.Path()
+            val steps = 40
+            for (i in 0..steps) {
+                val x = w * i / steps
+                val y = centerY + (kotlin.math.sin(phase + i.toFloat() / steps * waves * twoPi) * amp)
+                if (i == 0) path.moveTo(x, y - thickness / 2f) else path.lineTo(x, y - thickness / 2f)
+            }
+            for (i in steps downTo 0) {
+                val x = w * i / steps
+                val y = centerY + (kotlin.math.sin(phase + i.toFloat() / steps * waves * twoPi) * amp)
+                path.lineTo(x, y + thickness / 2f)
+            }
+            path.close()
+            return path
+        }
+
+        // Three woven aurora ribbons. Soft vertical gradients (transparent → tint →
+        // transparent) make each ribbon a glow rather than a hard band.
+        drawPath(
+            ribbon(h * 0.42f, h * 0.16f, 1.4f, p1, h * 0.5f),
+            brush = Brush.verticalGradient(
+                listOf(Color.Transparent, Color(0xFFB79CFF).copy(alpha = 0.22f), Color.Transparent),
+            ),
+        )
+        drawPath(
+            ribbon(h * 0.58f, h * 0.20f, 1.1f, p2, h * 0.55f),
+            brush = Brush.verticalGradient(
+                listOf(Color.Transparent, Color(0xFF20D5C4).copy(alpha = 0.18f), Color.Transparent),
+            ),
+        )
+        drawPath(
+            ribbon(h * 0.5f, h * 0.18f, 1.7f, p3, h * 0.42f),
+            brush = Brush.verticalGradient(
+                listOf(Color.Transparent, Color(0xFF6E8BFF).copy(alpha = 0.2f), Color.Transparent),
+            ),
+        )
     }
 }
 
