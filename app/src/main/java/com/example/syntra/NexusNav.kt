@@ -121,8 +121,6 @@ fun NexusBottomBar(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth().background(NexusSurface)) {
-        // Hairline that lifts the bar off the content above it — depth without a shadow.
-        Box(Modifier.fillMaxWidth().height(1.dp).background(NexusStroke))
         Row(
             modifier = Modifier
                 .fillMaxWidth()

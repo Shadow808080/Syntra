@@ -115,6 +115,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -1623,18 +1624,16 @@ private fun ConversationRow(
     val online = convo.presence == Presence.ONLINE
     val typing = convo.presence == Presence.TYPING
 
-    // Each conversation is its own rounded card with a hairline border, separated by
-    // a small gap — a clean, tidy "boxed" list. A picked row (selection mode) gets a
-    // soft accent wash instead of the plain surface fill.
-    val rowBg = if (selected) NexusAccent.copy(alpha = 0.14f) else NexusSurface
+    // Flat, plain rows — no card fill, no border. Only a picked row (selection mode)
+    // gets a soft accent wash so it's clearly marked.
+    val rowBg = if (selected) NexusAccent.copy(alpha = 0.14f) else Color.Transparent
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .padding(horizontal = 8.dp, vertical = 2.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(rowBg)
-            .border(1.dp, NexusStroke, RoundedCornerShape(16.dp))
             .combinedClickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
@@ -1661,15 +1660,15 @@ private fun ConversationRow(
                             .align(Alignment.BottomEnd)
                             .size(20.dp)
                             .background(NexusAccent, CircleShape)
-                            .border(2.dp, NexusSurface, CircleShape),
+                            .border(2.dp, NexusBackground, CircleShape),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(12.dp))
                     }
                     // Green = online now. Accent = away/typing but present. The gap
-                    // ring matches the card fill the avatar now sits on.
-                    online -> PresenceDot(NexusOnline, NexusSurface)
-                    typing -> PresenceDot(NexusAccentSoft, NexusSurface)
+                    // ring is the page background (rows are flat, no card behind).
+                    online -> PresenceDot(NexusOnline, NexusBackground)
+                    typing -> PresenceDot(NexusAccentSoft, NexusBackground)
                 }
             }
             Spacer(Modifier.width(14.dp))
@@ -1704,27 +1703,6 @@ private fun ConversationRow(
                 }
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (convo.sent && !typing) {
-                        // Same rule as inside the chat so home and chat never disagree:
-                        //   read (blue ✓✓)  = peer's read mark covers my last message
-                        //   delivered (grey ✓✓) = peer ONLINE now, or a delivered mark
-                        //                          covers it
-                        //   sent (single ✓) = only reached the server
-                        val lastId = convo.lastMessageId
-                        val read = lastId != null && convo.counterpartLastReadId != null &&
-                            lastId <= convo.counterpartLastReadId
-                        val delivered = online ||
-                            (lastId != null && convo.counterpartLastDeliveredId != null &&
-                                lastId <= convo.counterpartLastDeliveredId)
-                        Icon(
-                            imageVector = if (read || delivered) Icons.Filled.DoneAll else Icons.Filled.Done,
-                            contentDescription = when {
-                                read -> "Dibaca"; delivered -> "Sampai"; else -> "Terkirim"
-                            },
-                            tint = if (read) Color(0xFF7FE3FF) else NexusTextSecondary,
-                            modifier = Modifier.padding(end = 4.dp).size(15.dp),
-                        )
-                    }
                     Text(
                         text = if (typing) "sedang mengetik…" else convo.message,
                         color = if (typing) NexusAccentSoft else if (unread) NexusTextPrimary.copy(alpha = 0.85f) else NexusTextSecondary,
@@ -1733,6 +1711,8 @@ private fun ConversationRow(
                         fontWeight = if (unread) FontWeight.Medium else FontWeight.Normal,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        // weight(1f) pushes whatever sits to the right (delivery check or
+                        // the unread badge) to the far edge — justified against the text.
                         modifier = Modifier.weight(1f),
                     )
                     if (unread) {
@@ -1756,6 +1736,27 @@ private fun ConversationRow(
                                 ),
                             )
                         }
+                    } else if (convo.sent && !typing) {
+                        // My last message's delivery state, pushed to the far right so it
+                        // sits justified against the message text (WhatsApp-style).
+                        //   read (blue ✓✓) = peer's read mark covers my last message
+                        //   delivered (grey ✓✓) = peer online now, or a delivered mark
+                        //   sent (single ✓) = only reached the server
+                        val lastId = convo.lastMessageId
+                        val read = lastId != null && convo.counterpartLastReadId != null &&
+                            lastId <= convo.counterpartLastReadId
+                        val delivered = online ||
+                            (lastId != null && convo.counterpartLastDeliveredId != null &&
+                                lastId <= convo.counterpartLastDeliveredId)
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            imageVector = if (read || delivered) Icons.Filled.DoneAll else Icons.Filled.Done,
+                            contentDescription = when {
+                                read -> "Dibaca"; delivered -> "Sampai"; else -> "Terkirim"
+                            },
+                            tint = if (read) Color(0xFF7FE3FF) else NexusTextSecondary,
+                            modifier = Modifier.size(15.dp),
+                        )
                     }
                 }
             }
@@ -1775,59 +1776,35 @@ private fun StoryAvatar(
     viewedCount: Int,
     onClick: () -> Unit,
 ) {
+    // A story with anything still unwatched is "alive": it gets a pulsing aura and a
+    // slowly orbiting gradient ring. Fully-watched ones fall calm (a plain dim ring),
+    // so the live ones genuinely stand out on the rail.
+    val hasUnwatched = viewedCount < posts
+
+    // Tactile press: the avatar dips and springs back — a soft, connective motion.
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.9f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "story-press",
+    )
+
     Box(
         modifier = Modifier
             .size(size)
+            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
             .clickable(
                 indication = null,
-                interactionSource = remember { MutableInteractionSource() },
+                interactionSource = interaction,
                 onClick = onClick,
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val strokeWidth = 3.dp.toPx()
-            val inset = strokeWidth / 2f
-            val arcSize = Size(this.size.width - strokeWidth, this.size.height - strokeWidth)
-            val topLeft = Offset(inset, inset)
-            val segments = posts.coerceAtLeast(1)
-            // Gap (in degrees) between segments; a single story draws a full ring.
-            val gap = if (segments == 1) 0f else 10f
-            val sweep = (360f - gap * segments) / segments
-            // A brand sweep gradient (purple → blue → purple) for unwatched segments —
-            // reads as a live signal. Watched segments dim to a faint grey.
-            val ringBrush = Brush.sweepGradient(
-                listOf(NexusRing, NexusAccentSoft, NexusRing),
-                center = Offset(this.size.width / 2f, this.size.height / 2f),
-            )
-            var start = -90f
-            repeat(segments) { i ->
-                // Stories are watched in order: the first [viewedCount] segments are
-                // done (dim), the rest are still lit. Watch 1 of 3 → 2 stay lit.
-                val watched = i < viewedCount
-                if (watched) {
-                    drawArc(
-                        color = StorySeenRing,
-                        startAngle = start,
-                        sweepAngle = sweep,
-                        useCenter = false,
-                        topLeft = topLeft,
-                        size = arcSize,
-                        style = Stroke(width = 1.5.dp.toPx()),
-                    )
-                } else {
-                    drawArc(
-                        brush = ringBrush,
-                        startAngle = start,
-                        sweepAngle = sweep,
-                        useCenter = false,
-                        topLeft = topLeft,
-                        size = arcSize,
-                        style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-                    )
-                }
-                start += sweep + gap
-            }
+        if (hasUnwatched) {
+            FreshStoryRing(segments = posts, viewedCount = viewedCount, modifier = Modifier.fillMaxSize())
+        } else {
+            SeenStoryRing(segments = posts, modifier = Modifier.fillMaxSize())
         }
         // Inner photo, inset so there is a small gap between ring and photo.
         StoryPhoto(
@@ -1836,6 +1813,115 @@ private fun StoryAvatar(
                 .size(size - 10.dp)
                 .clip(CircleShape),
         )
+    }
+}
+
+/**
+ * The "alive" story ring: a soft accent aura that breathes, wrapped by a segmented
+ * brand-gradient ring that orbits slowly. Watched segments stay dim; unwatched ones
+ * carry the gradient — so partial progress still reads while the whole thing glows.
+ */
+@Composable
+private fun FreshStoryRing(
+    segments: Int,
+    viewedCount: Int,
+    modifier: Modifier = Modifier,
+) {
+    val t = rememberInfiniteTransition(label = "story-aura")
+    // A calm continuous orbit of the ring gradient.
+    val rotation by t.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(7000, easing = LinearEasing)),
+        label = "story-rot",
+    )
+    // A slow breath for the aura glow.
+    val pulse by t.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0.72f,
+        animationSpec = infiniteRepeatable(
+            tween(1700, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "story-pulse",
+    )
+
+    Canvas(modifier = modifier) {
+        val w = this.size.width
+        val h = this.size.height
+        val center = Offset(w / 2f, h / 2f)
+        val stroke = 3.dp.toPx()
+        val arcSize = Size(w - stroke, h - stroke)
+        val topLeft = Offset(stroke / 2f, stroke / 2f)
+        val segs = segments.coerceAtLeast(1)
+        val gap = if (segs == 1) 0f else 10f
+        val sweep = (360f - gap * segs) / segs
+
+        // Aura — a soft accent glow that hugs the ring and fades both ways, breathing.
+        drawCircle(
+            brush = Brush.radialGradient(
+                0.5f to Color.Transparent,
+                0.85f to NexusAccentSoft.copy(alpha = pulse * 0.55f),
+                1.0f to Color.Transparent,
+                center = center,
+                radius = w / 2f,
+            ),
+            radius = w / 2f,
+            center = center,
+        )
+
+        // Orbiting segmented gradient ring.
+        val ringBrush = Brush.sweepGradient(
+            listOf(NexusRing, NexusAccentSoft, NexusRing),
+            center = center,
+        )
+        rotate(rotation, pivot = center) {
+            var start = -90f
+            repeat(segs) { i ->
+                val watched = i < viewedCount
+                if (watched) {
+                    drawArc(
+                        color = StorySeenRing,
+                        startAngle = start, sweepAngle = sweep, useCenter = false,
+                        topLeft = topLeft, size = arcSize,
+                        style = Stroke(width = 1.5.dp.toPx()),
+                    )
+                } else {
+                    drawArc(
+                        brush = ringBrush,
+                        startAngle = start, sweepAngle = sweep, useCenter = false,
+                        topLeft = topLeft, size = arcSize,
+                        style = Stroke(width = stroke, cap = StrokeCap.Round),
+                    )
+                }
+                start += sweep + gap
+            }
+        }
+    }
+}
+
+/** The calm, fully-watched ring: plain dim segments, no aura, no motion. */
+@Composable
+private fun SeenStoryRing(segments: Int, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val w = this.size.width
+        val h = this.size.height
+        val stroke = 3.dp.toPx()
+        val arcSize = Size(w - stroke, h - stroke)
+        val topLeft = Offset(stroke / 2f, stroke / 2f)
+        val segs = segments.coerceAtLeast(1)
+        val gap = if (segs == 1) 0f else 10f
+        val sweep = (360f - gap * segs) / segs
+        var start = -90f
+        repeat(segs) {
+            drawArc(
+                color = StorySeenRing,
+                startAngle = start, sweepAngle = sweep, useCenter = false,
+                topLeft = topLeft, size = arcSize,
+                style = Stroke(width = 1.5.dp.toPx()),
+            )
+            start += sweep + gap
+        }
     }
 }
 

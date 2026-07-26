@@ -307,6 +307,7 @@ fun MusicScreen(
                 }
                 searching -> MusicSearchBody(
                     query = query,
+                    localTracks = localTracks,
                     onPlay = play,
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
@@ -581,6 +582,7 @@ private fun MusicBrowseBody(
 @Composable
 private fun MusicSearchBody(
     query: String,
+    localTracks: List<MusicTrack>,
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
     onOpenArtist: (MusicArtist) -> Unit,
     onOpenAlbum: (MusicAlbum) -> Unit,
@@ -590,6 +592,16 @@ private fun MusicSearchBody(
     val albums = remember { mutableStateListOf<MusicAlbum>() }
     val community = remember { mutableStateListOf<MusicTrack>() }
     var loading by remember { mutableStateOf(false) }
+
+    // Your own device songs, matched by title/artist — searched LOCALLY so an
+    // uploaded song is always findable here even if the community endpoint is down.
+    val localMatches = remember(query, localTracks.size) {
+        val q = query.trim()
+        if (q.isBlank()) emptyList()
+        else localTracks.filter {
+            it.title.contains(q, ignoreCase = true) || it.artist.contains(q, ignoreCase = true)
+        }
+    }
 
     // Debounced search: wait for the user to stop typing before hitting the API.
     LaunchedEffect(query) {
@@ -614,7 +626,7 @@ private fun MusicSearchBody(
         }
         return
     }
-    if (loading && tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && community.isEmpty()) {
+    if (loading && localMatches.isEmpty() && tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && community.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
         }
@@ -625,6 +637,11 @@ private fun MusicSearchBody(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 6.dp, bottom = 150.dp),
     ) {
+        // Your own uploaded/device songs first — instant, always available.
+        if (localMatches.isNotEmpty()) {
+            item { SectionHeader("Dari perangkat") }
+            items(localMatches, key = { "localsearch_${it.id}" }) { t -> TrackRow(t) { onPlay(t, localMatches) } }
+        }
         if (community.isNotEmpty()) {
             item { SectionHeader("Dari komunitas") }
             items(community, key = { "community_${it.id}" }) { t -> TrackRow(t) { onPlay(t, community) } }
@@ -655,7 +672,7 @@ private fun MusicSearchBody(
                 }
             }
         }
-        if (tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && community.isEmpty() && !loading) {
+        if (localMatches.isEmpty() && tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && community.isEmpty() && !loading) {
             item {
                 Box(Modifier.fillMaxWidth().padding(top = 60.dp), contentAlignment = Alignment.Center) {
                     Text("Tak ada hasil untuk \"$query\"", color = NexusTextSecondary, fontSize = 14.sp)
