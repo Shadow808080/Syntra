@@ -590,8 +590,8 @@ fun QrCodeScreen(onClose: () -> Unit) {
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "Minta orang lain memindai ini lewat ikon scan di layar Chat " +
-                    "untuk langsung memulai percakapan denganmu.",
+                text = "Bagikan kode ini agar orang lain bisa menemukan dan memulai " +
+                    "percakapan denganmu.",
                 color = NexusTextSecondary,
                 fontSize = 13.sp,
                 lineHeight = 19.sp,

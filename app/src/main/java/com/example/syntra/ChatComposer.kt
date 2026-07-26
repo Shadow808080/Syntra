@@ -2,7 +2,10 @@ package com.example.syntra
 
 import android.content.Context
 import android.media.MediaRecorder
+import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -14,7 +17,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -29,7 +34,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -106,9 +115,12 @@ fun EmojiPicker(
     onPick: (String) -> Unit,
     onBackspace: () -> Unit,
     onSticker: (String) -> Unit = {},
-    onGif: (String) -> Unit = {},
+    // Tapping the GIF tab opens the draggable GIF bottom-sheet (rendered by the host),
+    // instead of a cramped inline panel — so it can be pulled up and its search field
+    // rides above the keyboard.
+    onOpenGif: () -> Unit = {},
 ) {
-    // 0 = emoji (insert into field), 1 = stickers, 2 = GIF (both send immediately).
+    // 0 = emoji (insert into field), 1 = stickers. GIF is a separate bottom-sheet.
     var mode by remember { mutableStateOf(0) }
     var group by remember { mutableStateOf(0) }
     Column(
@@ -129,12 +141,7 @@ fun EmojiPicker(
         ) {
             PickerTab("Emoji", active = mode == 0) { mode = 0 }
             PickerTab("Stiker", active = mode == 1) { mode = 1 }
-            PickerTab("GIF", active = mode == 2) { mode = 2 }
-        }
-
-        if (mode == 2) {
-            GifPanel(onGif = onGif)
-            return@Column
+            PickerTab("GIF", active = false) { onOpenGif() }
         }
 
         if (mode == 1) {
@@ -222,96 +229,167 @@ fun EmojiPicker(
     }
 }
 
-/** GIF search + grid, powered by Tenor. Tapping a GIF sends it via [onGif]. */
+/**
+ * GIF picker as a DRAGGABLE bottom-sheet. Pulls up to full height, and its
+ * search/generate field rides above the soft keyboard (imePadding), so typing is
+ * never covered. Three sources, so a GIF can always be sent:
+ *  - "Dari galeri" — pick a .gif already on the phone (keyless, always works).
+ *  - "Cari GIF" — search/trending from GIPHY (needs the API key in [GifClient]).
+ *  - "Buat teks" — GENERATE an animated-text GIF from a typed phrase (GIPHY Animate).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun GifPanel(onGif: (String) -> Unit) {
+fun GifPickerSheet(
+    onGif: (String) -> Unit,
+    onGifDevice: (Uri) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
     var query by remember { mutableStateOf("") }
+    // false = search existing GIFs, true = generate an animated-text GIF from [query].
+    var genMode by remember { mutableStateOf(false) }
     val gifs = remember { mutableStateListOf<GifItem>() }
     var loading by remember { mutableStateOf(GifClient.configured) }
 
-    // Debounced search; empty query loads trending. Skipped entirely with no key.
-    LaunchedEffect(query) {
+    val deviceLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> if (uri != null) { onGifDevice(uri); onDismiss() } }
+
+    LaunchedEffect(query, genMode) {
         if (!GifClient.configured) { loading = false; return@LaunchedEffect }
         loading = true
         delay(300)
-        val results = if (query.isBlank()) GifClient.featured() else GifClient.search(query)
-        gifs.clear(); gifs.addAll(results)
+        val results = when {
+            genMode -> GifClient.animate(query)
+            query.isBlank() -> GifClient.featured()
+            else -> GifClient.search(query)
+        }
+        gifs.clear(); gifs.addAll(results.distinctBy { it.id })
         loading = false
     }
 
-    if (!GifClient.configured) {
-        Box(Modifier.fillMaxWidth().height(220.dp), contentAlignment = Alignment.Center) {
-            Text(
-                "GIF belum aktif.\nTempel Tenor API key di GifClient.kt.",
-                color = NexusTextSecondary,
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                modifier = Modifier.padding(24.dp),
-            )
-        }
-        return
-    }
-
-    // Search field.
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 8.dp)
-            .background(NexusSurface.copy(alpha = 0f)),
-        verticalAlignment = Alignment.CenterVertically,
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = NexusSurface,
+        dragHandle = { BottomSheetDefaults.DragHandle() },
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF23232B), RoundedCornerShape(20.dp))
-                .padding(horizontal = 14.dp, vertical = 9.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .fillMaxHeight(0.9f)
+                // The keyboard pushes the whole sheet content up so the field + grid
+                // stay visible instead of being covered.
+                .imePadding(),
         ) {
-            Icon(Icons.Filled.Search, null, tint = NexusTextSecondary, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Box(Modifier.weight(1f)) {
-                if (query.isEmpty()) Text("Cari GIF di Tenor…", color = NexusTextSecondary, fontSize = 14.sp)
-                androidx.compose.foundation.text.BasicTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(color = NexusTextPrimary, fontSize = 14.sp),
-                    cursorBrush = androidx.compose.ui.graphics.SolidColor(NexusAccent),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
-    }
-
-    if (loading && gifs.isEmpty()) {
-        Box(Modifier.fillMaxWidth().height(180.dp), contentAlignment = Alignment.Center) {
-            androidx.compose.material3.CircularProgressIndicator(color = NexusAccent, strokeWidth = 2.dp)
-        }
-        return
-    }
-
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        items(gifs, key = { it.id }) { gif ->
-            coil.compose.AsyncImage(
-                model = gif.previewUrl,
-                contentDescription = "GIF",
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            // Header: device button + search/generate toggle + field.
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(110.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(14.dp))
                     .background(Color(0xFF23232B))
                     .clickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
-                    ) { onGif(gif.sendUrl) },
-            )
+                    ) { deviceLauncher.launch("image/gif") }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Image, null, tint = NexusAccent, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(10.dp))
+                Text("GIF dari galeri HP", color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+
+            if (!GifClient.configured) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        "Pencarian GIF online belum aktif.\nTempel API key gratis GIPHY di GifClient.kt.",
+                        color = NexusTextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.padding(24.dp),
+                    )
+                }
+                return@Column
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                PickerTab("Cari GIF", active = !genMode) { genMode = false }
+                PickerTab("Buat teks", active = genMode) { genMode = true }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .background(Color(0xFF23232B), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Search, null, tint = NexusTextSecondary, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.weight(1f)) {
+                    if (query.isEmpty()) Text(
+                        if (genMode) "Tulis teks untuk dibuat GIF…" else "Cari GIF…",
+                        color = NexusTextSecondary,
+                        fontSize = 14.sp,
+                    )
+                    androidx.compose.foundation.text.BasicTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(color = NexusTextPrimary, fontSize = 14.sp),
+                        cursorBrush = androidx.compose.ui.graphics.SolidColor(NexusAccent),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
+            when {
+                loading && gifs.isEmpty() ->
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                        androidx.compose.material3.CircularProgressIndicator(color = NexusAccent, strokeWidth = 2.dp)
+                    }
+                genMode && query.isBlank() && gifs.isEmpty() ->
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                        Text(
+                            "Tulis teks apa saja, lalu pilih gaya GIF yang muncul.",
+                            color = NexusTextSecondary,
+                            fontSize = 13.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            modifier = Modifier.padding(24.dp),
+                        )
+                    }
+                else -> LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(gifs, key = { it.id }) { gif ->
+                        coil.compose.AsyncImage(
+                            model = gif.previewUrl,
+                            contentDescription = "GIF",
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(120.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF23232B))
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) { onGif(gif.sendUrl); onDismiss() },
+                        )
+                    }
+                }
+            }
         }
     }
 }

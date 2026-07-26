@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Photo
@@ -146,7 +147,12 @@ fun ProfileScreen(
     var visitorTotal by remember(username) { mutableIntStateOf(0) }
     var showVisitors by remember { mutableStateOf(false) }
 
-    val isMe = username == null
+    // Own profile when opened with no username, OR when the loaded user turns out to
+    // be me (e.g. tapping my own avatar in Shorts passes my username). Either way the
+    // page must show "Edit profil", never a "Follow yourself" button.
+    val isMe = username == null || user?.isSelf == true
+    // Opens the profile editor as a full-screen overlay, from ANY entry point.
+    var showEditProfile by remember { mutableStateOf(false) }
 
     // Profile background/cover. Shows the server value; on the own profile it can be
     // changed inline — pick → crop → upload → PATCH → delete the OLD cover from storage.
@@ -301,7 +307,9 @@ fun ProfileScreen(
                         },
                         onVisitorsClick = { showVisitors = true },
                     )
-                    if (!isMe && user != null) {
+                    if (isMe) {
+                        EditProfileButton(onClick = { showEditProfile = true })
+                    } else if (user != null) {
                         ProfileActions(
                             following = following,
                             blocked = blocked,
@@ -463,6 +471,16 @@ fun ProfileScreen(
                 uploadCover(cropped)
             },
         )
+    }
+
+    // Profile editor — reachable from the "Edit profil" button on the own profile,
+    // no matter how the profile was opened (Shorts, feed, tab). Refreshes on close so
+    // a changed name/photo shows immediately.
+    if (showEditProfile) {
+        ProfileSettingsScreen(onClose = {
+            showEditProfile = false
+            scope.launch { runCatching { load() } }
+        })
     }
 }
 
@@ -918,6 +936,31 @@ private fun relativeTimeId(iso: String): String {
         }
     } catch (_: Exception) {
         ""
+    }
+}
+
+/** Own-profile primary action: a full-width "Edit profil" button (never Follow). */
+@Composable
+private fun EditProfileButton(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 4.dp)
+            .height(44.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.Transparent)
+            .border(1.dp, NexusStroke, RoundedCornerShape(12.dp))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Icon(Icons.Filled.Edit, null, tint = NexusTextPrimary, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("Edit profil", color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

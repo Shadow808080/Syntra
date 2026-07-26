@@ -30,7 +30,9 @@ object Notifications {
     // A new id is required because Android freezes a channel's importance after it
     // is first created — the old "syntra_social" would stay DEFAULT forever.
     const val SOCIAL_CHANNEL = "syntra_social_v2"
+    const val CALL_CHANNEL = "syntra_call"
     const val SERVICE_NOTIFICATION_ID = 1001
+    const val CALL_NOTIFICATION_ID = 1002
 
     /** Creates the notification channels once; safe to call repeatedly. */
     fun ensureChannels(context: Context) {
@@ -63,6 +65,20 @@ object Notifications {
                 },
             )
         }
+        if (mgr.getNotificationChannel(CALL_CHANNEL) == null) {
+            mgr.createNotificationChannel(
+                NotificationChannel(
+                    CALL_CHANNEL,
+                    "Panggilan",
+                    // Low = quiet + no sound (the call UI already handles ringing); it's
+                    // the mandatory "call in progress" notice for the foreground service.
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply {
+                    description = "Menjaga panggilan tetap berjalan saat layar mati"
+                    setShowBadge(false)
+                },
+            )
+        }
         if (mgr.getNotificationChannel(SERVICE_CHANNEL) == null) {
             mgr.createNotificationChannel(
                 NotificationChannel(
@@ -87,6 +103,21 @@ object Notifications {
             .setContentTitle("Syntra aktif")
             .setContentText("Menerima pesan secara real-time")
             .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setContentIntent(openAppIntent(context, null))
+            .build()
+    }
+
+    /** The ongoing "call in progress" notice the call foreground service must show. */
+    fun callNotification(context: Context, video: Boolean): android.app.Notification {
+        ensureChannels(context)
+        return NotificationCompat.Builder(context, CALL_CHANNEL)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(if (video) "Panggilan video berlangsung" else "Panggilan berlangsung")
+            .setContentText("Ketuk untuk kembali ke panggilan")
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
             .setOngoing(true)
             .setShowWhen(false)
             .setContentIntent(openAppIntent(context, null))

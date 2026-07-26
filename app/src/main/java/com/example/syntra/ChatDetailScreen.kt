@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -444,6 +445,7 @@ fun ChatDetailScreen(
     val focusManager = LocalFocusManager.current
     val fieldFocus = remember { FocusRequester() }
     var showEmoji by remember { mutableStateOf(false) }
+    var showGifSheet by remember { mutableStateOf(false) }
     var showAttach by remember { mutableStateOf(false) }
     var uploading by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
@@ -785,15 +787,23 @@ fun ChatDetailScreen(
         // Body carries the caption; a view-once photo is prefixed with a marker so
         // the peer's app knows to show it as "sekali lihat".
         val body = if (viewOnce) VIEW_ONCE_MARKER + STORY_REPLY_SEP + caption else caption
+        val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
         uploading = true
         scope.launch {
+            // Show the photo/GIF IMMEDIATELY with a "mengirim" clock (the local- id
+            // drives DeliveryState.SENDING), rendered from a local copy on disk — before
+            // the slow network upload. Once the upload lands, the bubble swaps to the
+            // bucket URL, which then caches through Coil exactly like any other photo.
+            val localPath = withContext(Dispatchers.IO) {
+                runCatching {
+                    java.io.File(context.cacheDir, "outgoing-$ref.$ext").apply { writeBytes(bytes) }.absolutePath
+                }.getOrNull()
+            }
+            messages.add(Message(ref, caption, fromMe = true, time = "now", media = localPath, viewOnce = viewOnce))
             runCatching {
                 val (mediaId, url) = SyntraClient.uploadMediaFull(kind, ext, mime, bytes, durationMs = durationMs)
-                // Optimistic bubble shows the uploaded file straight away…
-                val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
-                messages.add(Message(ref, caption, fromMe = true, time = "now", media = url.ifBlank { null }, viewOnce = viewOnce))
-                // …while the message itself carries the media *id*, so the body
-                // stays empty instead of leaking a URL into the conversation.
+                // The message itself carries the media *id*, so the body stays empty
+                // instead of leaking a URL into the conversation.
                 val sent = SyntraClient.sendMessageRest(conversation.id, body, listOf(mediaId))
                 val i = messages.indexOfFirst { it.id == ref }
                 if (i >= 0) {
@@ -805,16 +815,19 @@ fun ChatDetailScreen(
                     } else {
                         val authoritative = sent.toUi()
                         // The immediate send response may not have resolved the attachment
-                        // URL yet — keep the one we already uploaded so the bubble isn't
-                        // blank until a refresh.
-                        messages[i] = if (authoritative.media.isNullOrBlank() && url.isNotBlank()) {
-                            authoritative.copy(media = url)
+                        // URL yet — keep the local preview so the bubble isn't blank until
+                        // a refresh; else swap to the resolved bucket URL.
+                        messages[i] = if (authoritative.media.isNullOrBlank()) {
+                            authoritative.copy(media = url.ifBlank { localPath })
                         } else {
                             authoritative
                         }
                     }
                 }
             }.onFailure {
+                // Drop the optimistic bubble so it doesn't hang with a clock forever.
+                val i = messages.indexOfFirst { it.id == ref }
+                if (i >= 0) messages.removeAt(i)
                 Toast.makeText(context, "Gagal mengirim: ${it.message}", Toast.LENGTH_LONG).show()
             }
             uploading = false
@@ -895,6 +908,18 @@ fun ChatDetailScreen(
         }
     }
 
+    /** Send a GIF the user picked from the phone's gallery (a content:// uri). */
+    fun sendGifFromUri(uri: android.net.Uri) {
+        if (!ApiConfig.ENABLED) return
+        scope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+            }
+            if (bytes != null) sendMedia("image", "gif", "image/gif", bytes)
+            else Toast.makeText(context, "Gagal memuat GIF.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun send() {
         val text = input.trim()
         if (text.isEmpty()) return
@@ -957,7 +982,13 @@ fun ChatDetailScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(NexusBackground),
+            .background(NexusBackground)
+            // This screen is drawn as a full-screen overlay ON TOP of the chat list.
+            // A bare background does NOT consume touches in Compose, so a tap on any
+            // empty gap here would fall through to the list behind and open a DIFFERENT
+            // chat ("kepencet halaman lain"). Swallow stray taps so nothing leaks
+            // through; child buttons/rows still get theirs first.
+            .pointerInput(Unit) { detectTapGestures {} },
     ) {
         DetailTopBar(
             convo = conversation,
@@ -1283,12 +1314,21 @@ fun ChatDetailScreen(
                     sendSticker(emoji)
                     showEmoji = false
                 },
-                onGif = { url ->
-                    sendGif(url)
+                onOpenGif = {
                     showEmoji = false
+                    showGifSheet = true
                 },
             )
         }
+    }
+
+    // Draggable GIF bottom-sheet (search / generate / from gallery). Keyboard-safe.
+    if (showGifSheet) {
+        GifPickerSheet(
+            onGif = { url -> sendGif(url) },
+            onGifDevice = { uri -> sendGifFromUri(uri) },
+            onDismiss = { showGifSheet = false },
+        )
     }
 
     if (showAttach) {
@@ -1916,8 +1956,13 @@ private fun MessageBubble(
 ) {
     // Stickers float free — no bubble background behind a big emoji.
     val isSticker = msg.sticker != null
+    // A photo/GIF with no caption floats free too: no coloured bubble behind the
+    // image, just the rounded media. A caption, a reply-quote or a story-reply keeps
+    // the bubble so the accompanying text stays readable.
+    val isPureMedia = !isSticker && msg.media != null && !msg.media.isAudioUrl() &&
+        !msg.viewOnce && msg.text.isBlank() && quoted == null && msg.storyReplyUrl == null
     val bubbleColor = when {
-        isSticker -> Color.Transparent
+        isSticker || isPureMedia -> Color.Transparent
         msg.fromMe -> outgoingColor
         else -> NexusSurfaceElevated
     }
@@ -1974,7 +2019,10 @@ private fun MessageBubble(
                         onClick = {},
                         onLongClick = onLongPress,
                     )
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .padding(
+                        horizontal = if (isPureMedia) 0.dp else 10.dp,
+                        vertical = if (isPureMedia) 0.dp else 6.dp,
+                    ),
             ) {
                 // Quoted message (WhatsApp-style): a small placeholder of the message
                 // this one replies to, shown above the body.
@@ -2062,6 +2110,22 @@ private fun MessageBubble(
                         textColor = textColor,
                         onOpen = onOpenViewOnce,
                     )
+                    media != null && media.substringBefore('?').endsWith(".gif", ignoreCase = true) ->
+                        // GIF: show the WHOLE thing (contain), sized to its own aspect
+                        // ratio and capped to the bubble — no crop, no background box.
+                        AsyncImage(
+                            model = media,
+                            contentDescription = "GIF",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .widthIn(max = 220.dp)
+                                .heightIn(max = 280.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) { onImageClick(media) },
+                        )
                     media != null -> Box(
                         modifier = Modifier
                             .size(width = 220.dp, height = 260.dp)

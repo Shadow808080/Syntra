@@ -33,6 +33,13 @@ object CallEngine {
     @Volatile private var room: Room? = null
     @Volatile private var audio: AudioManager? = null
     @Volatile private var scope: CoroutineScope? = null
+    @Volatile private var appContext: Context? = null
+
+    /** True while the active call is a video call (drives the sleep camera logic). */
+    @Volatile private var videoCall = false
+    /** True when we auto-disabled the camera because the screen turned off, so we know
+     *  to switch it back on when the screen returns (but not if the user turned it off). */
+    @Volatile private var cameraSuspendedBySleep = false
 
     // Long-lived scope for fire-and-forget toggles from non-suspend click handlers.
     private val ops = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -68,12 +75,20 @@ object CallEngine {
      */
     suspend fun connect(context: Context, url: String, token: String, video: Boolean) {
         disconnect()
-        val r = LiveKit.create(appContext = context.applicationContext)
+        val app = context.applicationContext
+        appContext = app
+        videoCall = video
+        cameraSuspendedBySleep = false
+        val r = LiveKit.create(appContext = app)
         room = r
 
         val cs = CoroutineScope(Dispatchers.Main + SupervisorJob())
         scope = cs
         cs.launch { r.events.collect { onEvent(it) } }
+
+        // Keep the call alive when the phone sleeps: a microphone (+camera) foreground
+        // service holds the mic/network open in the background and takes a wake lock.
+        runCatching { CallService.start(app, video) }
 
         MusicPlayer.pauseForExternalAudio() // a call takes over audio
         r.connect(url, token)
@@ -174,6 +189,29 @@ object CallEngine {
         ops.launch { setCamera(enabled) }
     }
 
+    /**
+     * The screen turned off (phone sleeping). On a video call, turn the camera off —
+     * a backgrounded camera would only publish a frozen/black frame and drains the
+     * battery. Audio keeps flowing, so the call continues. Remembered so [onDeviceWake]
+     * can restore it, but only if the user hadn't already switched the camera off.
+     */
+    fun onDeviceSleep() {
+        if (room == null || !videoCall) return
+        if (cameraEnabled) {
+            cameraSuspendedBySleep = true
+            ops.launch { setCamera(false) }
+        }
+    }
+
+    /** The screen came back on: restore the camera if we were the ones who cut it. */
+    fun onDeviceWake() {
+        if (room == null || !videoCall) return
+        if (cameraSuspendedBySleep) {
+            cameraSuspendedBySleep = false
+            ops.launch { setCamera(true) }
+        }
+    }
+
     /** Flips between front and back cameras. */
     fun switchCamera() {
         runCatching { (localVideo as? LocalVideoTrack)?.switchCamera() }
@@ -192,6 +230,11 @@ object CallEngine {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audio?.clearCommunicationDevice()
         }
         runCatching { audio?.mode = AudioManager.MODE_NORMAL }
+        // Tear down the call foreground service + wake lock.
+        appContext?.let { ctx -> runCatching { CallService.stop(ctx) } }
+        appContext = null
+        videoCall = false
+        cameraSuspendedBySleep = false
         room = null
         audio = null
         connected = false

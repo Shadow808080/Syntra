@@ -277,6 +277,7 @@ private fun NexusApp() {
             // Sign out: stop the background service and close the socket.
             com.example.syntra.net.ChatConnectionService.stop(context)
             if (ApiConfig.ENABLED) SyntraClient.disconnect()
+            ShortsFeedCache.clear() // don't leak another account's feed
             signedIn = false
         })
     }
@@ -487,8 +488,13 @@ private fun MainTabs(onSignOut: () -> Unit) {
             HorizontalPager(
                 state = pager,
                 userScrollEnabled = !overlay,
-                // Keep all four tabs alive so swiping back doesn't reload/reconnect.
-                beyondViewportPageCount = tabOrder.size,
+                // Only keep the immediate neighbour warm. Composing all five tabs up
+                // front (a Shorts video surface, Rooms, Calls…) is what made entering
+                // the home heavy — now only Chat builds on launch and the other tabs
+                // compose when you actually swipe to them (lighter, WhatsApp-like). The
+                // realtime socket lives in ChatConnectionService, and lists come from
+                // cache, so returning to a tab is instant without keeping it composed.
+                beyondViewportPageCount = 1,
                 modifier = Modifier.weight(1f),
             ) { page ->
                 when (tabOrder[page]) {

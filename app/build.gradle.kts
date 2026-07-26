@@ -38,12 +38,13 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
-    implementation(libs.play.services.code.scanner)
     implementation(libs.coil.compose)
     implementation(libs.coil.video)
     implementation(libs.coil.gif)
     implementation(libs.okhttp)
     implementation(libs.livekit.android)
+    // zxing.core still used to GENERATE the user's own QR image (settings). The ML Kit
+    // barcode SCANNER was removed with the scan feature.
     implementation(libs.zxing.core)
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.fragment)

@@ -84,6 +84,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -172,8 +173,17 @@ fun ShortsScreen(
         com.example.syntra.net.AppForeground.inShorts = visible
         onDispose { com.example.syntra.net.AppForeground.inShorts = false }
     }
-    val reels = remember { mutableStateListOf<NetReel>() }
-    var loading by remember { mutableStateOf(true) }
+    // Seed from the in-memory feed cache so RE-ENTERING Shorts is instant — the list
+    // and scroll position survive the tab being disposed (the home stays light with
+    // beyondViewportPageCount=1, but Shorts no longer "reloads from scratch"). Videos
+    // themselves already come from VideoCache on disk; this just avoids the empty-list
+    // spinner + refetch every time you come back.
+    val reels = remember { mutableStateListOf<NetReel>().also { it.addAll(ShortsFeedCache.reels) } }
+    var loading by remember { mutableStateOf(ShortsFeedCache.reels.isEmpty()) }
+    // Persist the feed to the cache whenever it changes, so the next entry is seeded.
+    LaunchedEffect(Unit) {
+        snapshotFlow { reels.toList() }.collect { ShortsFeedCache.reels = it }
+    }
     var refreshing by remember { mutableStateOf(false) }
     var posting by remember { mutableStateOf(false) }
     // Raw picked video (awaiting trim), then the trimmed clip (awaiting caption).
@@ -264,7 +274,9 @@ fun ShortsScreen(
         }
     }
 
-    LaunchedEffect(Unit) { reload() }
+    // Only do a blocking (spinner) load when we have nothing cached; otherwise show
+    // the cached feed instantly and let the quiet syncFeed() below merge fresh items.
+    LaunchedEffect(Unit) { if (reels.isEmpty()) reload() else loading = false }
 
     // Returning to the tab RESUMES the last video you were watching — a quiet merge
     // that keeps your scroll position, instead of a full reload that would reset the
@@ -1242,6 +1254,16 @@ fun ReelViewer(
             },
         )
     }
+}
+
+/**
+ * In-memory feed cache so returning to the Shorts tab is instant. The home is kept
+ * light by NOT keeping Shorts composed off-screen (MainTabs beyondViewportPageCount=1),
+ * so this holds the last feed + is re-seeded on the next entry. Cleared on sign-out.
+ */
+object ShortsFeedCache {
+    var reels: List<NetReel> = emptyList()
+    fun clear() { reels = emptyList() }
 }
 
 private val ShortsTeal = Color(0xFF20D5C4)

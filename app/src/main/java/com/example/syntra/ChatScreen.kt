@@ -80,7 +80,6 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.PersonAddAlt
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -152,7 +151,6 @@ import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.NexusTextSecondary
 import com.example.syntra.ui.theme.SyntraTheme
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -320,7 +318,7 @@ private val conversations = listOf(
 private fun NetConversation.toUi() = Conversation(
     id = id,
     name = title.ifBlank { "(tanpa nama)" },
-    message = lastPreview.ifBlank { previewFallback(lastType) },
+    message = unwrapMarkers(lastPreview).ifBlank { previewFallback(lastType) },
     time = formatClock(lastAt),
     unread = unreadCount,
     presence = Presence.NONE, // updated live via presence.update
@@ -368,25 +366,43 @@ private fun NetStoryGroup.toUi(): ActivePerson? {
 
 private fun previewFallback(type: String): String = when (type) {
     "image" -> "[Foto]"
+    "gif" -> "[GIF]"
     "video" -> "[Video]"
     "audio", "voice_note" -> "[Pesan suara]"
     "media" -> "[Media]"
     else -> ""
 }
 
+// Chat bodies can carry app-internal markers (a big-emoji sticker, a view-once
+// photo, a story reply). Those must never leak raw into the home preview — they're
+// turned into a short label instead. The separator is 0x01 (see ChatDetailScreen).
+private const val STICKER_MARKER = "STICKER"
+private const val VIEW_ONCE_MARKER = "VIEWONCE"
+private const val STORY_REPLY_MARKER = "STORYREPLY"
+private const val MARKER_SEP = '\u0001'
+
+/** Turn a raw stored body into a home-list preview, unwrapping our markers. */
+private fun unwrapMarkers(body: String): String = when {
+    body.startsWith(STICKER_MARKER + MARKER_SEP) -> "[Stiker]"
+    body.startsWith(VIEW_ONCE_MARKER + MARKER_SEP) -> "[Foto]"
+    body.startsWith(STORY_REPLY_MARKER + MARKER_SEP) -> "[Balasan story]"
+    else -> body
+}
+
 /**
  * Preview text for a LIVE incoming message. The socket carries a generic
  * `type` = "media" for attachments, so when there's no body we infer the kind
- * from the attachment URL's extension to still show [Foto]/[Video]/[Pesan suara].
+ * from the attachment URL's extension to still show [Foto]/[GIF]/[Video]/[Pesan suara].
  */
 private fun livePreview(m: NetMessage): String {
-    if (m.body.isNotBlank()) return m.body
+    if (m.body.isNotBlank()) return unwrapMarkers(m.body)
     val url = m.attachments.firstOrNull().orEmpty().substringBefore('?').lowercase()
     return when {
         url.isBlank() -> previewFallback(m.type)
         url.endsWith(".m4a") || url.endsWith(".mp3") || url.endsWith(".aac") || url.endsWith(".ogg") || url.endsWith(".wav") -> "[Pesan suara]"
         url.endsWith(".mp4") || url.endsWith(".mov") || url.endsWith(".webm") || url.endsWith(".mkv") || url.endsWith(".3gp") -> "[Video]"
-        url.endsWith(".jpg") || url.endsWith(".jpeg") || url.endsWith(".png") || url.endsWith(".webp") || url.endsWith(".gif") -> "[Foto]"
+        url.endsWith(".gif") -> "[GIF]"
+        url.endsWith(".jpg") || url.endsWith(".jpeg") || url.endsWith(".png") || url.endsWith(".webp") -> "[Foto]"
         else -> "[Media]"
     }
 }
@@ -547,7 +563,6 @@ fun ChatScreen(
     var showArchived by remember { mutableStateOf(false) }
     var showNewGroup by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
-    var showManualScan by remember { mutableStateOf(false) }
     var showDiscover by remember { mutableStateOf(false) }
     var openProfileUser by remember { mutableStateOf<String?>(null) }
 
@@ -620,30 +635,12 @@ fun ChatScreen(
             SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
             SyntraClient.presenceQuery(convs.mapNotNull { it.counterpartId })
         }.onFailure { Toast.makeText(context, "Sync gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
-        // The conversation list may carry only a media id (or nothing) for the
-        // photo. Resolve the real URL per person in the background so rows fill
-        // in as they arrive — and so a changed profile photo shows up here.
-        // Cache-first: only people we have never resolved cost a request, so a
-        // reconnect or a new message doesn't re-query every contact. Pull-to-refresh
-        // clears the cache when the user explicitly asks for fresh data.
-        scope.launch {
-            chats.toList().forEach { c ->
-                val username = c.counterpartUsername
-                if (username.isNullOrBlank()) return@forEach
-                val cached = avatarCache[username]
-                val url = cached ?: runCatching { SyntraClient.getUser(username) }
-                    .getOrNull()
-                    ?.avatarMediaId
-                    ?.takeIf { it.startsWith("http") }
-                    ?.also { avatarCache[username] = it }
-                if (url != null) {
-                    val i = chats.indexOfFirst { it.id == c.id }
-                    if (i >= 0 && chats[i].avatarUrl != url) {
-                        chats[i] = chats[i].copy(avatarUrl = url)
-                    }
-                }
-            }
-        }
+        // Avatars are NO LONGER pre-fetched for every conversation here — that fired
+        // a getUser request per contact the moment the list opened ("downloads
+        // everything at once"). Instead each row resolves its own photo lazily, only
+        // when it scrolls into view (see resolveAvatarFor + ConversationRow). Until
+        // then the row shows its letter tile, so the list feels instant.
+
         // Pull my own name/photo from the server so a change made on another
         // device (there is no realtime profile event) shows up here too.
         runCatching {
@@ -651,6 +648,32 @@ fun ChatScreen(
             if (me.displayName.isNotBlank()) ProfileStore.setDisplayName(context, me.displayName)
             me.avatarMediaId?.takeIf { it.isNotBlank() }?.let { url ->
                 ProfileStore.setAvatar(context, url, ProfileStore.avatarMediaId(context).orEmpty())
+            }
+        }
+    }
+
+    // Resolve ONE row's avatar on demand — called when that row scrolls into view, so
+    // opening the list never fires a request per conversation up front. Cache-first; a
+    // known-missing result is cached as "" so a row scrolling in and out doesn't
+    // re-request. Pull-to-refresh clears the cache to pick up a changed photo.
+    fun resolveAvatarFor(convo: Conversation) {
+        val username = convo.counterpartUsername
+        if (username.isNullOrBlank()) return
+        val cached = avatarCache[username]
+        if (cached != null) {
+            if (cached.isNotBlank() && convo.avatarUrl != cached) {
+                val i = chats.indexOfFirst { it.id == convo.id }
+                if (i >= 0) chats[i] = chats[i].copy(avatarUrl = cached)
+            }
+            return
+        }
+        scope.launch {
+            val url = runCatching { SyntraClient.getUser(username) }.getOrNull()
+                ?.avatarMediaId?.takeIf { it.startsWith("http") }
+            avatarCache[username] = url ?: ""
+            if (!url.isNullOrBlank()) {
+                val i = chats.indexOfFirst { it.id == convo.id }
+                if (i >= 0 && chats[i].avatarUrl != url) chats[i] = chats[i].copy(avatarUrl = url)
             }
         }
     }
@@ -916,24 +939,6 @@ fun ChatScreen(
         }
     }
 
-    fun startScan() {
-        GmsBarcodeScanning.getClient(context).startScan()
-            .addOnSuccessListener { barcode ->
-                val value = barcode.rawValue ?: "(empty)"
-                if (ApiConfig.ENABLED) {
-                    // QR carries syntra://u/<username>
-                    openDirectWith(value.substringAfterLast('/').ifBlank { value })
-                } else {
-                    Toast.makeText(context, "Scanned: $value", Toast.LENGTH_LONG).show()
-                }
-            }
-            .addOnCanceledListener { /* user dismissed the scanner */ }
-            .addOnFailureListener {
-                // Scanner unavailable on this device (Play Services) — fall back to
-                // typing the username manually so you can still start a chat.
-                showManualScan = true
-            }
-    }
 
     // Device back peels off one layer at a time: selection, then search.
     BackHandler(enabled = selection.isNotEmpty()) { selection.clear() }
@@ -959,7 +964,6 @@ fun ChatScreen(
                     searching = false
                     query = ""
                 },
-                onScan = { startScan() },
                 onMenuItem = { label ->
                     val picked = chats.filter { it.id in selection }
                     when (label) {
@@ -1008,9 +1012,10 @@ fun ChatScreen(
                 modifier = Modifier.weight(1f),
             ) {
             LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .nestedScroll(rememberHideBottomBarOnScroll()),
+                // No hide-on-scroll here: the bottom bar must stay put on the home
+                // list (that auto-hide is a Shorts-only behaviour). ShortsScreen drives
+                // BottomBarVisibility itself.
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 // First-load skeleton: shimmering placeholder rows instead of a
@@ -1045,6 +1050,7 @@ fun ChatScreen(
                             }
                         },
                         onLongClick = { if (!selection.remove(convo.id)) selection.add(convo.id) },
+                        onFirstVisible = { resolveAvatarFor(convo) },
                     )
                 }
                 if (archivedCount > 0 && !searching) {
@@ -1141,6 +1147,20 @@ fun ChatScreen(
                     modifier = Modifier.size(23.dp),
                 )
             }
+        }
+
+        // Stray-tap guard. Every full-screen page here (story viewer, chat detail,
+        // discover, settings, profile…) is drawn as an overlay ON TOP of the chat
+        // list — but a bare overlay background does NOT consume touches in Compose, so
+        // a tap on any empty gap would fall through and hit a chat row behind it
+        // ("dipencet lain malah halaman lain"). This invisible layer sits just under
+        // the overlays and swallows anything they don't handle themselves.
+        if (overlayOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) { detectTapGestures {} },
+            )
         }
 
         // Full-screen story viewer (WhatsApp-status style)
@@ -1255,12 +1275,6 @@ fun ChatScreen(
             )
         }
 
-        if (showManualScan) {
-            ManualUsernameDialog(
-                onDismiss = { showManualScan = false },
-                onSubmit = { uname -> showManualScan = false; openDirectWith(uname) },
-            )
-        }
 
         if (showDiscover) {
             DiscoverScreen(
@@ -1364,7 +1378,6 @@ private fun NexusHeader(
     onQueryChange: (String) -> Unit,
     onStartSearch: () -> Unit,
     onStopSearch: () -> Unit,
-    onScan: () -> Unit,
     onMenuItem: (String) -> Unit,
 ) {
     Row(
@@ -1436,10 +1449,9 @@ private fun NexusHeader(
         } else {
             SyntraTitle()
             Spacer(Modifier.weight(1f))
-            // Order: search · scan · overflow. "Find people" moved to a FAB above the
-            // camera (bottom-right), so it isn't crowded in with the top-bar icons.
+            // Order: search · overflow. "Find people" moved to a FAB above the camera
+            // (bottom-right), so it isn't crowded in with the top-bar icons.
             HeaderIcon(Icons.Filled.Search, "Search", size = 28.dp, onClick = onStartSearch)
-            HeaderIcon(Icons.Outlined.QrCodeScanner, "Scan", size = 27.dp, onClick = onScan)
             Box {
                 var menuOpen by remember { mutableStateOf(false) }
                 HeaderIcon(Icons.Filled.MoreVert, "Menu", size = 28.dp) { menuOpen = true }
@@ -1589,7 +1601,12 @@ private fun ConversationRow(
     pinned: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onFirstVisible: () -> Unit = {},
 ) {
+    // Fires when this row enters composition (i.e. scrolls into view). Used to resolve
+    // the avatar lazily instead of pre-fetching every conversation's photo up front.
+    LaunchedEffect(convo.id) { if (convo.avatarUrl.isNullOrBlank()) onFirstVisible() }
+
     val unread = convo.unread > 0
     val online = convo.presence == Presence.ONLINE
     val typing = convo.presence == Presence.TYPING
@@ -2205,6 +2222,9 @@ private fun StoryViewer(
     // Music attached to a story is actually played here (not just shown). One player
     // for the whole viewer; re-pointed as segments change, paused when a finger holds.
     val storyPlayer = remember { MediaPlayer() }
+    // True once the current song is prepared, so pause/resume never calls start() on a
+    // player that is still resetting/preparing (which throws and kills the audio).
+    var musicPrepared by remember { mutableStateOf(false) }
     DisposableEffect(Unit) {
         onDispose { runCatching { storyPlayer.stop() }; runCatching { storyPlayer.release() } }
     }
@@ -2294,25 +2314,39 @@ private fun StoryViewer(
     // Point the music player at the current segment's song (if any), and actually
     // play it. Re-runs on every segment/person change so the right track plays.
     LaunchedEffect(personIndex, segment) {
+        musicPrepared = false
         runCatching { storyPlayer.reset() }
         val m = person.items.getOrNull(segment)?.music
         if (m != null && m.previewUrl.isNotBlank()) {
             com.example.syntra.net.MusicPlayer.pauseForExternalAudio() // a story song takes over audio
             runCatching {
                 storyPlayer.setDataSource(m.previewUrl)
-                storyPlayer.isLooping = true
-                storyPlayer.setOnPreparedListener { mp -> if (!paused) runCatching { mp.start() } }
+                // MANUAL loop, not isLooping: for a STREAMED preview url the built-in
+                // loop seek fails silently on many devices after the first pass, so the
+                // song "plays once then goes quiet". Restarting from the completion
+                // callback loops reliably for as long as the story is on screen.
+                storyPlayer.isLooping = false
+                storyPlayer.setOnCompletionListener { mp ->
+                    runCatching { mp.seekTo(0); if (!paused) mp.start() }
+                }
+                storyPlayer.setOnPreparedListener { mp ->
+                    musicPrepared = true
+                    if (!paused) runCatching { mp.start() }
+                }
                 storyPlayer.prepareAsync()
             }
         }
     }
-    // Holding a finger pauses the story — pause/resume the song with it.
+    // Holding a finger pauses the story — pause/resume the song with it. Only touch a
+    // PREPARED player (start() on a resetting/preparing player throws and would leave
+    // the song silent for the rest of the view).
     LaunchedEffect(paused) {
+        if (!musicPrepared) return@LaunchedEffect
         runCatching {
             if (paused) {
                 if (storyPlayer.isPlaying) storyPlayer.pause()
             } else if (person.items.getOrNull(segment)?.music != null) {
-                storyPlayer.start()
+                if (!storyPlayer.isPlaying) storyPlayer.start()
             }
         }
     }
@@ -3070,87 +3104,6 @@ private fun ChatRowSkeleton() {
             Box(Modifier.fillMaxWidth(0.45f).height(13.dp).clip(RoundedCornerShape(6.dp)).background(bar))
             Spacer(Modifier.height(9.dp))
             Box(Modifier.fillMaxWidth(0.7f).height(11.dp).clip(RoundedCornerShape(6.dp)).background(bar))
-        }
-    }
-}
-
-/** Fallback for when the QR scanner isn't available: type a username to start a chat. */
-@Composable
-private fun ManualUsernameDialog(onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
-    var value by remember { mutableStateOf("") }
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.6f))
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = onDismiss,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            modifier = Modifier
-                .padding(36.dp)
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(20.dp))
-                .background(NexusSurfaceElevated)
-                .border(1.dp, NexusStroke, RoundedCornerShape(20.dp))
-                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
-                .padding(22.dp),
-        ) {
-            Text("Cari lewat username", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Scanner tidak tersedia di perangkat ini. Ketik username untuk memulai chat.",
-                color = NexusTextSecondary,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-            )
-            Spacer(Modifier.height(16.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(14.dp))
-                    .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
-                    .padding(horizontal = 14.dp, vertical = 13.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("@", color = NexusTextSecondary, fontSize = 15.sp)
-                Spacer(Modifier.width(6.dp))
-                Box(Modifier.weight(1f)) {
-                    if (value.isEmpty()) Text("username", color = NexusTextSecondary.copy(alpha = 0.6f), fontSize = 15.sp)
-                    BasicTextField(
-                        value = value,
-                        onValueChange = { v -> value = v.filterNot { it.isWhitespace() }.lowercase() },
-                        singleLine = true,
-                        textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
-                        cursorBrush = SolidColor(NexusAccentSoft),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
-            Spacer(Modifier.height(18.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(if (value.isBlank()) Color.White.copy(alpha = 0.08f) else NexusAccent)
-                    .clickable(
-                        enabled = value.isNotBlank(),
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                    ) { onSubmit(value.trim()) },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "Mulai chat",
-                    color = if (value.isBlank()) NexusTextSecondary else Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
         }
     }
 }

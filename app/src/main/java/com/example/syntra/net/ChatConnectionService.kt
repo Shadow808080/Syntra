@@ -167,11 +167,22 @@ class ChatConnectionService : Service() {
     }
 
     private fun previewOf(m: NetMessage): String {
-        if (m.body.isNotBlank()) return m.body
+        val body = m.body
+        if (body.isNotBlank()) {
+            // Unwrap our app markers (separator 0x01) so a notification never shows a
+            // raw "STICKER<0x1>..." body — see ChatDetailScreen / ChatScreen.
+            return when {
+                body.startsWith("STICKER") -> "Stiker"
+                body.startsWith("VIEWONCE") -> "📷 Foto"
+                body.startsWith("STORYREPLY") -> "Balasan story"
+                else -> body
+            }
+        }
         val url = m.attachments.firstOrNull().orEmpty().substringBefore('?').lowercase()
         return when {
             url.endsWith(".m4a") || url.endsWith(".mp3") || url.endsWith(".aac") || url.endsWith(".ogg") -> "🎤 Pesan suara"
             url.endsWith(".mp4") || url.endsWith(".mov") || url.endsWith(".webm") -> "🎥 Video"
+            url.endsWith(".gif") -> "GIF"
             url.endsWith(".jpg") || url.endsWith(".jpeg") || url.endsWith(".png") || url.endsWith(".webp") -> "📷 Foto"
             url.isNotBlank() -> "📎 Media"
             else -> "Mengirim pesan"

@@ -27,6 +27,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Keep a call (audio/video) alive while the phone sleeps: a mic/camera-typed
+         foreground service is the only way to hold the mic/camera in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
@@ -41,11 +45,6 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:theme="@style/Theme.Syntra">
-
-        <!-- Pre-download the barcode scanner module so scanning works on first use. -->
-        <meta-data
-            android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="barcode_ui" />
 
         <activity
             android:name=".MainActivity"
@@ -67,6 +66,12 @@
             android:name=".net.ChatConnectionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Holds a call open while the phone sleeps (mic always, camera for video). -->
+        <service
+            android:name=".net.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera" />
     </application>
 
 </manifest>

@@ -320,19 +320,16 @@ private fun MusicBrowseBody(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 6.dp, bottom = 150.dp),
     ) {
-        // Device music — the user's own files, always first so "add from storage"
-        // is right at the top of the tab.
-        item { LocalMusicHeader(onAddLocal) }
-        if (localTracks.isEmpty()) {
-            item { LocalMusicEmpty(onAddLocal) }
-        } else {
-            items(localTracks, key = { "local_${it.id}" }) { t ->
-                LocalTrackRow(
-                    track = t,
-                    onClick = { onPlay(t, localTracks) },
-                    onRemove = { onRemoveLocal(t) },
-                )
-            }
+        // Device music — the user's own files, always first. No section header/title
+        // anymore: the add-from-storage banner IS the entry point (its "+" sits at the
+        // start), and it stays put whether or not the user has added tracks yet.
+        item { LocalMusicEmpty(onAddLocal) }
+        items(localTracks, key = { "local_${it.id}" }) { t ->
+            LocalTrackRow(
+                track = t,
+                onClick = { onPlay(t, localTracks) },
+                onRemove = { onRemoveLocal(t) },
+            )
         }
 
         if (browse.trending.isNotEmpty()) {
@@ -597,33 +594,7 @@ private fun SectionHeader(title: String) {
     )
 }
 
-/** "Musik dari perangkat" section header with an add-from-storage button. */
-@Composable
-private fun LocalMusicHeader(onAdd: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 20.dp, end = 14.dp, top = 20.dp, bottom = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text("Musik dari perangkat", color = NexusTextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.weight(1f))
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(NexusAccent.copy(alpha = 0.16f))
-                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onAdd)
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Filled.Add, null, tint = NexusAccentSoft, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(5.dp))
-            Text("Tambah", color = NexusAccentSoft, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-/** Empty state for the device-music section — a big tappable card. */
+/** Device-music add banner — a big tappable card with the "+" at the start. */
 @Composable
 private fun LocalMusicEmpty(onAdd: () -> Unit) {
     Row(
