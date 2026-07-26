@@ -53,7 +53,6 @@ import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
-import com.example.syntra.ui.theme.NexusTextSecondary
 
 enum class NexusTab { CHAT, MUSIC, SHORTS, ROOMS, CALLS }
 
@@ -159,12 +158,15 @@ private fun NavItem(
     // Colour and the pill width animate on select — transform/opacity-class only,
     // no layout thrash, no bounce. Instant enough to feel snappy (180ms).
     val color by animateColorAsState(
-        targetValue = if (isSelected) NexusAccentSoft else NexusTextSecondary,
+        // Idle used to be the muted grey NexusTextSecondary — too dim. Use a lightly
+        // dimmed near-white so idle icons/labels read bright, still a step below the
+        // accent-coloured selected tab. Theme-aware (goes dark on the light theme).
+        targetValue = if (isSelected) NexusAccentSoft else NexusTextPrimary.copy(alpha = 0.72f),
         animationSpec = tween(180),
         label = "nav-color",
     )
     val pillWidth by animateDpAsState(
-        targetValue = if (isSelected) 46.dp else 30.dp,
+        targetValue = if (isSelected) 50.dp else 34.dp,
         animationSpec = tween(220),
         label = "nav-pill",
     )
@@ -181,8 +183,8 @@ private fun NavItem(
         Box(
             modifier = Modifier
                 .width(pillWidth)
-                .height(23.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .height(30.dp)
+                .clip(RoundedCornerShape(15.dp))
                 .background(if (isSelected) NexusAccent.copy(alpha = 0.16f) else Color.Transparent),
             contentAlignment = Alignment.Center,
         ) {
@@ -190,7 +192,7 @@ private fun NavItem(
                 imageVector = if (isSelected) iconActive else iconIdle,
                 contentDescription = label,
                 tint = color,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(26.dp),
             )
         }
         Spacer(Modifier.height(1.dp))
