@@ -1,21 +1,27 @@
+@file:OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
+
 package com.example.syntra.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import com.example.syntra.R
 
-// Plus Jakarta Sans — a modern, friendly geometric sans (by an Indonesian type
-// designer). Shipped as static weight files so no variable-font axis handling is
-// needed; each named instance maps to its own ttf.
+// Inter — the clean, neutral, highly legible UI sans used across modern apps. One
+// variable-font file (`inter_variable.ttf`) carries every weight; each named weight
+// below drives the font's `wght` axis via FontVariation. minSdk is 26, which is
+// where Android's variable-font support begins, so no static per-weight files needed.
+private fun interWeight(w: Int) = FontVariation.Settings(FontVariation.weight(w))
+
 val AppFontFamily = FontFamily(
-    Font(R.font.plus_jakarta_sans_light, FontWeight.Light),
-    Font(R.font.plus_jakarta_sans_regular, FontWeight.Normal),
-    Font(R.font.plus_jakarta_sans_medium, FontWeight.Medium),
-    Font(R.font.plus_jakarta_sans_semibold, FontWeight.SemiBold),
-    Font(R.font.plus_jakarta_sans_bold, FontWeight.Bold),
-    Font(R.font.plus_jakarta_sans_extrabold, FontWeight.ExtraBold),
+    Font(R.font.inter_variable, FontWeight.Light, variationSettings = interWeight(300)),
+    Font(R.font.inter_variable, FontWeight.Normal, variationSettings = interWeight(400)),
+    Font(R.font.inter_variable, FontWeight.Medium, variationSettings = interWeight(500)),
+    Font(R.font.inter_variable, FontWeight.SemiBold, variationSettings = interWeight(600)),
+    Font(R.font.inter_variable, FontWeight.Bold, variationSettings = interWeight(700)),
+    Font(R.font.inter_variable, FontWeight.ExtraBold, variationSettings = interWeight(800)),
 )
 
 // Kept as an alias so existing references to `Raleway` keep compiling; both now
