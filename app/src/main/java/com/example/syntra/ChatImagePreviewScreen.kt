@@ -37,11 +37,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.height
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -78,19 +82,14 @@ fun ChatImagePreviewScreen(
         return
     }
 
-    Box(Modifier.fillMaxSize().background(Color(0xFF0B0B0F))) {
-        // The photo, centred.
-        Image(
-            bitmap = working.asImageBitmap(),
-            contentDescription = "Pratinjau foto",
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.fillMaxSize().padding(bottom = 90.dp),
-        )
-
-        // Top bar: back · rotate · crop · view-once.
+    // Header / photo / footer each get their OWN space (the bars have a solid
+    // background), so buttons never sit on top of the photo.
+    Column(Modifier.fillMaxSize().background(Color(0xFF0B0B0F))) {
+        // Header bar: back · rotate · crop · view-once.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .background(Color(0xFF15151C))
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -103,40 +102,27 @@ fun ChatImagePreviewScreen(
             Spacer(Modifier.width(4.dp))
             TopIcon(Icons.Filled.Crop, "Potong") { cropping = true }
             Spacer(Modifier.width(4.dp))
-            // View-once toggle — a circled "1", highlighted when on.
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                    ) { viewOnce = !viewOnce },
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(26.dp)
-                        .background(
-                            if (viewOnce) Color(0xFF6C8BFF) else Color.Transparent,
-                            CircleShape,
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "1",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-            }
+            ViewOnceToggle(on = viewOnce) { viewOnce = !viewOnce }
         }
 
-        // Bottom: caption field + send button.
+        // The photo — its own space between the two bars, never covered.
+        Box(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                bitmap = working.asImageBitmap(),
+                contentDescription = "Pratinjau foto",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize().padding(8.dp),
+            )
+        }
+
+        // Footer bar: caption field + send button.
         Row(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                .background(Color(0xFF15151C))
                 .imePadding()
                 .windowInsetsPadding(WindowInsets.navigationBars)
                 .padding(horizontal = 12.dp, vertical = 12.dp),
@@ -179,6 +165,42 @@ fun ChatImagePreviewScreen(
             ) {
                 Icon(Icons.AutoMirrored.Filled.Send, "Kirim", tint = Color.White, modifier = Modifier.size(24.dp))
             }
+        }
+    }
+}
+
+/** View-once toggle: a "1" inside a DASHED ring; fills solid when on. */
+@Composable
+private fun ViewOnceToggle(on: Boolean, onToggle: () -> Unit) {
+    val accent = Color(0xFF6C8BFF)
+    Box(
+        modifier = Modifier
+            .size(42.dp)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onToggle,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(26.dp)
+                .drawBehind {
+                    val d = size.minDimension
+                    if (on) drawCircle(color = accent, radius = d / 2f)
+                    drawCircle(
+                        color = if (on) Color.White else Color.White.copy(alpha = 0.85f),
+                        radius = d / 2f - 1.dp.toPx(),
+                        style = Stroke(
+                            width = 1.6.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(5f, 5f), 0f),
+                        ),
+                    )
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("1", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
     }
 }

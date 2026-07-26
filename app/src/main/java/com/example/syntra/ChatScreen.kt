@@ -115,7 +115,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -606,12 +605,24 @@ fun ChatScreen(
     // only looked up once per session.
     val avatarCache = remember { mutableStateMapOf<String, String>() }
 
+    // Re-applies a previously-resolved counterpart photo. The /conversations endpoint
+    // does NOT return the peer's avatar, so every list rebuild (refresh, a new message,
+    // a socket event) would otherwise drop a photo we already resolved — the "avatar
+    // keeps disappearing on the home" bug. Run every fresh Conversation through this so
+    // the cached photo sticks across rebuilds instead of falling back to the blank tile.
+    fun Conversation.withCachedAvatar(): Conversation {
+        if (!avatarUrl.isNullOrBlank()) return this
+        val u = counterpartUsername ?: return this
+        val cached = avatarCache[u]
+        return if (!cached.isNullOrBlank()) copy(avatarUrl = cached) else this
+    }
+
     // Reloads chats + stories from the backend. Shared by first load and pull-to-refresh.
     suspend fun refresh() {
         if (!ApiConfig.ENABLED) return
         runCatching {
             val convs = SyntraClient.getConversations()
-            chats.clear(); chats.addAll(convs.map { it.toUi() })
+            chats.clear(); chats.addAll(convs.map { it.toUi().withCachedAvatar() })
             val groups = SyntraClient.getStories()
             stories.clear()
             seenStories.clear()
@@ -708,7 +719,7 @@ fun ChatScreen(
                             runCatching { SyntraClient.getConversations() }.onSuccess { convs ->
                                 val fresh = convs.firstOrNull { it.id == message.conversationId }
                                 if (fresh != null && chats.none { it.id == fresh.id }) {
-                                    chats.add(0, fresh.toUi())
+                                    chats.add(0, fresh.toUi().withCachedAvatar())
                                     SyntraClient.subscribe(listOf("conversation:${fresh.id}"))
                                     fresh.counterpartId?.let { SyntraClient.presenceQuery(listOf(it)) }
                                 }
@@ -749,9 +760,9 @@ fun ChatScreen(
                             val i = chats.indexOfFirst { it.id == conversationId }
                             if (i >= 0) {
                                 // Keep the live presence we already track locally.
-                                chats[i] = fresh.toUi().copy(presence = chats[i].presence)
+                                chats[i] = fresh.toUi().withCachedAvatar().copy(presence = chats[i].presence)
                             } else {
-                                chats.add(0, fresh.toUi())
+                                chats.add(0, fresh.toUi().withCachedAvatar())
                             }
                         }
                     }
@@ -854,7 +865,7 @@ fun ChatScreen(
                     scope.launch {
                         runCatching {
                             val convs = SyntraClient.getConversations()
-                            chats.clear(); chats.addAll(convs.map { it.toUi() })
+                            chats.clear(); chats.addAll(convs.map { it.toUi().withCachedAvatar() })
                             SyntraClient.subscribe(convs.map { "conversation:${it.id}" })
                         }
                     }
@@ -1892,19 +1903,12 @@ private fun FreshStoryRing(
     modifier: Modifier = Modifier,
 ) {
     val t = rememberInfiniteTransition(label = "story-aura")
-    // A calm continuous orbit of the ring gradient.
-    val rotation by t.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(7000, easing = LinearEasing)),
-        label = "story-rot",
-    )
-    // A slow breath for the aura glow.
+    // No spinning — just a calm, slow breath for the aura glow.
     val pulse by t.animateFloat(
-        initialValue = 0.28f,
+        initialValue = 0.22f,
         targetValue = 0.72f,
         animationSpec = infiniteRepeatable(
-            tween(1700, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            tween(1900, easing = androidx.compose.animation.core.FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "story-pulse",
@@ -1934,32 +1938,30 @@ private fun FreshStoryRing(
             center = center,
         )
 
-        // Orbiting segmented gradient ring.
+        // Static segmented gradient ring (no rotation) — the aura does the moving.
         val ringBrush = Brush.sweepGradient(
             listOf(NexusRing, NexusAccentSoft, NexusRing),
             center = center,
         )
-        rotate(rotation, pivot = center) {
-            var start = -90f
-            repeat(segs) { i ->
-                val watched = i < viewedCount
-                if (watched) {
-                    drawArc(
-                        color = StorySeenRing,
-                        startAngle = start, sweepAngle = sweep, useCenter = false,
-                        topLeft = topLeft, size = arcSize,
-                        style = Stroke(width = 1.5.dp.toPx()),
-                    )
-                } else {
-                    drawArc(
-                        brush = ringBrush,
-                        startAngle = start, sweepAngle = sweep, useCenter = false,
-                        topLeft = topLeft, size = arcSize,
-                        style = Stroke(width = stroke, cap = StrokeCap.Round),
-                    )
-                }
-                start += sweep + gap
+        var start = -90f
+        repeat(segs) { i ->
+            val watched = i < viewedCount
+            if (watched) {
+                drawArc(
+                    color = StorySeenRing,
+                    startAngle = start, sweepAngle = sweep, useCenter = false,
+                    topLeft = topLeft, size = arcSize,
+                    style = Stroke(width = 1.5.dp.toPx()),
+                )
+            } else {
+                drawArc(
+                    brush = ringBrush,
+                    startAngle = start, sweepAngle = sweep, useCenter = false,
+                    topLeft = topLeft, size = arcSize,
+                    style = Stroke(width = stroke, cap = StrokeCap.Round),
+                )
             }
+            start += sweep + gap
         }
     }
 }
@@ -2316,11 +2318,12 @@ internal fun GradientAvatar(
     }
     Box(
         modifier = ringed
-            .background(Brush.verticalGradient(gradient), CircleShape),
+            .clip(CircleShape)
+            .background(Brush.verticalGradient(SyntraAvatarGradient)),
         contentAlignment = Alignment.Center,
     ) {
         // A bare media id is not something Coil can load — only take real URLs,
-        // otherwise keep the letter tile rather than showing a broken image.
+        // otherwise show the Syntra empty-profile mark rather than a broken image.
         if (photoUrl != null && photoUrl.startsWith("http")) {
             AsyncImage(
                 model = photoUrl,
@@ -2331,15 +2334,32 @@ internal fun GradientAvatar(
                     .clip(CircleShape),
             )
         } else {
-            Text(
-                text = initial.uppercase(),
-                color = Color.White,
-                fontSize = (size.value / 2.6f).sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            // Syntra's own empty-profile glyph: a soft bust drawn over the brand
+            // gradient, clipped to the circle. Deliberately not the stock Material
+            // person icon — this is the app's signature placeholder.
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val w = this.size.width
+                val h = this.size.height
+                val cx = w / 2f
+                val glyph = Color.White.copy(alpha = 0.92f)
+                // Head.
+                drawCircle(color = glyph, radius = w * 0.168f, center = Offset(cx, h * 0.38f))
+                // Shoulders — a wide rounded bust; the parent circle clip cuts it into
+                // the classic silhouette, but with Syntra's softer, higher proportions.
+                val shoulderW = w * 0.62f
+                drawRoundRect(
+                    color = glyph,
+                    topLeft = Offset(cx - shoulderW / 2f, h * 0.6f),
+                    size = Size(shoulderW, h * 0.55f),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(shoulderW * 0.5f, shoulderW * 0.5f),
+                )
+            }
         }
     }
 }
+
+/** Syntra's signature avatar gradient — the brand two-tone, used for empty profiles. */
+private val SyntraAvatarGradient = listOf(Color(0xFF8E7BEA), Color(0xFF5C79F0))
 
 // ---------------------------------------------------------------------------
 // Full-screen story viewer (WhatsApp-status style)
