@@ -28,25 +28,32 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.syntra.net.GifClient
+import com.example.syntra.net.GifItem
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
+import kotlinx.coroutines.delay
 import java.io.File
 
 // ---------------------------------------------------------------------------
@@ -84,9 +91,25 @@ private val emojiGroups = listOf(
     ),
 )
 
-/** Emoji keyboard that inserts straight into the message field. */
+/** Big expressive emoji offered as one-tap stickers (rendered large, no bubble). */
+private val stickerSet = (
+    "🥳 😂 😍 🥰 😎 🤩 😭 😤 🤯 🥶 🤗 🙌 👏 🔥 💯 ❤️ 💔 👍 👎 🙏 🎉 💪 🤝 👀 🫶 🤌 " +
+        "🤙 ✌️ 🤞 🫡 🥹 😴 🤤 🤠 🥲 😇 🤪 😜 😝 🫢 🙈 🙉 🙊 💀 👻 🤖 🎁"
+    ).split(" ")
+
+/**
+ * Emoji keyboard + sticker picker. The Emoji tab inserts into the message field;
+ * the Stiker tab sends a big-emoji sticker straight away via [onSticker].
+ */
 @Composable
-fun EmojiPicker(onPick: (String) -> Unit, onBackspace: () -> Unit) {
+fun EmojiPicker(
+    onPick: (String) -> Unit,
+    onBackspace: () -> Unit,
+    onSticker: (String) -> Unit = {},
+    onGif: (String) -> Unit = {},
+) {
+    // 0 = emoji (insert into field), 1 = stickers, 2 = GIF (both send immediately).
+    var mode by remember { mutableStateOf(0) }
     var group by remember { mutableStateOf(0) }
     Column(
         modifier = Modifier
@@ -94,8 +117,47 @@ fun EmojiPicker(onPick: (String) -> Unit, onBackspace: () -> Unit) {
             .background(NexusSurface)
             // The panel sits where the keyboard was, so it owns the nav-bar gap.
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .height(280.dp),
+            .height(300.dp),
     ) {
+        // Emoji / Stiker / GIF tab switch.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 14.dp, end = 14.dp, top = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PickerTab("Emoji", active = mode == 0) { mode = 0 }
+            PickerTab("Stiker", active = mode == 1) { mode = 1 }
+            PickerTab("GIF", active = mode == 2) { mode = 2 }
+        }
+
+        if (mode == 2) {
+            GifPanel(onGif = onGif)
+            return@Column
+        }
+
+        if (mode == 1) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(5),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                items(stickerSet) { emoji ->
+                    Text(
+                        text = emoji,
+                        fontSize = 40.sp,
+                        modifier = Modifier
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { onSticker(emoji) }
+                            .padding(10.dp),
+                    )
+                }
+            }
+            return@Column
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -158,6 +220,121 @@ fun EmojiPicker(onPick: (String) -> Unit, onBackspace: () -> Unit) {
             }
         }
     }
+}
+
+/** GIF search + grid, powered by Tenor. Tapping a GIF sends it via [onGif]. */
+@Composable
+private fun GifPanel(onGif: (String) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    val gifs = remember { mutableStateListOf<GifItem>() }
+    var loading by remember { mutableStateOf(GifClient.configured) }
+
+    // Debounced search; empty query loads trending. Skipped entirely with no key.
+    LaunchedEffect(query) {
+        if (!GifClient.configured) { loading = false; return@LaunchedEffect }
+        loading = true
+        delay(300)
+        val results = if (query.isBlank()) GifClient.featured() else GifClient.search(query)
+        gifs.clear(); gifs.addAll(results)
+        loading = false
+    }
+
+    if (!GifClient.configured) {
+        Box(Modifier.fillMaxWidth().height(220.dp), contentAlignment = Alignment.Center) {
+            Text(
+                "GIF belum aktif.\nTempel Tenor API key di GifClient.kt.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.padding(24.dp),
+            )
+        }
+        return
+    }
+
+    // Search field.
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .background(NexusSurface.copy(alpha = 0f)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF23232B), RoundedCornerShape(20.dp))
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Search, null, tint = NexusTextSecondary, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.weight(1f)) {
+                if (query.isEmpty()) Text("Cari GIF di Tenor…", color = NexusTextSecondary, fontSize = 14.sp)
+                androidx.compose.foundation.text.BasicTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(color = NexusTextPrimary, fontSize = 14.sp),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(NexusAccent),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+
+    if (loading && gifs.isEmpty()) {
+        Box(Modifier.fillMaxWidth().height(180.dp), contentAlignment = Alignment.Center) {
+            androidx.compose.material3.CircularProgressIndicator(color = NexusAccent, strokeWidth = 2.dp)
+        }
+        return
+    }
+
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(gifs, key = { it.id }) { gif ->
+            coil.compose.AsyncImage(
+                model = gif.previewUrl,
+                contentDescription = "GIF",
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(110.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF23232B))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { onGif(gif.sendUrl) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun PickerTab(label: String, active: Boolean, onClick: () -> Unit) {
+    Text(
+        text = label,
+        color = if (active) NexusTextPrimary else NexusTextSecondary,
+        fontSize = 13.sp,
+        fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+        modifier = Modifier
+            .background(
+                if (active) NexusAccent.copy(alpha = 0.2f) else Color.Transparent,
+                RoundedCornerShape(10.dp),
+            )
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+    )
 }
 
 // ---------------------------------------------------------------------------

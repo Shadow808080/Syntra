@@ -170,6 +170,8 @@ private data class Message(
     val isEdited: Boolean = false,
     /** True for a "sekali lihat" (view-once) photo — opens once, then it's gone. */
     val viewOnce: Boolean = false,
+    /** When set, this message is a sticker (large emoji) — rendered big, no bubble. */
+    val sticker: String? = null,
     /** Set when this is a reply to a story — a small blurred thumbnail is shown. */
     val storyReplyUrl: String? = null,
     /** Id of the message this one replies to (WhatsApp-style quote), if any. */
@@ -180,6 +182,8 @@ private data class Message(
 private const val STORY_REPLY_MARKER = "STORYREPLY"
 /** Body prefix marking a view-once ("sekali lihat") photo: "VIEWONCE<0x1>caption". */
 private const val VIEW_ONCE_MARKER = "VIEWONCE"
+/** Body prefix marking a sticker message: "STICKER<0x1>😀". */
+private const val STICKER_MARKER = "STICKER"
 private val STORY_REPLY_SEP = ''
 
 /** Marks a message that only exists on this device until the server confirms it. */
@@ -225,6 +229,13 @@ private fun NetMessage.toUi(): Message {
         displayBody = displayBody.removePrefix(VIEW_ONCE_MARKER + STORY_REPLY_SEP)
     }
 
+    // Sticker: "STICKER<sep>😀" → big emoji, no bubble.
+    var sticker: String? = null
+    if (!isDeleted && displayBody.startsWith(STICKER_MARKER + STORY_REPLY_SEP)) {
+        sticker = displayBody.removePrefix(STICKER_MARKER + STORY_REPLY_SEP)
+        displayBody = ""
+    }
+
     return Message(
         id = id,
         text = when {
@@ -239,6 +250,7 @@ private fun NetMessage.toUi(): Message {
         isDeleted = isDeleted,
         isEdited = editedAt != null,
         viewOnce = viewOnce,
+        sticker = sticker,
         storyReplyUrl = storyUrl,
         replyToId = replyToId,
     )
@@ -846,6 +858,27 @@ fun ChatDetailScreen(
         }
     }
 
+    fun sendSticker(emoji: String) {
+        val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
+        messages.add(Message(ref, "", fromMe = true, time = "now", sticker = emoji))
+        if (ApiConfig.ENABLED) {
+            SyntraClient.messageSend(conversation.id, STICKER_MARKER + STORY_REPLY_SEP + emoji, ref)
+        }
+    }
+
+    fun sendGif(url: String) {
+        if (!ApiConfig.ENABLED) return
+        // Download the GIF bytes from Tenor, then push through the media pipeline so
+        // it lands in our bucket and renders (animated) like any other chat photo.
+        scope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { java.net.URL(url).openStream().use { it.readBytes() } }.getOrNull()
+            }
+            if (bytes != null) sendMedia("image", "gif", "image/gif", bytes)
+            else Toast.makeText(context, "Gagal memuat GIF.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun send() {
         val text = input.trim()
         if (text.isEmpty()) return
@@ -1225,6 +1258,14 @@ fun ChatDetailScreen(
             EmojiPicker(
                 onPick = { input += it },
                 onBackspace = { input = input.dropLast(1) },
+                onSticker = { emoji ->
+                    sendSticker(emoji)
+                    showEmoji = false
+                },
+                onGif = { url ->
+                    sendGif(url)
+                    showEmoji = false
+                },
             )
         }
     }
@@ -1852,7 +1893,13 @@ private fun MessageBubble(
     viewOnceOpened: Boolean = false,
     onOpenViewOnce: () -> Unit = {},
 ) {
-    val bubbleColor = if (msg.fromMe) outgoingColor else NexusSurfaceElevated
+    // Stickers float free — no bubble background behind a big emoji.
+    val isSticker = msg.sticker != null
+    val bubbleColor = when {
+        isSticker -> Color.Transparent
+        msg.fromMe -> outgoingColor
+        else -> NexusSurfaceElevated
+    }
     val textColor = if (msg.fromMe) Color.White else NexusTextPrimary
     val shape = RoundedCornerShape(
         topStart = 16.dp,
@@ -1983,6 +2030,11 @@ private fun MessageBubble(
                 // Attachments come back as ready URLs; a caption may sit under them.
                 val media = msg.media
                 when {
+                    msg.sticker != null -> Text(
+                        text = msg.sticker,
+                        fontSize = 68.sp,
+                        lineHeight = 74.sp,
+                    )
                     media != null && media.isAudioUrl() -> AudioBubble(media, textColor)
                     media != null && msg.viewOnce -> ViewOnceBubble(
                         opened = viewOnceOpened,

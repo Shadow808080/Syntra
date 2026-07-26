@@ -1,8 +1,11 @@
 package com.example.syntra
 
 import android.app.Application
+import android.os.Build
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.decode.GifDecoder
+import coil.decode.ImageDecoderDecoder
 import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
@@ -23,7 +26,15 @@ class SyntraApp : Application(), ImageLoaderFactory {
         ImageLoader.Builder(this)
             // Defining our own loader replaces the default one, so the video
             // decoder has to be registered here or video posters stop rendering.
-            .components { add(VideoFrameDecoder.Factory()) }
+            // The GIF decoder makes chat GIFs (Tenor) actually animate.
+            .components {
+                add(VideoFrameDecoder.Factory())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    add(ImageDecoderDecoder.Factory())
+                } else {
+                    add(GifDecoder.Factory())
+                }
+            }
             // A quarter of the heap for decoded bitmaps: avatars and chat photos
             // are shown over and over, so keeping them decoded is the big win.
             .memoryCache {

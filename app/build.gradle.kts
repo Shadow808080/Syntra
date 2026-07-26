@@ -41,6 +41,7 @@ dependencies {
     implementation(libs.play.services.code.scanner)
     implementation(libs.coil.compose)
     implementation(libs.coil.video)
+    implementation(libs.coil.gif)
     implementation(libs.okhttp)
     implementation(libs.livekit.android)
     implementation(libs.zxing.core)
