@@ -69,6 +69,14 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.outlined.ModeComment
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.ModeComment
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -1363,7 +1371,7 @@ private fun ReelCaption(reel: NetReel, onOpenProfile: () -> Unit = {}, modifier:
         }
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(15.dp))
+            Icon(Icons.Rounded.MusicNote, null, tint = Color.White, modifier = Modifier.size(15.dp))
             Spacer(Modifier.width(8.dp))
             Text(
                 text = "Original sound - @$username",
@@ -1455,24 +1463,24 @@ private fun ReelActions(
                         ) { showFollowSheet = true },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Filled.Add, "Ikuti", tint = Color.White, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.Add, "Ikuti", tint = Color.White, modifier = Modifier.size(18.dp))
                 }
             }
         }
         RailItem(
-            icon = if (reel.isLiked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+            icon = if (reel.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
             tint = if (reel.isLiked) Color(0xFFFF3B5C) else Color.White,
             label = compactCount(reel.likeCount),
             onClick = onLike,
         )
         RailItem(
-            icon = Icons.Outlined.ModeComment,
+            icon = Icons.Rounded.ModeComment,
             tint = Color.White,
             label = compactCount(reel.commentCount),
             onClick = onComment,
         )
         RailItem(
-            icon = Icons.Filled.Share,
+            icon = Icons.Rounded.Send,
             tint = Color.White,
             label = "Bagikan",
             onClick = onShare,
@@ -1480,7 +1488,7 @@ private fun ReelActions(
         // Owner-only: remove my own reel (kept subtle, others never see it).
         if (onDelete != null) {
             RailItem(
-                icon = Icons.Filled.Delete,
+                icon = Icons.Rounded.DeleteOutline,
                 tint = Color(0xFFFF5D5D),
                 label = "Hapus",
                 onClick = onDelete,
@@ -1527,7 +1535,7 @@ private fun FollowActionSheet(
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
             )
-            SheetRow(Icons.Filled.Add, "Ikuti", onFollow)
+            SheetRow(Icons.Rounded.Add, "Ikuti", onFollow)
             SheetRow(Icons.Filled.AccountCircle, "Lihat profil", onViewProfile)
         }
     }
@@ -1567,8 +1575,19 @@ private fun RailItem(icon: ImageVector, tint: Color, label: String, onClick: () 
                     onClick = onClick,
                 ),
         )
-        Spacer(Modifier.height(3.dp))
-        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(1.dp))
+        Text(
+            label,
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            // Drop the font's built-in vertical padding so the count sits snug under
+            // the icon instead of floating away from it.
+            style = androidx.compose.ui.text.TextStyle(
+                platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false),
+                lineHeight = 12.sp,
+            ),
+        )
     }
 }
 
@@ -1599,7 +1618,7 @@ private fun SpinningMusicDisc(avatarUrl: String?) {
                 modifier = Modifier.size(18.dp).clip(CircleShape),
             )
         } else {
-            Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(18.dp))
+            Icon(Icons.Rounded.MusicNote, null, tint = Color.White, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -1633,7 +1652,7 @@ private fun ShortsHeader(
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.Add, "Unggah", tint = Color(0xFF0A1414), modifier = Modifier.size(26.dp))
+            Icon(Icons.Rounded.Add, "Unggah", tint = Color(0xFF0A1414), modifier = Modifier.size(26.dp))
         }
         // Center: Following / For You tabs.
         Row(
@@ -1646,7 +1665,7 @@ private fun ShortsHeader(
         }
         // Right: search.
         Icon(
-            imageVector = Icons.Filled.Search,
+            imageVector = Icons.Rounded.Search,
             contentDescription = "Cari",
             tint = Color.White,
             modifier = Modifier
@@ -1689,7 +1708,7 @@ private fun EmptyReels() {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(Icons.Filled.MusicNote, null, tint = NexusTextSecondary, modifier = Modifier.size(40.dp))
+        Icon(Icons.Rounded.MusicNote, null, tint = NexusTextSecondary, modifier = Modifier.size(40.dp))
         Spacer(Modifier.height(16.dp))
         Text("Belum ada reels", color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(8.dp))
@@ -1778,7 +1797,7 @@ private fun UploadReelCard(
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
-                    Icon(Icons.Filled.MusicNote, null, tint = Color.White.copy(alpha = 0.4f), modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.MusicNote, null, tint = Color.White.copy(alpha = 0.4f), modifier = Modifier.size(16.dp))
                 }
             }
         }
