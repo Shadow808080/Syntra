@@ -56,6 +56,25 @@ object LocalMusicStore {
         return updated
     }
 
+    /**
+     * Reads a picked file's title/artist/duration/cover WITHOUT saving it — used by
+     * the upload screen to prefill the form and drive the trim slider's length.
+     */
+    fun probe(context: Context, uri: Uri): MusicTrack = readMetadata(context, uri)
+
+    /**
+     * Appends an already-formed [track] (e.g. a clip we just uploaded, whose
+     * [MusicTrack.previewUrl] is a public URL) and returns the updated list. Unlike
+     * [add] this does not re-read metadata — the caller already set title/artist.
+     */
+    fun addTrack(context: Context, track: MusicTrack): List<MusicTrack> {
+        val existing = list(context)
+        if (existing.any { it.id == track.id }) return existing
+        val updated = existing + track
+        save(context, updated)
+        return updated
+    }
+
     fun remove(context: Context, id: String): List<MusicTrack> {
         val updated = list(context).filterNot { it.id == id }
         save(context, updated)

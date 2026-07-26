@@ -74,12 +74,36 @@ object MusicClient {
     // --- HTTP -------------------------------------------------------------
 
     private fun getObject(path: String): JSONObject {
-        val req = Request.Builder().url(BASE + path).get().build()
-        http.newCall(req).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful || body.isBlank()) return JSONObject()
-            return runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+        // Deezer's key-less endpoint is rate-limited per IP and drops requests under
+        // load, which is why music "sering gagal di ambil". Retry a few times with a
+        // short backoff before giving up, so a transient hiccup no longer shows an
+        // empty tab. An empty catalogue error is also retried (Deezer returns it while
+        // throttling); a real empty result is rare and simply costs a couple of tries.
+        var lastError: JSONObject = JSONObject()
+        repeat(3) { attempt ->
+            val result = runCatching {
+                val req = Request.Builder().url(BASE + path).get()
+                    // A UA + JSON accept header markedly reduces Deezer's throttling.
+                    .header("User-Agent", "SyntraMusic/1.0")
+                    .header("Accept", "application/json")
+                    .build()
+                http.newCall(req).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (resp.code == 429) error("rate limited") // force a retry
+                    if (!resp.isSuccessful || body.isBlank()) return@use JSONObject()
+                    val json = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+                    // Deezer signals throttling with an {"error":{"code":4,...}} body.
+                    if (json.has("error") && !json.has("data") && !json.has("tracks")) {
+                        error("deezer error")
+                    }
+                    json
+                }
+            }.getOrElse { JSONObject() }
+            if (result.length() > 0) return result
+            lastError = result
+            if (attempt < 2) runCatching { Thread.sleep(400L * (attempt + 1)) }
         }
+        return lastError
     }
 
     // --- parsing (Deezer shapes → app models) -----------------------------

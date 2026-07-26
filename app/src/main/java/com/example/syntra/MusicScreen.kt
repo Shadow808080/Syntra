@@ -12,6 +12,7 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.PaddingValues
@@ -31,6 +32,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,6 +41,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -54,8 +58,11 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.RangeSlider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -83,6 +90,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import kotlin.math.roundToInt
+import com.example.syntra.net.AudioTrimmer
 import com.example.syntra.net.MusicAlbum
 import com.example.syntra.net.MusicArtist
 import com.example.syntra.net.MusicBrowse
@@ -149,15 +157,25 @@ fun MusicScreen(
         }
         localTracks.clear(); localTracks.addAll(saved)
     }
+    // Public, community-uploaded tracks (searchable across users). Best-effort: the
+    // backend endpoint may not exist yet, in which case this stays empty.
+    val communityTracks = remember { mutableStateListOf<MusicTrack>() }
+
+    // The file the user just picked and is about to trim/preview/publish. Non-null
+    // shows the upload screen; picking no longer publishes straight away.
+    var uploadUri by remember { mutableStateOf<Uri?>(null) }
+
     // OpenDocument (not GetContent) so the read grant can be persisted across restarts.
     val pickAudio = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
-        if (uri != null) scope.launch {
-            val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                com.example.syntra.net.LocalMusicStore.add(context, uri)
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
             }
-            localTracks.clear(); localTracks.addAll(updated)
+            uploadUri = uri
         }
     }
 
@@ -167,16 +185,111 @@ fun MusicScreen(
         MusicUi.showNowPlaying = true
     }
 
-    // Load the charts once.
-    LaunchedEffect(Unit) {
+    // Load the charts once — but ONLY when the tab is actually shown, not while it's
+    // just a warm neighbour of the home. Fetching the catalogue (network + a wall of
+    // cover images) the instant the app opens is a big part of why entering felt heavy;
+    // now the Music tab pays that cost only when you open it.
+    var browseLoaded by remember { mutableStateOf(false) }
+    LaunchedEffect(visible) {
+        if (!visible || browseLoaded) return@LaunchedEffect
+        browseLoaded = true
         runCatching { MusicClient.browse() }
             .onSuccess { browse = it; failed = it.isEmpty }
             .onFailure { failed = true }
+        // Community catalogue is a bonus rail — its absence must not fail the tab.
+        runCatching { com.example.syntra.net.SyntraClient.getMusicFeed() }
+            .onSuccess { communityTracks.clear(); communityTracks.addAll(it) }
         loading = false
     }
 
-    // A detail page counts as a full-screen overlay (hide the bottom bar).
-    LaunchedEffect(detail) { onOverlayChange(detail != null) }
+    // A detail page or the upload screen counts as a full-screen overlay (hide the bottom bar).
+    LaunchedEffect(detail, uploadUri) { onOverlayChange(detail != null || uploadUri != null) }
+
+    // Refresh the community rail after a successful publish.
+    val reloadCommunity: () -> Unit = {
+        scope.launch {
+            runCatching { com.example.syntra.net.SyntraClient.getMusicFeed() }
+                .onSuccess { communityTracks.clear(); communityTracks.addAll(it) }
+        }
+    }
+
+    // Background publish (reels-style, non-blocking): the upload screen closes the
+    // moment you confirm, and the trim+upload runs here behind a small status banner
+    // while you keep using the tab. Runs on the Music tab's scope, which the pager
+    // keeps warm; the phased status makes the (unavoidable) re-encode wait legible.
+    var publishing by remember { mutableStateOf(false) }
+    var publishStatus by remember { mutableStateOf("") }
+    var publishOk by remember { mutableStateOf(true) }
+    val publishMusic: (MusicPublishSpec) -> Unit = { spec ->
+        scope.launch {
+            publishing = true
+            publishOk = true
+            val io = kotlinx.coroutines.Dispatchers.IO
+            val result = runCatching {
+                val lenMs = spec.endMs - spec.startMs
+                publishStatus = "Memotong audio…"
+                val clip = kotlinx.coroutines.withContext(io) {
+                    AudioTrimmer.trim(context, spec.uri, spec.startMs, spec.endMs)
+                } ?: error("File tidak memiliki trek audio")
+
+                publishStatus = "Mengunggah…"
+                val bytes = kotlinx.coroutines.withContext(io) { clip.readBytes() }
+                val (audioMediaId, audioUrl) = com.example.syntra.net.SyntraClient.uploadMediaFull(
+                    kind = "audio", extension = "m4a", mimeType = "audio/mp4",
+                    bytes = bytes, durationMs = lenMs,
+                )
+
+                // Cover art, if the picked file carried an embedded picture.
+                var coverMediaId: String? = null
+                var coverUrl: String? = spec.artPath
+                if (!spec.artPath.isNullOrBlank() && spec.artPath.startsWith("file")) {
+                    runCatching {
+                        val cb = kotlinx.coroutines.withContext(io) {
+                            java.io.File(Uri.parse(spec.artPath).path!!).readBytes()
+                        }
+                        val (cid, curl) = com.example.syntra.net.SyntraClient.uploadMediaFull(
+                            kind = "image", extension = "jpg", mimeType = "image/jpeg", bytes = cb,
+                        )
+                        coverMediaId = cid; coverUrl = curl
+                    }
+                }
+
+                // Register as public (best-effort — works once the backend adds it).
+                publishStatus = "Menerbitkan…"
+                val published = runCatching {
+                    com.example.syntra.net.SyntraClient.postMusic(
+                        audioMediaId, spec.title, spec.artist, lenMs, coverMediaId,
+                    )
+                }.getOrNull()
+                kotlinx.coroutines.withContext(io) { runCatching { clip.delete() } }
+
+                published ?: MusicTrack(
+                    id = audioUrl,
+                    title = spec.title,
+                    artist = spec.artist,
+                    artworkUrl = coverUrl,
+                    previewUrl = audioUrl,
+                    durationSec = (lenMs / 1000).toInt(),
+                )
+            }
+            result
+                .onSuccess { track ->
+                    val updated = kotlinx.coroutines.withContext(io) {
+                        com.example.syntra.net.LocalMusicStore.addTrack(context, track)
+                    }
+                    localTracks.clear(); localTracks.addAll(updated)
+                    reloadCommunity()
+                    publishOk = true
+                    publishStatus = "Lagu diterbitkan"
+                }
+                .onFailure {
+                    publishOk = false
+                    publishStatus = "Gagal mengunggah: ${it.message}"
+                }
+            delay(if (result.isSuccess) 1600 else 3500)
+            publishing = false
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize().background(NexusBackground)) {
         Column(Modifier.fillMaxSize()) {
@@ -206,6 +319,7 @@ fun MusicScreen(
                 else -> MusicBrowseBody(
                     browse = browse,
                     localTracks = localTracks,
+                    communityTracks = communityTracks,
                     onPlay = play,
                     onAddLocal = { pickAudio.launch(arrayOf("audio/*")) },
                     onRemoveLocal = { t ->
@@ -232,6 +346,63 @@ fun MusicScreen(
                 onBack = { detail = null },
                 onPlay = play,
             )
+        }
+
+        // Upload/trim/preview overlay — the entry point for publishing a device song.
+        // Confirming closes it instantly and publishes in the background (below).
+        uploadUri?.let { u ->
+            MusicUploadScreen(
+                uri = u,
+                onClose = { uploadUri = null },
+                    onConfirm = { spec ->
+                    uploadUri = null
+                    publishMusic(spec)
+                },
+            )
+        }
+
+        // Non-blocking publish banner — a small card at the top, reels-style. The
+        // user keeps browsing/playing while the song trims & uploads behind it.
+        if (publishing) {
+            MusicPublishBanner(status = publishStatus, ok = publishOk)
+        }
+    }
+}
+
+/** Small top banner shown while a song publishes in the background. */
+@Composable
+private fun BoxScope.MusicPublishBanner(status: String, ok: Boolean) {
+    val done = status.startsWith("Lagu diterbitkan")
+    Row(
+        modifier = Modifier
+            .align(Alignment.TopCenter)
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(top = 64.dp)
+            .padding(horizontal = 16.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(NexusSurface)
+            .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (!ok || done) {
+            Icon(
+                if (done) Icons.Filled.Check else Icons.Filled.Close,
+                null,
+                tint = if (done) NexusAccentSoft else Color(0xFFFF6B6B),
+                modifier = Modifier.size(22.dp),
+            )
+        } else {
+            CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                if (done) "Selesai" else if (!ok) "Gagal" else "Menerbitkan lagu",
+                color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            )
+            Text(status, color = NexusTextSecondary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -309,6 +480,7 @@ private fun MusicTopBar(
 private fun MusicBrowseBody(
     browse: MusicBrowse,
     localTracks: List<MusicTrack>,
+    communityTracks: List<MusicTrack>,
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
     onAddLocal: () -> Unit,
     onRemoveLocal: (MusicTrack) -> Unit,
@@ -330,6 +502,21 @@ private fun MusicBrowseBody(
                 onClick = { onPlay(t, localTracks) },
                 onRemove = { onRemoveLocal(t) },
             )
+        }
+
+        // Community uploads — public tracks other people added from their devices.
+        if (communityTracks.isNotEmpty()) {
+            item { SectionHeader("Unggahan komunitas") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(communityTracks, key = { "community_${it.id}" }) { t ->
+                        TrackCard(t) { onPlay(t, communityTracks) }
+                    }
+                }
+            }
         }
 
         if (browse.trending.isNotEmpty()) {
@@ -401,17 +588,22 @@ private fun MusicSearchBody(
     val tracks = remember { mutableStateListOf<MusicTrack>() }
     val artists = remember { mutableStateListOf<MusicArtist>() }
     val albums = remember { mutableStateListOf<MusicAlbum>() }
+    val community = remember { mutableStateListOf<MusicTrack>() }
     var loading by remember { mutableStateOf(false) }
 
     // Debounced search: wait for the user to stop typing before hitting the API.
     LaunchedEffect(query) {
-        if (query.isBlank()) { tracks.clear(); artists.clear(); albums.clear(); loading = false; return@LaunchedEffect }
+        if (query.isBlank()) { tracks.clear(); artists.clear(); albums.clear(); community.clear(); loading = false; return@LaunchedEffect }
         loading = true
         delay(350)
         runCatching { MusicClient.search(query) }.onSuccess { r ->
             tracks.clear(); tracks.addAll(r.tracks)
             artists.clear(); artists.addAll(r.artists)
             albums.clear(); albums.addAll(r.albums)
+        }
+        // Community results are best-effort — merge them in when the endpoint exists.
+        runCatching { com.example.syntra.net.SyntraClient.searchMusic(query) }.onSuccess { c ->
+            community.clear(); community.addAll(c)
         }
         loading = false
     }
@@ -422,7 +614,7 @@ private fun MusicSearchBody(
         }
         return
     }
-    if (loading && tracks.isEmpty() && artists.isEmpty() && albums.isEmpty()) {
+    if (loading && tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && community.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
         }
@@ -433,6 +625,10 @@ private fun MusicSearchBody(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 6.dp, bottom = 150.dp),
     ) {
+        if (community.isNotEmpty()) {
+            item { SectionHeader("Dari komunitas") }
+            items(community, key = { "community_${it.id}" }) { t -> TrackRow(t) { onPlay(t, community) } }
+        }
         if (artists.isNotEmpty()) {
             item { SectionHeader("Artis") }
             item {
@@ -459,7 +655,7 @@ private fun MusicSearchBody(
                 }
             }
         }
-        if (tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && !loading) {
+        if (tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && community.isEmpty() && !loading) {
             item {
                 Box(Modifier.fillMaxWidth().padding(top = 60.dp), contentAlignment = Alignment.Center) {
                     Text("Tak ada hasil untuk \"$query\"", color = NexusTextSecondary, fontSize = 14.sp)
@@ -781,6 +977,376 @@ private fun MusicError(onRetry: () -> Unit) {
                 .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onRetry)
                 .padding(horizontal = 28.dp, vertical = 11.dp),
         ) { Text("Coba lagi", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Upload / trim / preview — publish a device song to the public catalogue
+// ---------------------------------------------------------------------------
+
+/**
+ * Full-screen flow to publish a song picked from device storage:
+ *  1. edit title/artist (prefilled from the file's tags),
+ *  2. pick the portion to keep with a two-handle range slider (max 10 min),
+ *  3. preview exactly that portion,
+ *  4. confirm — then the clip is trimmed (re-encoded to .m4a), uploaded, and
+ *     registered as a public, searchable track.
+ *
+ * The original file is never uploaded — only the trimmed slice — so the user
+ * always publishes just the part they chose.
+ *
+ * On confirm this screen does NOT do the (slow) trim/upload itself — it just hands
+ * a [MusicPublishSpec] back and closes. The heavy work runs in the background in
+ * MusicScreen (reels-style), so the user returns to the tab instantly and can keep
+ * browsing while it publishes behind a small banner.
+ */
+@Composable
+private fun MusicUploadScreen(
+    uri: Uri,
+    onClose: () -> Unit,
+    onConfirm: (MusicPublishSpec) -> Unit,
+) {
+    BackHandler(onBack = onClose)
+    val context = LocalContext.current
+
+    var meta by remember(uri) { mutableStateOf<MusicTrack?>(null) }
+    var title by remember(uri) { mutableStateOf("") }
+    var artist by remember(uri) { mutableStateOf("") }
+    // Selection in SECONDS; the max window is 10 minutes.
+    val maxWindow = (AudioTrimmer.MAX_CLIP_MS / 1000).toFloat()
+    var range by remember(uri) { mutableStateOf(0f..0f) }
+
+    // A dedicated player for previewing the SELECTED portion of the original file.
+    val player = remember(uri) { android.media.MediaPlayer() }
+    var prepared by remember(uri) { mutableStateOf(false) }
+    var playerDurSec by remember(uri) { mutableStateOf(0) }
+    var previewPlaying by remember(uri) { mutableStateOf(false) }
+
+    var showConfirm by remember { mutableStateOf(false) }
+
+    // Probe tags + prepare the preview player once.
+    LaunchedEffect(uri) {
+        val probed = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { com.example.syntra.net.LocalMusicStore.probe(context, uri) }.getOrNull()
+        }
+        if (probed != null) {
+            meta = probed
+            if (title.isBlank()) title = probed.title
+            if (artist.isBlank()) artist = probed.artist
+        }
+        runCatching {
+            player.setDataSource(context, uri)
+            player.setOnPreparedListener { mp ->
+                prepared = true
+                playerDurSec = (mp.duration / 1000).coerceAtLeast(0)
+            }
+            player.prepareAsync()
+        }
+    }
+    DisposableEffect(uri) { onDispose { runCatching { player.release() } } }
+
+    // Once we know the real length, default the selection to the whole song (capped).
+    val totalSec = maxOf(meta?.durationSec ?: 0, playerDurSec)
+    LaunchedEffect(totalSec) {
+        if (totalSec > 0 && range == 0f..0f) {
+            range = 0f..minOf(totalSec.toFloat(), maxWindow)
+        }
+    }
+
+    val startMs = (range.start * 1000).toInt()
+    val endMs = (range.endInclusive * 1000).toInt()
+
+    // Stop the preview automatically at the end of the selected window.
+    LaunchedEffect(previewPlaying, startMs, endMs) {
+        if (!previewPlaying) return@LaunchedEffect
+        while (previewPlaying) {
+            val pos = runCatching { player.currentPosition }.getOrDefault(0)
+            if (pos >= endMs || pos < startMs - 500) {
+                runCatching { player.pause(); player.seekTo(startMs) }
+                previewPlaying = false
+                break
+            }
+            delay(80)
+        }
+    }
+
+    val togglePreview: () -> Unit = {
+        if (prepared) {
+            if (previewPlaying) {
+                runCatching { player.pause() }; previewPlaying = false
+            } else {
+                MusicPlayer.pauseForExternalAudio()
+                runCatching { player.seekTo(startMs); player.start() }
+                previewPlaying = true
+            }
+        }
+    }
+
+    // Hand the choice back to MusicScreen and let it publish in the background.
+    val doConfirm: () -> Unit = {
+        showConfirm = false
+        previewPlaying = false
+        runCatching { player.pause() }
+        onConfirm(
+            MusicPublishSpec(
+                uri = uri,
+                startMs = (range.start * 1000).toLong(),
+                endMs = (range.endInclusive * 1000).toLong(),
+                title = title.trim().ifBlank { "Tanpa judul" },
+                artist = artist.trim().ifBlank { "Dari perangkat" },
+                artPath = meta?.artworkUrl,
+            ),
+        )
+    }
+
+    val clipLenSec = (range.endInclusive - range.start).toInt()
+
+    Box(Modifier.fillMaxSize().background(NexusBackground)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            // Top bar.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 16.dp, top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier.size(40.dp).clickable(
+                        indication = null, interactionSource = remember { MutableInteractionSource() },
+                        onClick = onClose,
+                    ),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.Close, "Tutup", tint = NexusTextPrimary, modifier = Modifier.size(22.dp)) }
+                Spacer(Modifier.width(4.dp))
+                Text("Unggah lagu", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+
+            // Cover.
+            Box(
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                ArtworkImage(
+                    url = meta?.artworkUrl,
+                    modifier = Modifier.size(150.dp).clip(RoundedCornerShape(16.dp)),
+                )
+            }
+
+            // Title + artist fields.
+            UploadField(label = "Judul", value = title, onValueChange = { title = it }, hint = "Judul lagu")
+            UploadField(label = "Artis", value = artist, onValueChange = { artist = it }, hint = "Nama artis")
+
+            // Trim controls.
+            Text(
+                "Pilih bagian yang diunggah",
+                color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 2.dp),
+            )
+            Text(
+                "Geser kedua ujung untuk menentukan dari mana sampai mana. Maksimal 10 menit.",
+                color = NexusTextSecondary, fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            )
+
+            if (totalSec <= 0) {
+                Box(Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
+                }
+            } else {
+                RangeSlider(
+                    value = range,
+                    onValueChange = { r ->
+                        var s = r.start.coerceIn(0f, totalSec.toFloat())
+                        var e = r.endInclusive.coerceIn(0f, totalSec.toFloat())
+                        if (e - s > maxWindow) {
+                            // Keep the window <= 10 min by pushing the handle that moved.
+                            if (s != range.start) s = e - maxWindow else e = s + maxWindow
+                        }
+                        if (e < s) e = s
+                        range = s..e
+                    },
+                    valueRange = 0f..totalSec.toFloat(),
+                    colors = SliderDefaults.colors(
+                        thumbColor = NexusAccent,
+                        activeTrackColor = NexusAccent,
+                        inactiveTrackColor = NexusStroke,
+                    ),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Mulai ${clock(startMs)}", color = NexusTextSecondary, fontSize = 12.sp)
+                    Text("Selesai ${clock(endMs)}", color = NexusTextSecondary, fontSize = 12.sp)
+                }
+                Text(
+                    "Durasi klip: ${clock(clipLenSec * 1000)}",
+                    color = NexusAccentSoft, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 20.dp, top = 6.dp),
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // Preview the selected portion.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .background(
+                            Brush.linearGradient(listOf(NexusAccentSoft, NexusAccent)), CircleShape,
+                        )
+                        .clickable(
+                            indication = null, interactionSource = remember { MutableInteractionSource() },
+                            enabled = prepared && totalSec > 0,
+                            onClick = togglePreview,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (previewPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        "Pratinjau", tint = Color.White, modifier = Modifier.size(30.dp),
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Text(
+                    if (previewPlaying) "Memutar pratinjau…" else "Dengarkan pratinjau klip",
+                    color = NexusTextPrimary, fontSize = 14.sp,
+                )
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // Publish button → confirmation.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
+                    .clickable(
+                        indication = null, interactionSource = remember { MutableInteractionSource() },
+                        enabled = totalSec > 0 && clipLenSec > 0,
+                        onClick = { showConfirm = true },
+                    )
+                    .padding(vertical = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Terbitkan ke publik", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(28.dp))
+        }
+
+        // Confirmation sheet.
+        if (showConfirm) {
+            UploadConfirmDialog(
+                title = title.trim().ifBlank { "Tanpa judul" },
+                artist = artist.trim().ifBlank { "Dari perangkat" },
+                lengthLabel = clock(clipLenSec * 1000),
+                onCancel = { showConfirm = false },
+                onConfirm = doConfirm,
+            )
+        }
+    }
+}
+
+/** What [MusicUploadScreen] hands back on confirm; MusicScreen does the upload. */
+private data class MusicPublishSpec(
+    val uri: Uri,
+    val startMs: Long,
+    val endMs: Long,
+    val title: String,
+    val artist: String,
+    /** Embedded-cover file:// path, if the picked file had one. */
+    val artPath: String?,
+)
+
+/** A themed labelled text field for the upload form. */
+@Composable
+private fun UploadField(label: String, value: String, onValueChange: (String) -> Unit, hint: String) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
+        Text(label, color = NexusTextSecondary, fontSize = 12.sp)
+        Spacer(Modifier.height(4.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(NexusSurface)
+                .border(1.dp, NexusStroke, RoundedCornerShape(10.dp))
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+        ) {
+            if (value.isEmpty()) Text(hint, color = NexusTextSecondary, fontSize = 15.sp)
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                singleLine = true,
+                textStyle = TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
+                cursorBrush = SolidColor(NexusAccentSoft),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+/** "Really publish?" — the approval step before anything leaves the device. */
+@Composable
+private fun UploadConfirmDialog(
+    title: String,
+    artist: String,
+    lengthLabel: String,
+    onCancel: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xAA000000))
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onCancel),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(32.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(NexusSurface)
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
+                .padding(22.dp),
+        ) {
+            Text("Terbitkan lagu ini?", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "\"$title\" — $artist ($lengthLabel) akan terlihat publik dan bisa dicari oleh siapa saja.",
+                color = NexusTextSecondary, fontSize = 14.sp, lineHeight = 20.sp,
+            )
+            Spacer(Modifier.height(20.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onCancel)
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                ) { Text("Batal", color = NexusTextSecondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onConfirm)
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                ) { Text("Terbitkan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+            }
+        }
     }
 }
 

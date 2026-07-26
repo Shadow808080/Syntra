@@ -428,8 +428,15 @@ object SyntraClient {
 
     suspend fun createStory(mediaId: String, visibility: String = "followers", music: StoryMusic? = null) {
         val payload = JSONObject().put("media_id", mediaId).put("visibility", visibility)
+        // PRIVACY: a device-local song (content:// or file://) must NEVER be written to
+        // the public story overlay — its URL would leak the private file reference and
+        // is unplayable for anyone else anyway. Only http(s) preview URLs are attachable.
+        val safeMusic = music?.takeIf {
+            it.previewUrl.startsWith("http", ignoreCase = true)
+        }
         // Attach a song via the story overlays (backend stores/returns overlays jsonb).
-        if (music != null) {
+        if (safeMusic != null) {
+            val music = safeMusic
             payload.put(
                 "overlays",
                 JSONObject().put(
@@ -533,12 +540,15 @@ object SyntraClient {
         avatarMediaId: String? = null,
         username: String? = null,
         coverMediaId: String? = null,
+        /** Share my online / last-seen status. False hides it (enforced server-side). */
+        presenceVisible: Boolean? = null,
     ): NetUser = withContext(Dispatchers.IO) {
         val payload = JSONObject()
         if (displayName != null) payload.put("display_name", displayName)
         if (avatarMediaId != null) payload.put("avatar_media_id", avatarMediaId)
         if (coverMediaId != null) payload.put("cover_media_id", coverMediaId)
         if (username != null) payload.put("username", username)
+        if (presenceVisible != null) payload.put("presence_visible", presenceVisible)
         val data = patchData("/api/v1/users/me", payload) as JSONObject
         NetUser(
             id = data.optString("id", ""),
@@ -952,6 +962,57 @@ object SyntraClient {
     }
 
     // -----------------------------------------------------------------------
+    // Community music — public, searchable tracks uploaded from a device.
+    //
+    // Not in the route table yet (these 404 today); wired ahead per the codebase's
+    // convention so publishing/searching begins working the instant the backend
+    // adds them. Contract proposed in pesan-untuk-backend.md. Until then the upload
+    // flow still produces a public audio URL (via uploadMediaFull) and keeps the
+    // clip locally — only cross-user discovery waits on these endpoints.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Publishes a trimmed clip (already uploaded via [uploadMediaFull], kind `audio`)
+     * as a public, searchable track. Returns the created track, including the public
+     * audio [MusicTrack.previewUrl] the backend resolves from [mediaId].
+     */
+    suspend fun postMusic(
+        mediaId: String,
+        title: String,
+        artist: String,
+        durationMs: Long,
+        coverMediaId: String? = null,
+    ): MusicTrack {
+        val payload = JSONObject()
+            .put("media_id", mediaId)
+            .put("title", title)
+            .put("artist", artist)
+            .put("duration_ms", durationMs)
+            .put("visibility", "public")
+        if (!coverMediaId.isNullOrBlank()) payload.put("cover_media_id", coverMediaId)
+        val data = postData("/api/v1/music", payload) as JSONObject
+        return data.toCommunityTrack() ?: MusicTrack(
+            id = data.optString("id"),
+            title = title,
+            artist = artist,
+            durationSec = (durationMs / 1000).toInt(),
+        )
+    }
+
+    /** The public community catalogue (browse rail). */
+    suspend fun getMusicFeed(limit: Int = 40): List<MusicTrack> =
+        (getData("/api/v1/music?limit=$limit") as JSONArray).mapObjects { it }.mapNotNull { it.toCommunityTrack() }
+
+    /** Searches the public community catalogue by title/artist. */
+    suspend fun searchMusic(query: String): List<MusicTrack> {
+        val enc = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+        return (getData("/api/v1/music/search?q=$enc") as JSONArray).mapObjects { it }.mapNotNull { it.toCommunityTrack() }
+    }
+
+    /** Deletes one of my own uploaded tracks (owner only). */
+    suspend fun deleteMusic(trackId: String) = delete("/api/v1/music/$trackId")
+
+    // -----------------------------------------------------------------------
     // WebSocket (api.md §9)
     // -----------------------------------------------------------------------
 
@@ -983,6 +1044,17 @@ object SyntraClient {
         wantConnection = false
         socket?.close(1000, "bye")
         socket = null
+    }
+
+    /**
+     * Drop and re-open the socket. Used after changing presence visibility: the server
+     * decides whether to mark me online at CONNECT time, so a fresh connection is what
+     * makes "status aktif = off" actually take effect.
+     */
+    fun reconnect() {
+        socket?.close(1000, "reconnect")
+        socket = null
+        connect()
     }
 
     private fun sendFrame(type: String, data: JSONObject? = null, ref: String? = null) {
@@ -1237,6 +1309,22 @@ private fun JSONObject.strOrNull(key: String): String? =
 
 private inline fun <T> JSONArray.mapObjects(block: (JSONObject) -> T): List<T> =
     (0 until length()).map { block(getJSONObject(it)) }
+
+/** Backend community-music shape → the app's provider-agnostic [MusicTrack]. */
+private fun JSONObject.toCommunityTrack(): MusicTrack? {
+    val url = optString("url", "").ifBlank { optString("audio_url", "") }
+    if (url.isBlank()) return null
+    return MusicTrack(
+        id = optString("id", url).ifBlank { url },
+        title = optString("title", "").ifBlank { "Tanpa judul" },
+        artist = optString("artist", "")
+            .ifBlank { optString("author_name", "") }
+            .ifBlank { "Komunitas" },
+        artworkUrl = optString("cover_url", "").ifBlank { null },
+        previewUrl = url,
+        durationSec = (optLong("duration_ms", 0) / 1000).toInt(),
+    )
+}
 
 private fun JSONObject.toConversation() = NetConversation(
     id = getString("id"),

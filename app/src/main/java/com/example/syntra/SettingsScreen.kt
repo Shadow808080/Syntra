@@ -231,10 +231,20 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                     Divider()
                     ToggleRow(
                         icon = Icons.Filled.Person,
-                        title = "Status online",
-                        subtitle = "Tampilkan titik hijau saat kamu aktif",
+                        title = "Status aktif",
+                        subtitle = "Tampilkan titik hijau & \"terakhir dilihat\" saat kamu aktif",
                         checked = showPresence,
-                        onChange = { showPresence = it; save(SettingsStore.SHOW_PRESENCE, it) },
+                        onChange = { on ->
+                            showPresence = on
+                            save(SettingsStore.SHOW_PRESENCE, on)
+                            // Enforced server-side: PATCH presence_visible, then reconnect
+                            // so the backend re-reads it and stops/starts broadcasting my
+                            // online status from the next connection.
+                            if (ApiConfig.ENABLED) scope.launch {
+                                runCatching { SyntraClient.updateProfile(presenceVisible = on) }
+                                runCatching { SyntraClient.reconnect() }
+                            }
+                        },
                     )
                     Divider()
                     NavRow(

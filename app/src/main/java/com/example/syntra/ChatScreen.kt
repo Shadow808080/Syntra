@@ -181,6 +181,7 @@ private data class StoryItem(
     val music: com.example.syntra.net.StoryMusic? = null,
 )
 
+@androidx.compose.runtime.Immutable
 private data class ActivePerson(
     val id: String,
     val name: String,
@@ -198,6 +199,11 @@ private data class ActivePerson(
 
 enum class Presence { NONE, ONLINE, TYPING }
 
+// @Immutable: every field is a `val` and a change produces a NEW instance (data
+// `copy`), never an in-place mutation. Without this the `gradient: List<Color>`
+// makes the compiler treat Conversation as unstable, so ConversationRow could
+// never skip and re-ran on every list recomposition — the main chat-list jank.
+@androidx.compose.runtime.Immutable
 data class Conversation(
     val id: String,
     val name: String,
@@ -1034,7 +1040,13 @@ fun ChatScreen(
                     }
                     item { Spacer(Modifier.height(4.dp)) }
                 }
-                itemsIndexed(visible, key = { _, convo -> convo.id }) { _, convo ->
+                itemsIndexed(
+                    visible,
+                    key = { _, convo -> convo.id },
+                    // All body rows share one layout type, so Compose reuses the same
+                    // node when recycling during a fling instead of rebuilding it.
+                    contentType = { _, _ -> "conversation" },
+                ) { _, convo ->
                     // The row carries its own even vertical margin (card style), so no
                     // extra spacer between items — that produced uneven gaps before.
                     ConversationRow(

@@ -46,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +64,7 @@ import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 
 // ---------------------------------------------------------------------------
@@ -245,15 +247,25 @@ fun GifPickerSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     // false = search existing GIFs, true = generate an animated-text GIF from [query].
     var genMode by remember { mutableStateOf(false) }
     val gifs = remember { mutableStateListOf<GifItem>() }
     var loading by remember { mutableStateOf(GifClient.configured) }
 
+    // Animate the sheet down THEN remove it. Just flipping the host flag while the
+    // sheet is at rest leaves it on screen (a Material3 quirk) — this is why it didn't
+    // disappear after sending. Run the send first, then close.
+    fun dismiss() {
+        scope.launch { sheetState.hide() }.invokeOnCompletion {
+            if (!sheetState.isVisible) onDismiss()
+        }
+    }
+
     val deviceLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
-    ) { uri -> if (uri != null) { onGifDevice(uri); onDismiss() } }
+    ) { uri -> if (uri != null) { onGifDevice(uri); dismiss() } }
 
     LaunchedEffect(query, genMode) {
         if (!GifClient.configured) { loading = false; return@LaunchedEffect }
@@ -385,7 +397,7 @@ fun GifPickerSheet(
                                 .clickable(
                                     indication = null,
                                     interactionSource = remember { MutableInteractionSource() },
-                                ) { onGif(gif.sendUrl); onDismiss() },
+                                ) { onGif(gif.sendUrl); dismiss() },
                         )
                     }
                 }

@@ -658,6 +658,10 @@ private fun DeleteReelDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
 // One reel page
 // ---------------------------------------------------------------------------
 
+// Shared once, not re-allocated per reel/recomposition: a coordinate-less vertical
+// gradient adapts to whatever size it's drawn at, so one instance fits every page.
+private val ReelBottomScrim = Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f)))
+
 @Composable
 private fun ReelPage(
     reel: NetReel,
@@ -737,9 +741,7 @@ private fun ReelPage(
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .height(260.dp)
-                .background(
-                    Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f))),
-                ),
+                .background(ReelBottomScrim),
         )
 
         Column(
@@ -772,7 +774,8 @@ private fun ReelPage(
             // Scrubber pill — drag to jump anywhere in the clip. Sits at the very
             // bottom, full width, and swells while dragging (modern short-video feel).
             ReelScrubber(
-                positionMs = posMs,
+                // Deferred read: posMs updates every frame but only the scrubber cares.
+                positionMs = { posMs },
                 durationMs = durMs,
                 onScrubStart = { scrubbing = true },
                 onScrub = { ms -> posMs = ms; seekReq = ms },
@@ -882,7 +885,11 @@ private fun ReelSettingsSheet(
  */
 @Composable
 private fun ReelScrubber(
-    positionMs: Int,
+    // A provider, not a plain Int: the playback position ticks many times a second.
+    // Reading it *inside* this composable (positionMs()) keeps that per-frame state
+    // read here, so only the scrubber recomposes — the parent ReelPage (and its
+    // video, caption, action rail, Modifier chains) no longer rebuild every tick.
+    positionMs: () -> Int,
     durationMs: Int,
     onScrubStart: () -> Unit,
     onScrub: (Int) -> Unit,
@@ -899,7 +906,7 @@ private fun ReelScrubber(
     // While the finger is down we drive the bar from the drag, not playback.
     var dragFrac by remember { mutableStateOf<Float?>(null) }
     val dragging = dragFrac != null
-    val frac = (dragFrac ?: (positionMs.toFloat() / durationMs)).coerceIn(0f, 1f)
+    val frac = (dragFrac ?: (positionMs().toFloat() / durationMs)).coerceIn(0f, 1f)
 
     val barHeight by animateDpAsState(if (dragging) 7.dp else 3.dp, label = "scrubH")
     val thumb by animateDpAsState(if (dragging) 16.dp else 0.dp, label = "scrubThumb")

@@ -273,3 +273,31 @@ endpoint-nya, app akan langsung beralih ke versi lintas-perangkat.
 - **Edit pesan** — app sudah pakai `PATCH /messages/{id}` + siaran `message.updated`
   (terima kasih, sudah jalan). Batas 10 detik diberlakukan di sisi app; kalau server
   mau menegakkan juga, silakan tolak edit yang lewat dari mis. 15 detik.
+
+## 🔴 12. Katalog musik komunitas — unggah lagu dari perangkat (publik & bisa dicari)
+
+App menambahkan alur **unggah lagu dari penyimpanan → potong (maks 10 menit, slider
+dari–sampai) → pratinjau → persetujuan → terbit**. Bagian potong + pratinjau +
+persetujuan + unggah file **sudah jalan penuh di sisi app**: klip dipotong &
+di-*re-encode* ke `.m4a/AAC`, lalu diunggah lewat `media/upload-url` **kind `audio`**
+(dapat URL publik). Yang belum ada hanyalah tempat mendaftarkan lagu agar **muncul di
+pencarian/browse orang lain**. Kode klien sudah **di-wire** (mengikuti pola Reels) dan
+akan langsung berfungsi begitu endpoint ini ada. Sampai itu, lagu tetap dapat URL
+publik dan tersimpan lokal, hanya belum lintas-pengguna.
+
+Yang kami butuhkan (**kemungkinan butuh migrasi SQL** — tabel `music_tracks`):
+
+```
+POST   /api/v1/music
+  body: { media_id, title, artist, duration_ms, cover_media_id?, visibility:"public" }
+  resp: { data: { id, title, artist, url, cover_url?, duration_ms, author_id, author_name } }
+
+GET    /api/v1/music?limit=40            → daftar publik terbaru (rail "Unggahan komunitas")
+GET    /api/v1/music/search?q=...        → cari berdasarkan judul/artis
+DELETE /api/v1/music/{id}                → hapus lagu sendiri (pemilik saja)
+```
+
+Catatan parsing app: setiap item dibaca dari `url` (atau `audio_url`), `title`,
+`artist` (fallback `author_name`), `cover_url`, dan `duration_ms`. Idealnya siarkan
+juga event WS `music.new { id, author_id }` supaya rail komunitas ikut hidup tanpa
+refresh (opsional, seperti `reel.new`).

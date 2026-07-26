@@ -1,0 +1,19 @@
+# Baseline profile — AOT-compiles the app's hot paths at install time so the very
+# first launch and the first scroll of every list are already JIT-warm (no dropped
+# frames while ART interprets/compiles on the fly).
+#
+# Scope: only our OWN package. Compose, AndroidX and the other libraries already
+# ship their own baseline profiles inside their artifacts, so duplicating them here
+# would only bloat the profile. The `**`/`(**)` wildcards are expanded at build
+# time by AGP's expandReleaseArtProfileWildcards task.
+#
+# Flags: H = Hot, S = Startup, P = Post-startup. Marking the app package H/S/P is a
+# safe, well-worn default for a single-module app; refine later with a macrobench
+# run on a device if you want a measured profile.
+HSPLcom/example/syntra/**->**(**)**
+HSPLcom/example/syntra/net/**->**(**)**
+HSPLcom/example/syntra/ui/**->**(**)**
+HSPLcom/example/syntra/ui/theme/**->**(**)**
+
+# Keep the classes themselves resident too (class-load on the startup path).
+Lcom/example/syntra/**;

@@ -19,9 +19,20 @@ android {
 
     buildTypes {
         release {
+            // R8: shrink + optimize + obfuscate the release build. The biggest
+            // single runtime win — smaller & faster code, less GC pressure — and
+            // resource shrinking trims the APK. Keep-rules live in proguard-rules.pro
+            // (the app parses JSON by hand, so only native/JNI libs need keeping).
+            // MUST be smoke-tested on a device release build before shipping.
             optimization {
-                enable = false
+                enable = true
             }
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
     compileOptions {
@@ -48,6 +59,10 @@ dependencies {
     implementation(libs.zxing.core)
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.fragment)
+    // Installs the bundled baseline profile (src/main/baseline-prof.txt) at first
+    // run on devices/installers that don't do it automatically, so the hot app
+    // paths are AOT-compiled from the start — smoother scrolling & faster launch.
+    implementation(libs.androidx.profileinstaller)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.ui.graphics)

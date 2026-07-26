@@ -600,7 +600,16 @@ fun ChatDetailScreen(
                                 (it.media == null) == (incoming.media == null)
                         }
                         if (pending >= 0) {
-                            messages[pending] = incoming
+                            // Keep the optimistic row's already-decoded LOCAL file rather
+                            // than the broadcast's remote URL — otherwise the same swap makes
+                            // a GIF/sticker flash black and jump size on reconcile. Adopt the
+                            // server id/time via [incoming]; the bucket URL loads on next open.
+                            val localMedia = messages[pending].media
+                            messages[pending] = if (!localMedia.isNullOrBlank() && !localMedia.startsWith("http")) {
+                                incoming.copy(media = localMedia)
+                            } else {
+                                incoming
+                            }
                             return
                         }
                     }
@@ -814,14 +823,16 @@ fun ChatDetailScreen(
                         messages.removeAt(i)
                     } else {
                         val authoritative = sent.toUi()
-                        // The immediate send response may not have resolved the attachment
-                        // URL yet — keep the local preview so the bubble isn't blank until
-                        // a refresh; else swap to the resolved bucket URL.
-                        messages[i] = if (authoritative.media.isNullOrBlank()) {
-                            authoritative.copy(media = url.ifBlank { localPath })
-                        } else {
-                            authoritative
-                        }
+                        // Keep showing the already-decoded LOCAL file for this session
+                        // instead of swapping in the just-uploaded bucket URL. Swapping the
+                        // model forces Coil to re-fetch over the network: the bubble flashes
+                        // black and — for a GIF/sticker, whose height comes from the image —
+                        // briefly collapses to the wrong size until the download lands, so it
+                        // looked misplaced until a refresh. The authoritative id/time still
+                        // come from the server; the bucket URL is picked up on the next open.
+                        messages[i] = authoritative.copy(
+                            media = localPath ?: authoritative.media ?: url.ifBlank { null },
+                        )
                     }
                 }
             }.onFailure {
@@ -1642,7 +1653,7 @@ private fun MessageActionsDialog(
                 MessageAction(if (isTranslated) "Sembunyikan terjemahan" else "Terjemahkan", NexusTextPrimary, onTranslate)
             }
             if (!msg.isDeleted) {
-                MessageAction(if (isPinned) "Lepas sematan" else "Sematkan pesan", NexusTextPrimary, onPin)
+                MessageAction(if (isPinned) "Batalkan semat" else "Sematkan pesan", NexusTextPrimary, onPin)
             }
             if (msg.fromMe && !msg.isDeleted) {
                 MessageAction("Hapus untuk semua orang", Color(0xFFFF5D5D), onDeleteForEveryone)
