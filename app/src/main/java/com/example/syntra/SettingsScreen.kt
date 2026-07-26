@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Fingerprint
@@ -102,9 +103,18 @@ object SettingsStore {
     const val AUTO_PLAY_VIDEO = "autoplay_video"
     const val LOUD_SPEAKER = "loud_speaker"
     const val AUTO_SCROLL_REELS = "autoscroll_reels"
+
+    // Auto-download per media kind inside chats. When a kind is off, the bubble shows
+    // a tap-to-download placeholder instead of fetching straight away — the user
+    // decides what spends their data.
+    const val AUTO_DL_PHOTO = "auto_dl_photo"
+    const val AUTO_DL_VIDEO = "auto_dl_video"
+    const val AUTO_DL_STICKER = "auto_dl_sticker"
+    const val AUTO_DL_GIF = "auto_dl_gif"
+    const val AUTO_DL_VOICE = "auto_dl_voice"
 }
 
-private enum class SettingsPage { PROFILE, QR, SECURITY, APP_LOCK, BLOCKED, THEME, STORAGE }
+private enum class SettingsPage { PROFILE, QR, SECURITY, APP_LOCK, BLOCKED, THEME, STORAGE, AUTO_DOWNLOAD }
 
 @Composable
 fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
@@ -136,6 +146,7 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
             SettingsPage.BLOCKED -> BlockedContactsScreen { open = null }
             SettingsPage.THEME -> ThemeScreen { open = null }
             SettingsPage.STORAGE -> StorageScreen { open = null }
+            SettingsPage.AUTO_DOWNLOAD -> AutoDownloadScreen { open = null }
         }
         return
     }
@@ -305,6 +316,14 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                     Divider()
                     NavRow(Icons.Filled.DarkMode, "Tema", AppTheme.current.label) {
                         open = SettingsPage.THEME
+                    }
+                    Divider()
+                    NavRow(
+                        Icons.Filled.CloudDownload,
+                        "Unduh otomatis",
+                        "Pilih media yang diunduh sendiri di obrolan",
+                    ) {
+                        open = SettingsPage.AUTO_DOWNLOAD
                     }
                     Divider()
                     NavRow(Icons.Filled.Storage, "Penyimpanan", "Kelola cache media") {

@@ -64,6 +64,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
@@ -131,6 +132,7 @@ import com.example.syntra.net.SocketListener
 import com.example.syntra.net.MessageCache
 import com.example.syntra.net.PinStore
 import com.example.syntra.net.Translate
+import com.example.syntra.net.MediaAutoDownload
 import com.example.syntra.net.ViewOnceStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
@@ -2060,7 +2062,41 @@ private fun ChatMediaImage(
     contentDescription: String,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
+    /**
+     * When false the media is NOT fetched: a tap-to-download placeholder is shown
+     * instead (Settings → Unduh otomatis). Tapping it downloads just this one.
+     */
+    autoDownload: Boolean = true,
+    label: String = "Foto",
 ) {
+    val context = LocalContext.current
+    // Remembered per media, so a manual download sticks while the chat is open.
+    var manual by remember(model) { mutableStateOf(false) }
+    val local = model is String && !model.startsWith("http")
+    if (!autoDownload && !manual && !local) {
+        Box(
+            modifier = modifier
+                .background(NexusSurface)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { manual = true },
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    Icons.Filled.Download,
+                    contentDescription = "Unduh $label",
+                    tint = NexusTextPrimary,
+                    modifier = Modifier.size(28.dp),
+                )
+                Spacer(Modifier.height(6.dp))
+                Text("Ketuk untuk unduh", color = NexusTextSecondary, fontSize = 12.sp)
+                Text(label, color = NexusTextSecondary.copy(alpha = 0.7f), fontSize = 11.sp)
+            }
+        }
+        return
+    }
     SubcomposeAsyncImage(
         model = model,
         contentDescription = contentDescription,
@@ -2173,6 +2209,7 @@ private fun MessageBubble(
     viewOnceOpened: Boolean = false,
     onOpenViewOnce: () -> Unit = {},
 ) {
+    val context = LocalContext.current
     // Stickers float free — no bubble background behind a big emoji.
     val isSticker = msg.sticker != null
     // A photo/GIF with no caption floats free too: no coloured bubble behind the
@@ -2338,6 +2375,8 @@ private fun MessageBubble(
                             model = media,
                             contentDescription = "GIF",
                             contentScale = ContentScale.Fit,
+                            autoDownload = MediaAutoDownload.gif(context),
+                            label = "GIF",
                             modifier = Modifier
                                 .size(width = 220.dp, height = 220.dp)
                                 .clip(RoundedCornerShape(12.dp))
@@ -2350,6 +2389,8 @@ private fun MessageBubble(
                         model = media,
                         contentDescription = "Foto",
                         contentScale = ContentScale.Crop,
+                        autoDownload = MediaAutoDownload.allowed(context, MediaAutoDownload.kindOf(media)),
+                        label = if (MediaAutoDownload.kindOf(media) == MediaAutoDownload.Kind.VIDEO) "Video" else "Foto",
                         modifier = Modifier
                             .size(width = 220.dp, height = 260.dp)
                             .clip(RoundedCornerShape(12.dp))

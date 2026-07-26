@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
+import com.example.syntra.net.MediaAutoDownload
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.AppTheme
 import com.example.syntra.ui.theme.NexusAccent
@@ -127,6 +128,77 @@ fun SettingsSubScreen(
             Text(title, color = NexusTextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
         }
         content()
+    }
+}
+
+/**
+ * Auto-download settings: which media kinds fetch themselves inside a chat.
+ *
+ * A kind that is OFF is not downloaded when the message arrives — the bubble shows a
+ * tap-to-download placeholder instead, so the user (not the app) decides what spends
+ * their data. Everything defaults to ON, which is the behaviour people expect.
+ */
+@Composable
+fun AutoDownloadScreen(onClose: () -> Unit) {
+    val context = LocalContext.current
+    var photo by remember { mutableStateOf(MediaAutoDownload.photo(context)) }
+    var video by remember { mutableStateOf(MediaAutoDownload.video(context)) }
+    var sticker by remember { mutableStateOf(MediaAutoDownload.sticker(context)) }
+    var gif by remember { mutableStateOf(MediaAutoDownload.gif(context)) }
+    var voice by remember { mutableStateOf(MediaAutoDownload.voice(context)) }
+
+    SettingsSubScreen("Unduh otomatis", onClose) {
+        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+            Note(
+                "Media yang dimatikan tidak diunduh sendiri. Di obrolan ia muncul " +
+                    "sebagai tombol — ketuk untuk mengunduhnya saat kamu mau.",
+            )
+            Card {
+                AutoDownloadRow("Foto", photo) {
+                    photo = it; SettingsStore.setBool(context, SettingsStore.AUTO_DL_PHOTO, it)
+                }
+                AutoDownloadRow("Video", video) {
+                    video = it; SettingsStore.setBool(context, SettingsStore.AUTO_DL_VIDEO, it)
+                }
+                AutoDownloadRow("Stiker", sticker) {
+                    sticker = it; SettingsStore.setBool(context, SettingsStore.AUTO_DL_STICKER, it)
+                }
+                AutoDownloadRow("GIF", gif) {
+                    gif = it; SettingsStore.setBool(context, SettingsStore.AUTO_DL_GIF, it)
+                }
+                AutoDownloadRow("Pesan suara", voice) {
+                    voice = it; SettingsStore.setBool(context, SettingsStore.AUTO_DL_VOICE, it)
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun AutoDownloadRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+            ) { onChange(!checked) }
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = NexusTextPrimary, fontSize = 15.sp, modifier = Modifier.weight(1f))
+        androidx.compose.material3.Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            colors = androidx.compose.material3.SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = NexusAccent,
+                uncheckedThumbColor = Color.White,
+                uncheckedTrackColor = Color(0xFF3A3A44),
+                uncheckedBorderColor = Color.Transparent,
+            ),
+        )
     }
 }
 
