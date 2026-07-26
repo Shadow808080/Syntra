@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -126,6 +127,153 @@ fun ChatThemeDialog(current: ChatTheme, onDismiss: () -> Unit, onPick: (ChatThem
                     }
                     repeat(3 - rowThemes.size) { Spacer(Modifier.weight(1f)) }
                 }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chat wallpaper — a per-conversation background, stored on the device.
+//
+// Two sources: the app's own set (hosted in our public bucket, identical for every
+// user) and anything the user picks from their gallery (a content:// uri we hold a
+// persisted read grant for). Both are just "a model Coil can load", so the renderer
+// doesn't care which one it got.
+// ---------------------------------------------------------------------------
+
+/** One built-in wallpaper: a display name and the public image URL. */
+data class ChatWallpaper(val name: String, val url: String)
+
+private const val WALLPAPER_BASE =
+    "https://tqcfmueshhpuqjuqgafi.supabase.co/storage/v1/object/public/media/wallpapers"
+
+/**
+ * The wallpapers Syntra ships to everyone. Drawn for this app (not stock imagery),
+ * deliberately low-contrast so message bubbles stay readable on top.
+ */
+val chatWallpapers = listOf(
+    ChatWallpaper("Doodle", "$WALLPAPER_BASE/syntra_doodles.png"),
+    ChatWallpaper("Aurora", "$WALLPAPER_BASE/syntra_aurora.png"),
+    ChatWallpaper("Bubble", "$WALLPAPER_BASE/syntra_bubbles.png"),
+    ChatWallpaper("Bintang", "$WALLPAPER_BASE/syntra_stars.png"),
+    ChatWallpaper("Ombak", "$WALLPAPER_BASE/syntra_waves.png"),
+    ChatWallpaper("Blossom", "$WALLPAPER_BASE/syntra_blossom.png"),
+)
+
+object ChatWallpaperStore {
+    private const val PREFS = "syntra_settings"
+    private fun key(id: String) = "chat_wallpaper_$id"
+
+    /** The chosen wallpaper (built-in URL or a local uri), or null for none. */
+    fun get(context: Context, conversationId: String): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(key(conversationId), null)
+            ?.takeIf { it.isNotBlank() }
+
+    fun set(context: Context, conversationId: String, model: String?) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .apply { if (model.isNullOrBlank()) remove(key(conversationId)) else putString(key(conversationId), model) }
+            .apply()
+    }
+}
+
+/**
+ * Wallpaper picker: "none", the app's own set, and a gallery entry. [onPickLocal]
+ * opens the device picker (handled by the caller, which owns the launcher).
+ */
+@Composable
+fun ChatWallpaperDialog(
+    current: String?,
+    onDismiss: () -> Unit,
+    onPick: (String?) -> Unit,
+    onPickLocal: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .padding(22.dp),
+        ) {
+            Text("Latar obrolan", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Pilih dari koleksi Syntra, atau ambil gambar dari galerimu. Berlaku untuk obrolan ini.",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+            )
+            Spacer(Modifier.height(18.dp))
+
+            (listOf<ChatWallpaper?>(null) + chatWallpapers).chunked(3).forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    row.forEach { wp ->
+                        val model = wp?.url
+                        val selected = current == model
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) { onPick(model) },
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(96.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF12121A))
+                                    .then(
+                                        if (selected) Modifier.border(2.5.dp, Color.White, RoundedCornerShape(12.dp))
+                                        else Modifier,
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                if (wp != null) {
+                                    coil.compose.AsyncImage(
+                                        model = wp.url,
+                                        contentDescription = wp.name,
+                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)),
+                                    )
+                                } else {
+                                    Text("Tanpa\nlatar", color = NexusTextSecondary, fontSize = 11.sp)
+                                }
+                                if (selected) {
+                                    Icon(
+                                        Icons.Filled.Done, null,
+                                        tint = Color.White, modifier = Modifier.size(22.dp),
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text(wp?.name ?: "Polos", color = NexusTextSecondary, fontSize = 11.sp)
+                        }
+                    }
+                    repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(50))
+                    .background(Color(0xFF2A2A34))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onPickLocal,
+                    )
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("Pilih dari galeri", color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
         }
     }

@@ -95,6 +95,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.paint
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -416,6 +417,9 @@ fun ChatDetailScreen(
     var showReport by remember(conversation) { mutableStateOf(false) }
     var confirmBlock by remember(conversation) { mutableStateOf(false) }
     var showChatTheme by remember(conversation) { mutableStateOf(false) }
+    var showWallpaper by remember(conversation) { mutableStateOf(false) }
+    // Per-conversation chat background: a built-in URL, a local content:// uri, or null.
+    var wallpaper by remember(conversation) { mutableStateOf(ChatWallpaperStore.get(context, conversation.id)) }
     var showProfile by remember(conversation) { mutableStateOf(false) }
     var chatTheme by remember(conversation) { mutableStateOf(ChatThemeStore.get(context, conversation.id)) }
 
@@ -898,6 +902,23 @@ fun ChatDetailScreen(
         }
     }
 
+    // Wallpaper from the gallery. The read grant is persisted so the background
+    // still renders after a restart — without it the uri goes dead and the chat
+    // would silently fall back to plain.
+    val wallpaperPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            wallpaper = uri.toString()
+            ChatWallpaperStore.set(context, conversation.id, uri.toString())
+        }
+    }
+
     fun sendSticker(emoji: String) {
         val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
         messages.add(Message(ref, "", fromMe = true, time = "now", sticker = emoji))
@@ -994,6 +1015,19 @@ fun ChatDetailScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(NexusBackground)
+            // Chat wallpaper, painted BEHIND everything in this screen (built-in URL or
+            // a local uri — Coil loads either). A scrim on top keeps message bubbles
+            // and text readable over a busy or bright picture.
+            .then(
+                wallpaper?.let { model ->
+                    Modifier
+                        .paint(
+                            painter = coil.compose.rememberAsyncImagePainter(model),
+                            contentScale = ContentScale.Crop,
+                        )
+                        .background(Color.Black.copy(alpha = 0.28f))
+                } ?: Modifier,
+            )
             // This screen is drawn as a full-screen overlay ON TOP of the chat list.
             // A bare background does NOT consume touches in Compose, so a tap on any
             // empty gap here would fall through to the list behind and open a DIFFERENT
@@ -1018,6 +1052,7 @@ fun ChatDetailScreen(
                     "Bersihkan obrolan" -> confirmClear = true
                     "Grup Baru" -> onNewGroup()
                     "Tema obrolan" -> showChatTheme = true
+                    "Latar obrolan" -> showWallpaper = true
                 }
             },
         )
@@ -1530,6 +1565,24 @@ fun ChatDetailScreen(
         )
     }
 
+    if (showWallpaper) {
+        ChatWallpaperDialog(
+            current = wallpaper,
+            onDismiss = { showWallpaper = false },
+            onPick = {
+                wallpaper = it
+                ChatWallpaperStore.set(context, conversation.id, it)
+                showWallpaper = false
+            },
+            onPickLocal = {
+                showWallpaper = false
+                wallpaperPicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            },
+        )
+    }
+
     // Fullscreen photo viewer — tap a chat photo to see it at screen size.
     fullscreenImage?.let { url ->
         androidx.activity.compose.BackHandler { fullscreenImage = null }
@@ -1839,6 +1892,7 @@ private fun DetailTopBar(
                     "Bersihkan obrolan" to false,
                     "Grup Baru" to false,
                     "Tema obrolan" to false,
+                    "Latar obrolan" to false,
                 ).forEach { (label, danger) ->
                     DropdownMenuItem(
                         text = {
