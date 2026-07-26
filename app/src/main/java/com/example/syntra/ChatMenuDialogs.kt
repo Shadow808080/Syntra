@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -205,12 +206,44 @@ fun ChatWallpaperDialog(
             )
             Spacer(Modifier.height(18.dp))
 
-            (listOf<ChatWallpaper?>(null) + chatWallpapers).chunked(3).forEach { row ->
+            // Tiles: "no wallpaper", the built-in set, then "from gallery" — all the
+            // same square shape so the grid reads as one row of choices.
+            val tiles: List<ChatWallpaper?> = listOf(null) + chatWallpapers + listOf(GALLERY_TILE)
+            tiles.chunked(3).forEach { row ->
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     row.forEach { wp ->
+                        if (wp === GALLERY_TILE) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        onClick = onPickLocal,
+                                    ),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(96.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(Color(0xFF2A2A34)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Add, null,
+                                        tint = NexusTextPrimary, modifier = Modifier.size(26.dp),
+                                    )
+                                }
+                                Spacer(Modifier.height(6.dp))
+                                Text("Galeri", color = NexusTextSecondary, fontSize = 11.sp)
+                            }
+                            return@forEach
+                        }
                         val model = wp?.url
                         val selected = current == model
                         Column(
@@ -258,26 +291,12 @@ fun ChatWallpaperDialog(
                     repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
-
-            Spacer(Modifier.height(14.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(50))
-                    .background(Color(0xFF2A2A34))
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                        onClick = onPickLocal,
-                    )
-                    .padding(vertical = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("Pilih dari galeri", color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            }
         }
     }
 }
+
+/** Sentinel tile that opens the device gallery instead of selecting a wallpaper. */
+private val GALLERY_TILE = ChatWallpaper("Galeri", "")
 
 // ---------------------------------------------------------------------------
 // Report + generic confirm

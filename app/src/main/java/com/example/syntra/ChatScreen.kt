@@ -1705,17 +1705,17 @@ private fun ConversationRow(
     val typing = convo.presence == Presence.TYPING
 
     // A view-once photo previews as "[Foto 1x]" until its single view is spent, then
-    // as "[sudah dibuka]" — matching the bubble inside the chat.
+    // as "[sudah dibuka]" — matching the bubble inside the chat. Read straight from the
+    // (observable) store, NOT via remember, so it flips the moment the photo is opened
+    // — on the recipient's device, and on the sender's when the peer opens it.
     val context = LocalContext.current
-    val preview = remember(convo.message, convo.lastMessageId) {
-        val id = convo.lastMessageId
-        if (convo.message == VIEW_ONCE_PREVIEW && id != null &&
-            com.example.syntra.net.ViewOnceStore.isOpened(context, id)
-        ) {
-            VIEW_ONCE_OPENED_PREVIEW
-        } else {
-            convo.message
-        }
+    val lastId = convo.lastMessageId
+    val preview = if (convo.message == VIEW_ONCE_PREVIEW && lastId != null &&
+        com.example.syntra.net.ViewOnceStore.isSpent(context, lastId, convo.sent)
+    ) {
+        VIEW_ONCE_OPENED_PREVIEW
+    } else {
+        convo.message
     }
 
     // Flat, plain rows — no card fill, no border. Only a picked row (selection mode)

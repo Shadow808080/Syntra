@@ -184,6 +184,17 @@ private data class Message(
 private const val STORY_REPLY_MARKER = "STORYREPLY"
 /** Body prefix marking a view-once ("sekali lihat") photo: "VIEWONCE<0x1>caption". */
 private const val VIEW_ONCE_MARKER = "VIEWONCE"
+/**
+ * Reserved "reaction" the recipient writes when they open a view-once photo.
+ *
+ * There is no server-side view-once state yet, but reactions ARE persisted and
+ * broadcast live to the conversation — so this rides that existing channel to tell
+ * the sender "your photo has been opened", and still works after a restart because
+ * the reaction is stored. It is never shown as a real reaction: both the live event
+ * and the initial reactions fetch filter it out.
+ */
+internal const val VIEW_ONCE_OPENED_MARK = "vo"
+
 /** Body prefix marking a sticker message: "STICKER<0x1>😀". */
 private const val STICKER_MARKER = "STICKER"
 private val STORY_REPLY_SEP = ''
@@ -529,7 +540,22 @@ fun ChatDetailScreen(
                 if (page.size < MESSAGE_PAGE_SIZE) hasMore = false
                 // Load existing reactions for the visible messages in one call.
                 runCatching { SyntraClient.getReactions(conversation.id, history.map { it.id }) }
-                    .getOrNull()?.let { reactions.clear(); reactions.putAll(it) }
+                    .getOrNull()?.let { loaded ->
+                        // Pull the view-once "opened" marks out of the reaction data:
+                        // they drive the "sudah dibuka" state (so it survives a restart)
+                        // and must never render as an actual reaction.
+                        val real = HashMap<String, Map<String, String>>()
+                        loaded.forEach { (msgId, byUser) ->
+                            byUser.forEach { (uid, emoji) ->
+                                if (emoji == VIEW_ONCE_OPENED_MARK && uid != SyntraClient.myUserId) {
+                                    ViewOnceStore.markPeerOpened(context, msgId)
+                                }
+                            }
+                            val cleaned = byUser.filterValues { it != VIEW_ONCE_OPENED_MARK }
+                            if (cleaned.isNotEmpty()) real[msgId] = cleaned
+                        }
+                        reactions.clear(); reactions.putAll(real)
+                    }
             }.onFailure {
                 // Offline / error is fine when we already showed the cache.
                 if (cached.isEmpty()) {
@@ -699,6 +725,12 @@ fun ChatDetailScreen(
                     emoji: String,
                 ) {
                     if (conversationId != conversation.id) return
+                    // Not a real reaction: the peer opened a view-once photo I sent.
+                    // Flip my bubble to "sudah dibuka" and keep it out of the reaction row.
+                    if (emoji == VIEW_ONCE_OPENED_MARK) {
+                        if (userId != SyntraClient.myUserId) ViewOnceStore.markPeerOpened(context, messageId)
+                        return
+                    }
                     val current = reactions[messageId].orEmpty()
                     reactions[messageId] =
                         if (emoji.isBlank()) current - userId else current + (userId to emoji)
@@ -1143,15 +1175,20 @@ fun ChatDetailScreen(
                     onLongPress = { pendingMessage = msg },
                     onImageClick = { fullscreenImage = it },
                     onReply = { replyingTo = msg },
-                    viewOnceOpened = msg.viewOnce &&
-                        (viewOnceOpened.contains(msg.id) || ViewOnceStore.isOpened(context, msg.id)),
+                    // Spent from THIS side's point of view: for a received photo that's
+                    // my own open; for one I sent it's the recipient having opened it
+                    // (learned live). So the sender is never locked out of their own photo.
+                    viewOnceOpened = msg.viewOnce && ViewOnceStore.isSpent(context, msg.id, msg.fromMe),
                     onOpenViewOnce = {
-                        // The SENDER can always re-view their own view-once photo —
-                        // opening it never marks it "sudah dibuka" for them. Only when
-                        // the recipient opens it is the single view consumed.
-                        if (!msg.fromMe && !viewOnceOpened.contains(msg.id)) {
-                            ViewOnceStore.markOpened(context, msg.id)
-                            viewOnceOpened.add(msg.id)
+                        if (!msg.fromMe) {
+                            // Recipient side: consume the single view, and tell the sender
+                            // so their bubble flips to "sudah dibuka" too.
+                            if (!ViewOnceStore.isOpened(context, msg.id)) {
+                                ViewOnceStore.markOpened(context, msg.id)
+                                SyntraClient.fireAndForget {
+                                    SyntraClient.reactToMessage(msg.id, VIEW_ONCE_OPENED_MARK)
+                                }
+                            }
                         }
                         msg.media?.let { fullscreenImage = it }
                     },
@@ -1979,13 +2016,23 @@ private fun ViewOnceBubble(opened: Boolean, textColor: Color, onOpen: () -> Unit
     ) {
         Box(
             modifier = Modifier
-                .size(20.dp)
-                .border(1.5.dp, textColor.copy(alpha = 0.85f), CircleShape),
+                .size(15.dp)
+                .border(1.dp, textColor.copy(alpha = 0.85f), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Text("1", color = textColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "1",
+                color = textColor,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                // No font padding, so the digit sits dead-centre in the small ring.
+                style = androidx.compose.ui.text.TextStyle(
+                    platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false),
+                    lineHeight = 9.sp,
+                ),
+            )
         }
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(7.dp))
         Text("Foto", color = textColor, fontSize = 14.sp)
     }
 }
