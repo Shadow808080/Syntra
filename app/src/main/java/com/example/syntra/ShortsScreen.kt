@@ -73,10 +73,12 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
-import androidx.compose.material.icons.rounded.ModeComment
+import androidx.compose.material.icons.automirrored.rounded.Reply
+import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.rounded.BookmarkBorder
+import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -347,6 +349,24 @@ fun ShortsScreen(
         scope.launch { runCatching { SyntraClient.likeReel(reel.id, now) } }
     }
 
+    // Bookmark a reel. Optimistic like the like-toggle: the icon flips instantly and
+    // the server call follows; saved reels show up in the profile's "saved" grid.
+    fun toggleSave(reel: NetReel) {
+        val idx = reels.indexOfFirst { it.id == reel.id }
+        if (idx < 0) return
+        val now = !reel.isSaved
+        reels[idx] = reel.copy(isSaved = now)
+        scope.launch {
+            runCatching { SyntraClient.saveReel(reel.id, now) }
+                .onFailure {
+                    // Put it back if the server refused, so the icon never lies.
+                    val i = reels.indexOfFirst { r -> r.id == reel.id }
+                    if (i >= 0) reels[i] = reels[i].copy(isSaved = !now)
+                }
+        }
+        Toast.makeText(context, if (now) "Disimpan" else "Dihapus dari simpanan", Toast.LENGTH_SHORT).show()
+    }
+
     // Hide the host's bottom bar for the whole add-reels flow (trim + details).
     // Hide the bottom bar + lock tab-swipe while the add-reels flow OR a profile is
     // open, so the profile is truly full-screen (not covered by the nav bar).
@@ -478,6 +498,7 @@ fun ShortsScreen(
                             onDelete = null,
                             onLike = { toggleLike(reel) },
                             onComment = { commentsFor = reel },
+                            onSave = { toggleSave(reel) },
                             onShare = {
                                 Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show()
                             },
@@ -675,6 +696,7 @@ private fun ReelPage(
     active: Boolean,
     onLike: () -> Unit,
     onComment: () -> Unit,
+    onSave: () -> Unit = {},
     onShare: () -> Unit,
     /** Non-null only when the signed-in user owns this reel. */
     onDelete: (() -> Unit)? = null,
@@ -772,6 +794,7 @@ private fun ReelPage(
                     reel = reel,
                     onLike = onLike,
                     onComment = onComment,
+                    onSave = onSave,
                     onShare = onShare,
                     onDelete = onDelete,
                     onOpenProfile = onOpenProfile,
@@ -1205,6 +1228,20 @@ fun ReelViewer(
         items[idx] = reel.copy(isLiked = now, likeCount = (reel.likeCount + if (now) 1 else -1).coerceAtLeast(0))
         scope.launch { runCatching { SyntraClient.likeReel(reel.id, now) } }
     }
+    fun toggleSave(reel: NetReel) {
+        val idx = items.indexOfFirst { it.id == reel.id }
+        if (idx < 0) return
+        val now = !reel.isSaved
+        items[idx] = reel.copy(isSaved = now)
+        scope.launch {
+            runCatching { SyntraClient.saveReel(reel.id, now) }
+                .onFailure {
+                    val i = items.indexOfFirst { r -> r.id == reel.id }
+                    if (i >= 0) items[i] = items[i].copy(isSaved = !now)
+                }
+        }
+        Toast.makeText(context, if (now) "Disimpan" else "Dihapus dari simpanan", Toast.LENGTH_SHORT).show()
+    }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         VerticalPager(state = pager, beyondViewportPageCount = 0, modifier = Modifier.fillMaxSize()) { page ->
@@ -1214,6 +1251,7 @@ fun ReelViewer(
                 active = page == pager.currentPage,
                 onLike = { toggleLike(reel) },
                 onComment = { commentsFor = reel },
+                onSave = { toggleSave(reel) },
                 onShare = { Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show() },
                 autoScroll = autoScroll,
                 onVideoEnded = {
@@ -1402,6 +1440,7 @@ private fun ReelActions(
     reel: NetReel,
     onLike: () -> Unit,
     onComment: () -> Unit,
+    onSave: () -> Unit = {},
     onShare: () -> Unit,
     onDelete: (() -> Unit)? = null,
     onOpenProfile: () -> Unit = {},
@@ -1474,13 +1513,21 @@ private fun ReelActions(
             onClick = onLike,
         )
         RailItem(
-            icon = Icons.Rounded.ModeComment,
+            icon = Icons.Rounded.ChatBubbleOutline,
             tint = Color.White,
             label = compactCount(reel.commentCount),
             onClick = onComment,
         )
+        // Save (bookmark) — fills in once saved; the reel then shows up in the
+        // profile's "disimpan" grid.
         RailItem(
-            icon = Icons.Rounded.Send,
+            icon = if (reel.isSaved) Icons.Rounded.Bookmark else Icons.Rounded.BookmarkBorder,
+            tint = if (reel.isSaved) Color(0xFFFFD166) else Color.White,
+            label = "Simpan",
+            onClick = onSave,
+        )
+        RailItem(
+            icon = Icons.AutoMirrored.Rounded.Reply,
             tint = Color.White,
             label = "Bagikan",
             onClick = onShare,
@@ -1568,7 +1615,7 @@ private fun RailItem(icon: ImageVector, tint: Color, label: String, onClick: () 
             contentDescription = label,
             tint = tint,
             modifier = Modifier
-                .size(27.dp)
+                .size(24.dp)
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
