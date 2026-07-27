@@ -1074,6 +1074,21 @@ fun ChatScreen(
                     when (label) {
                         "New group" -> showNewGroup = true
                         "Settings" -> showSettings = true
+                        "Tandai sudah dibaca" -> {
+                            picked.forEach { convo ->
+                                val idx = chats.indexOfFirst { it.id == convo.id }
+                                if (idx >= 0 && chats[idx].unread > 0) {
+                                    chats[idx] = chats[idx].copy(unread = 0)
+                                }
+                                // Tell the server too (read up to the last message), so
+                                // the badge stays cleared after the next sync.
+                                val lastId = convo.lastMessageId
+                                if (ApiConfig.ENABLED && !lastId.isNullOrBlank()) {
+                                    SyntraClient.fireAndForget { SyntraClient.messageRead(convo.id, lastId) }
+                                }
+                            }
+                            selection.clear()
+                        }
                         "Arsipkan" -> {
                             val toArchive = picked.none { it.id in archivedIds }
                             ChatFlags.setArchived(context, selection.toList(), toArchive)
@@ -1553,7 +1568,7 @@ private fun NexusHeader(
                 var menuOpen by remember { mutableStateOf(false) }
                 HeaderIcon(Icons.Filled.MoreVert, "Aksi chat") { menuOpen = true }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    listOf("Arsipkan", "Sematkan", "Hapus percakapan", "Blokir").forEach { label ->
+                    listOf("Tandai sudah dibaca", "Arsipkan", "Sematkan", "Hapus percakapan", "Blokir").forEach { label ->
                         DropdownMenuItem(
                             text = {
                                 Text(
