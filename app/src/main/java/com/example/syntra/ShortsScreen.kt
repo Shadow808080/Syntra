@@ -150,6 +150,7 @@ import com.example.syntra.net.NetReel
 import com.example.syntra.net.NetReelComment
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
+import com.example.syntra.net.UploadCenter
 import com.example.syntra.net.BlockMask
 import com.example.syntra.net.BlockStore
 import com.example.syntra.net.NotInterestedStore
@@ -158,6 +159,8 @@ import com.example.syntra.net.ReelCache
 import com.example.syntra.net.ReelDownloader
 import com.example.syntra.net.ShortsFeedCache
 import com.example.syntra.net.Translate
+import com.example.syntra.ui.theme.NexusStroke
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
@@ -235,7 +238,8 @@ fun ShortsScreen(
             .collect { ShortsFeedCache.persist(context, it) }
     }
     var refreshing by remember { mutableStateOf(false) }
-    var posting by remember { mutableStateOf(false) }
+    // Owned by UploadCenter now — a screen must not decide whether an upload is running.
+    val posting = UploadCenter.reelBusy
     // Raw picked video (awaiting trim), then the trimmed clip (awaiting caption).
     var pendingVideo by remember { mutableStateOf<Uri?>(null) }
     var trimmedVideo by remember { mutableStateOf<Uri?>(null) }
@@ -262,10 +266,14 @@ fun ShortsScreen(
     LaunchedEffect(deepLinkReel) { onOverlayChange(deepLinkReel != null) }
 
     // Upload progress card (top of the Shorts feed). Shown while a reel uploads.
+    // Mirrored from UploadCenter rather than held locally, so the card is still there
+    // (and still counting) when the user swipes away and comes back mid-upload.
+    val activeUpload = UploadCenter.reel
     var uploadCardVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(activeUpload) { if (activeUpload != null) uploadCardVisible = true }
     var uploadThumb by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
-    var uploadStartMs by remember { mutableStateOf(0L) }
-    var uploadEtaMs by remember { mutableStateOf(6000L) }
+    val uploadStartMs = activeUpload?.startedAt ?: 0L
+    val uploadEtaMs = activeUpload?.etaMs ?: 6000L
 
     // Following tab: show ONLY reels from people the user actually follows (the
     // feed already carries is_following per reel). Own reels are excluded so it
@@ -310,6 +318,16 @@ fun ShortsScreen(
             Toast.makeText(context, "Gagal memuat reels: ${e.message}", Toast.LENGTH_SHORT).show()
         }
         loading = false
+    }
+
+    // A reel finished uploading (possibly while this screen was away). Refresh so the
+    // new post is actually there when the user comes back.
+    LaunchedEffect(UploadCenter.reelCompleted) {
+        if (UploadCenter.reelCompleted > 0) {
+            reload()
+            showFollowing = false
+            runCatching { pager.scrollToPage(0) }
+        }
     }
 
     // Quietly pull the freshest feed and MERGE in anything new (e.g. a short a
@@ -492,31 +510,21 @@ fun ShortsScreen(
                     val src = trimmed
                     pendingVideo = null
                     trimmedVideo = null
-                    posting = true
-                    uploadCardVisible = true
-                    uploadThumb = null
-                    uploadStartMs = System.currentTimeMillis()
-                    uploadEtaMs = 6000L
-                    scope.launch {
-                        runCatching {
-                            val bytes = context.contentResolver.openInputStream(src)?.use { it.readBytes() }
-                                ?: error("Tidak bisa membaca video")
-                            // Shape the progress bar from a size-based ETA + grab a
-                            // thumbnail for the card (both best-effort).
-                            uploadEtaMs = estimateUploadEtaMs(bytes.size)
-                            uploadThumb = withContext(Dispatchers.IO) { reelThumbnail(context, src) }
-                            val mime = context.contentResolver.getType(src) ?: "video/mp4"
-                            val ext = mime.substringAfterLast('/', "mp4")
-                            val mediaId = SyntraClient.uploadMedia("video", ext, mime, bytes)
-                            SyntraClient.postReel(mediaId, caption, visibility, commentsEnabled)
-                        }.onSuccess {
-                            reload()
-                            showFollowing = false
-                            runCatching { pager.scrollToPage(0) }
-                        }.onFailure {
-                            Toast.makeText(context, "Gagal menerbitkan: ${it.message}", Toast.LENGTH_LONG).show()
-                        }
-                        posting = false
+                    // Runs in UploadCenter, NOT in this screen's scope. Swiping to
+                    // another tab disposes this composable, which used to cancel the
+                    // upload mid-file with no error shown — the card simply disappeared
+                    // and the reel never arrived.
+                    UploadCenter.startReel(label = "Menerbitkan reel", etaMs = 6000L) {
+                        val bytes = withContext(Dispatchers.IO) {
+                            context.contentResolver.openInputStream(src)?.use { it.readBytes() }
+                        } ?: error("Tidak bisa membaca video")
+                        UploadCenter.updateReel { it.copy(etaMs = estimateUploadEtaMs(bytes.size)) }
+                        val thumb = withContext(Dispatchers.IO) { reelThumbnail(context, src) }
+                        UploadCenter.updateReel { it.copy(thumb = thumb?.toString()) }
+                        val mime = context.contentResolver.getType(src) ?: "video/mp4"
+                        val ext = mime.substringAfterLast('/', "mp4")
+                        val mediaId = SyntraClient.uploadMedia("video", ext, mime, bytes)
+                        SyntraClient.postReel(mediaId, caption, visibility, commentsEnabled)
                     }
                 },
             )
@@ -770,7 +778,7 @@ private fun DeleteReelDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text("Hapus reel ini?", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -1079,7 +1087,7 @@ private fun ReelSettingsSheet(
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF15151C),
+        containerColor = NexusSurface,
         dragHandle = { androidx.compose.material3.BottomSheetDefaults.DragHandle() },
     ) {
         Column(
@@ -1122,7 +1130,7 @@ private fun ReelSettingsSheet(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (selected) ShortsTeal else Color(0xFF26262F))
+                            .background(if (selected) ShortsTeal else NexusSurfaceElevated)
                             .clickable(
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
@@ -1278,7 +1286,7 @@ private fun ReportReelDialog(onDismiss: () -> Unit, onSubmit: (String) -> Unit) 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(vertical = 18.dp),
         ) {
             Text(
@@ -1335,7 +1343,7 @@ private fun TranslationDialog(text: String, onDismiss: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text("Terjemahan", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -1833,7 +1841,7 @@ fun ShimmerFill(modifier: Modifier = Modifier) {
         modifier.background(
             Brush.verticalGradient(
                 listOf(
-                    Color(0xFF23232E).copy(alpha = alpha),
+                    NexusSurfaceElevated.copy(alpha = alpha),
                     Color(0xFF141019).copy(alpha = alpha),
                 ),
             ),
@@ -1972,7 +1980,7 @@ private fun ReelActions(
                 modifier = Modifier
                     .size(44.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF222228))
+                    .background(NexusStroke)
                     .border(1.5.dp, Color.White, CircleShape)
                     .clickable(
                         indication = null,
@@ -2161,7 +2169,7 @@ private fun SpinningMusicDisc(avatarUrl: String?) {
             .size(38.dp)
             .graphicsLayer { rotationZ = angle }
             .clip(CircleShape)
-            .background(Brush.radialGradient(listOf(Color(0xFF3A3A3A), Color(0xFF101014))))
+            .background(Brush.radialGradient(listOf(Color(0xFF3A3A3A), NexusSurface)))
             .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape),
         contentAlignment = Alignment.Center,
     ) {
@@ -2375,7 +2383,7 @@ private fun UploadReelCard(
                 modifier = Modifier
                     .size(if (expanded) 52.dp else 34.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF222230)),
+                    .background(NexusStroke),
                 contentAlignment = Alignment.Center,
             ) {
                 if (thumb != null) {
@@ -2463,7 +2471,7 @@ private fun PostReelDialog(onDismiss: () -> Unit, onPost: (String) -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text("Reel baru", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -2623,7 +2631,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF15151C),
+        containerColor = NexusSurface,
         dragHandle = { androidx.compose.material3.BottomSheetDefaults.DragHandle() },
     ) {
         Column(
@@ -2843,7 +2851,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                     Text("Batal", color = NexusTextSecondary)
                 }
             },
-            containerColor = Color(0xFF1E1E27),
+            containerColor = NexusSurfaceElevated,
         )
     }
 }

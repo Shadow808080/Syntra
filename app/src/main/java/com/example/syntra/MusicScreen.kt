@@ -3,9 +3,16 @@ package com.example.syntra
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import android.widget.Toast
+import com.example.syntra.net.AppLock
+import com.example.syntra.net.UploadCenter
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -46,6 +53,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.material.icons.filled.HideImage
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
@@ -60,6 +69,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -72,6 +84,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
@@ -84,6 +97,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -104,6 +118,7 @@ import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.delay
@@ -201,7 +216,45 @@ fun MusicScreen(
     //
     // Latching on success instead means a cancelled or failed attempt simply doesn't
     // count, and opening the tab tries again.
+    var refreshing by remember { mutableStateOf(false) }
+    // Which community track is waiting for a hand-picked cover. The image is copied to
+    // this device only — see TrackArtStore for why it is never uploaded.
+    var artTarget by remember { mutableStateOf<String?>(null) }
+    val pickArt = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        val id = artTarget
+        artTarget = null
+        if (uri != null && id != null) {
+            if (com.example.syntra.net.TrackArtStore.put(context, id, uri) == null) {
+                Toast.makeText(context, "Gagal membaca gambar.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     var browseLoaded by remember { mutableStateOf(false) }
+
+    /** Re-fetches the catalogue and the community rail. Shared by refresh and retry. */
+    suspend fun reloadMusic() {
+        val result = runCatching { MusicClient.browse() }
+        (result.exceptionOrNull() as? kotlinx.coroutines.CancellationException)?.let { throw it }
+        result
+            .onSuccess {
+                browse = it
+                failed = it.isEmpty
+                browseLoaded = !it.isEmpty
+            }
+            .onFailure { failed = true }
+        runCatching { com.example.syntra.net.SyntraClient.getMusicFeed() }
+            .onSuccess { communityTracks.clear(); communityTracks.addAll(it) }
+        // Device library too — a track published elsewhere should appear here.
+        runCatching {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.example.syntra.net.LocalMusicStore.list(context)
+            }
+        }.onSuccess { localTracks.clear(); localTracks.addAll(it) }
+        loading = false
+    }
+
     LaunchedEffect(visible) {
         if (!visible || browseLoaded) return@LaunchedEffect
         val result = runCatching { MusicClient.browse() }
@@ -239,12 +292,16 @@ fun MusicScreen(
     // moment you confirm, and the trim+upload runs here behind a small status banner
     // while you keep using the tab. Runs on the Music tab's scope, which the pager
     // keeps warm; the phased status makes the (unavoidable) re-encode wait legible.
-    var publishing by remember { mutableStateOf(false) }
+    // Driven by UploadCenter so the status banner is still there — and still
+    // running — when the user returns to the tab mid-publish.
+    val publishing = UploadCenter.musicBusy
     var publishStatus by remember { mutableStateOf("") }
     var publishOk by remember { mutableStateOf(true) }
     val publishMusic: (MusicPublishSpec) -> Unit = { spec ->
-        scope.launch {
-            publishing = true
+        // App-scoped: trimming + uploading a song takes far longer than a glance at
+        // another tab, and rememberCoroutineScope() cancelled the whole thing the
+        // moment this screen left composition.
+        UploadCenter.startMusic(label = "Menerbitkan lagu", etaMs = 8000L) {
             publishOk = true
             val io = kotlinx.coroutines.Dispatchers.IO
             val result = runCatching {
@@ -276,23 +333,27 @@ fun MusicScreen(
                     }
                 }
 
-                // Register as public (best-effort — works once the backend adds it).
+                // Publishing is the POINT of this feature — the track is meant to be
+                // searchable by other people — so a failure here must NOT be swallowed.
+                //
+                // This used to be runCatching{...}.getOrNull() with a local-only
+                // fallback, so a failed publish produced a song that appeared in your
+                // own library and looked completely successful. music_tracks was empty
+                // while the UI had been reporting success the whole time. If the server
+                // rejects it, say so and fail the upload.
                 publishStatus = "Menerbitkan…"
-                val published = runCatching {
+                val published = try {
                     com.example.syntra.net.SyntraClient.postMusic(
                         audioMediaId, spec.title, spec.artist, lenMs, coverMediaId,
                     )
-                }.getOrNull()
+                } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    android.util.Log.e("SyntraMusic", "publish failed", t)
+                    kotlinx.coroutines.withContext(io) { runCatching { clip.delete() } }
+                    error("Gagal menerbitkan lagu: ${t.message ?: t::class.java.simpleName}")
+                }
                 kotlinx.coroutines.withContext(io) { runCatching { clip.delete() } }
-
-                published ?: MusicTrack(
-                    id = audioUrl,
-                    title = spec.title,
-                    artist = spec.artist,
-                    artworkUrl = coverUrl,
-                    previewUrl = audioUrl,
-                    durationSec = (lenMs / 1000).toInt(),
-                )
+                published
             }
             result
                 .onSuccess { track ->
@@ -308,8 +369,9 @@ fun MusicScreen(
                     publishOk = false
                     publishStatus = "Gagal mengunggah: ${it.message}"
                 }
+            // The banner lingers briefly on the outcome; UploadCenter clears the
+            // running state itself once this block returns.
             delay(if (result.isSuccess) 1600 else 3500)
-            publishing = false
         }
     }
 
@@ -334,23 +396,28 @@ fun MusicScreen(
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
                 )
-                failed -> MusicError { scope.launch {
-                    loading = true; failed = false
-                    runCatching { MusicClient.browse() }
-                        .onSuccess {
-                            browse = it
-                            failed = it.isEmpty
-                            // Latch here too, or a successful manual retry still leaves
-                            // the automatic loader armed to refetch on the next visit.
-                            browseLoaded = !it.isEmpty
+                failed -> MusicError { scope.launch { loading = true; failed = false; reloadMusic() } }
+                else -> PullToRefreshBox(
+                    isRefreshing = refreshing,
+                    onRefresh = {
+                        scope.launch {
+                            refreshing = true
+                            reloadMusic()
+                            refreshing = false
                         }
-                        .onFailure { failed = true }
-                    loading = false
-                } }
-                else -> MusicBrowseBody(
+                    },
+                ) {
+                MusicBrowseBody(
                     browse = browse,
                     localTracks = localTracks,
                     communityTracks = communityTracks,
+                    onSetCommunityArt = { t ->
+                        artTarget = t.id
+                        AppLock.expectSystemDialog()
+                        pickArt.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
                     onPlay = play,
                     onAddLocal = { pickAudio.launch(arrayOf("audio/*")) },
                     onRemoveLocal = { t ->
@@ -369,6 +436,7 @@ fun MusicScreen(
                     // to open their page directly.
                     onSearchArtist = { name -> query = name; searching = true },
                 )
+                }
             }
         }
 
@@ -516,6 +584,7 @@ private fun MusicBrowseBody(
     browse: MusicBrowse,
     localTracks: List<MusicTrack>,
     communityTracks: List<MusicTrack>,
+    onSetCommunityArt: (MusicTrack) -> Unit = {},
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
     onAddLocal: () -> Unit,
     onRemoveLocal: (MusicTrack) -> Unit,
@@ -574,12 +643,24 @@ private fun MusicBrowseBody(
         if (communityTracks.isNotEmpty()) {
             item { SectionHeader("Unggahan komunitas") }
             item {
+                Text(
+                    "Tahan sebuah lagu untuk memasang gambar sampulmu sendiri — " +
+                        "tersimpan di perangkat ini saja.",
+                    color = NexusTextSecondary,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+                )
+            }
+            item {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     items(communityTracks, key = { "community_${it.id}" }) { t ->
-                        TrackCard(t) { onPlay(t, communityTracks) }
+                        // Long-press sets your own cover for this upload.
+                        TrackCard(t, onSetArt = { onSetCommunityArt(t) }) {
+                            onPlay(t, communityTracks)
+                        }
                     }
                 }
             }
@@ -1011,7 +1092,10 @@ private fun LocalMusicEmpty(onAdd: () -> Unit) {
             .background(NexusSurface)
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onAdd)
             .padding(horizontal = 16.dp, vertical = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        // Top-aligned, not centred. The tile is 46dp against two lines of text, so
+        // centring floated it between them and left it pointing at the gap rather than
+        // at the label it belongs to. Aligned to the top it reads with the title.
+        verticalAlignment = Alignment.Top,
     ) {
         Box(
             modifier = Modifier.size(46.dp).clip(RoundedCornerShape(10.dp)).background(NexusAccent.copy(alpha = 0.16f)),
@@ -1037,7 +1121,7 @@ private fun LocalTrackRow(track: MusicTrack, onClick: () -> Unit, onRemove: () -
             .padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ArtworkImage(url = track.artworkUrl, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+        ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 15.sp,
@@ -1055,16 +1139,58 @@ private fun LocalTrackRow(track: MusicTrack, onClick: () -> Unit, onRemove: () -
     }
 }
 
+/**
+ * The artwork to draw for [track]: the user's own picture if they set one, else the
+ * track's real cover.
+ *
+ * Every surface that draws a track goes through here. Reading `track.artworkUrl`
+ * directly is what made a chosen background appear on the card but nowhere else — the
+ * mini-player, the row and the now-playing sheet each kept showing the original.
+ */
 @Composable
-private fun TrackCard(track: MusicTrack, onClick: () -> Unit) {
+private fun rememberTrackArt(track: MusicTrack?): String? {
+    val ctx = LocalContext.current
+    if (track == null) return null
+    return com.example.syntra.net.TrackArtStore.get(ctx, track.id) ?: track.artworkUrl
+}
+
+@Composable
+private fun TrackCard(
+    track: MusicTrack,
+    /** Long-press to choose your own cover. Null = not offered for this rail. */
+    onSetArt: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     val isCurrent = MusicPlayer.current?.id == track.id
+    val ctx = LocalContext.current
+    // A locally-chosen picture wins over whatever the track carries. Read straight from
+    // the store (Compose state) so picking one repaints immediately.
+    val localArt = com.example.syntra.net.TrackArtStore.get(ctx, track.id)
     Column(
         modifier = Modifier
             .width(140.dp)
-            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
+            .then(
+                if (onSetArt != null) {
+                    Modifier.combinedClickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onLongClick = onSetArt,
+                        onClick = onClick,
+                    )
+                } else {
+                    Modifier.clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onClick,
+                    )
+                },
+            ),
     ) {
         Box {
-            ArtworkImage(url = track.artworkUrl, modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)))
+            ArtworkImage(
+                url = localArt ?: track.artworkUrl,
+                modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)),
+            )
             if (isCurrent) NowPlayingBadge(Modifier.align(Alignment.BottomEnd).padding(8.dp))
         }
         Spacer(Modifier.height(8.dp))
@@ -1128,7 +1254,7 @@ private fun TrackRow(track: MusicTrack, onClick: () -> Unit) {
             .padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ArtworkImage(url = track.artworkUrl, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+        ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 15.sp,
@@ -1233,11 +1359,22 @@ private fun MusicUploadScreen(
     var previewPlaying by remember(uri) { mutableStateOf(false) }
 
     var showConfirm by remember { mutableStateOf(false) }
+    // Reading the file's length is what unlocks the publish button. BOTH ways of
+    // getting it used to fail silently — the tag probe via runCatching{}.getOrNull(),
+    // and MediaPlayer with no error listener — so an unreadable file left the button
+    // permanently disabled with nothing on screen explaining why. Tapping "Terbitkan"
+    // simply did nothing, forever.
+    var probing by remember(uri) { mutableStateOf(true) }
+    var probeError by remember(uri) { mutableStateOf<String?>(null) }
 
     // Probe tags + prepare the preview player once.
     LaunchedEffect(uri) {
+        probing = true
+        probeError = null
         val probed = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { com.example.syntra.net.LocalMusicStore.probe(context, uri) }.getOrNull()
+            runCatching { com.example.syntra.net.LocalMusicStore.probe(context, uri) }
+                .onFailure { android.util.Log.w("SyntraMusic", "probe failed", it) }
+                .getOrNull()
         }
         if (probed != null) {
             meta = probed
@@ -1249,8 +1386,24 @@ private fun MusicUploadScreen(
             player.setOnPreparedListener { mp ->
                 prepared = true
                 playerDurSec = (mp.duration / 1000).coerceAtLeast(0)
+                probing = false
+            }
+            // Without this the player could fail forever in silence.
+            player.setOnErrorListener { _, what, extra ->
+                android.util.Log.e("SyntraMusic", "MediaPlayer error what=$what extra=$extra")
+                probing = false
+                if ((meta?.durationSec ?: 0) <= 0) {
+                    probeError = "File ini tidak bisa dibaca sebagai audio."
+                }
+                true
             }
             player.prepareAsync()
+        }.onFailure {
+            android.util.Log.e("SyntraMusic", "setDataSource failed", it)
+            probing = false
+            if ((meta?.durationSec ?: 0) <= 0) {
+                probeError = "File ini tidak bisa dibuka: ${it.message ?: "format tidak didukung"}"
+            }
         }
     }
     DisposableEffect(uri) { onDispose { runCatching { player.release() } } }
@@ -1446,14 +1599,33 @@ private fun MusicUploadScreen(
                         enabled = totalSec > 0 && clipLenSec > 0,
                         onClick = { showConfirm = true },
                     )
+                    .alpha(if (totalSec > 0 && clipLenSec > 0) 1f else 0.45f)
                     .padding(vertical = 14.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Terbitkan ke publik", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        when {
+                            probing -> "Membaca file…"
+                            totalSec <= 0 -> "Durasi tidak terbaca"
+                            else -> "Terbitkan ke publik"
+                        },
+                        color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                    )
                 }
+            }
+            // Say WHY, right under the button, when it cannot be used.
+            probeError?.let { why ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    why,
+                    color = Color(0xFFFF5D5D),
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp),
+                )
             }
             Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(28.dp))
         }
@@ -1596,7 +1768,7 @@ fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
                 .fillMaxWidth()
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
                 .graphicsLayer { alpha = 1f - (kotlin.math.abs(offsetX.value) / barWidth).coerceIn(0f, 1f) }
-                .background(Color(0xFF17171F))
+                .background(NexusSurface)
                 .pointerInput(track.id) {
                     detectHorizontalDragGestures(
                         onDragEnd = {
@@ -1617,7 +1789,7 @@ fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ArtworkImage(url = track.artworkUrl, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
+            ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(track.title, color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
@@ -1627,6 +1799,10 @@ fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
             PlayerIconButton(
                 icon = if (MusicPlayer.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                 size = 40.dp, iconSize = 24.dp,
+                // The default white belongs to the now-playing sheet, which is always
+                // dark because it sits over artwork. This bar follows the theme, so on
+                // the light theme a white glyph was invisible on a white surface.
+                tint = NexusTextPrimary,
             ) { MusicPlayer.togglePlayPause() }
         }
     }
@@ -1638,6 +1814,22 @@ fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
  */
 @Composable
 fun NowPlayingScreen(onClose: () -> Unit) {
+    // "Ubah background" lives here as well as on a long-press: a long-press is not
+    // discoverable, and this is the screen where the picture is actually large enough
+    // to care about. The image is stored on THIS DEVICE only — see TrackArtStore.
+    val artCtx = LocalContext.current
+    var menuOpen by remember { mutableStateOf(false) }
+    val nowTrack = MusicPlayer.current
+    val pickTrackArt = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        val id = nowTrack?.id
+        if (uri != null && id != null) {
+            if (com.example.syntra.net.TrackArtStore.put(artCtx, id, uri) == null) {
+                Toast.makeText(artCtx, "Gagal membaca gambar.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     val track = MusicPlayer.current
     if (track == null) { onClose(); return }
     BackHandler(onBack = onClose)
@@ -1664,7 +1856,7 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             .fillMaxSize()
             .onSizeChanged { sheetHeight = it.height.coerceAtLeast(1) }
             .offset { IntOffset(0, offsetY.value.roundToInt()) }
-            .background(Brush.verticalGradient(listOf(Color(0xFF23202E), Color(0xFF0C0C12))))
+            .background(Brush.verticalGradient(listOf(NexusSurfaceElevated, NexusBackground)))
             .pointerInput(Unit) {
                 detectVerticalDragGestures(
                     onDragEnd = {
@@ -1686,9 +1878,46 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 PlayerIconButton(Icons.Filled.KeyboardArrowDown, size = 40.dp, iconSize = 28.dp) { onClose() }
                 Spacer(Modifier.weight(1f))
-                Text("SEDANG DIPUTAR", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text("SEDANG DIPUTAR", color = NexusTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
-                PlayerIconButton(Icons.Filled.MoreVert, size = 40.dp, iconSize = 22.dp) { /* menu lanjutan */ }
+                Box {
+                    PlayerIconButton(Icons.Filled.MoreVert, size = 40.dp, iconSize = 22.dp) { menuOpen = true }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Ubah background", color = NexusTextPrimary) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Filled.Wallpaper, null,
+                                    tint = NexusTextSecondary, modifier = Modifier.size(18.dp),
+                                )
+                            },
+                            onClick = {
+                                menuOpen = false
+                                AppLock.expectSystemDialog()
+                                pickTrackArt.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                        )
+                        if (nowTrack != null &&
+                            com.example.syntra.net.TrackArtStore.get(artCtx, nowTrack.id) != null
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Hapus background", color = NexusTextPrimary) },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Filled.HideImage, null,
+                                        tint = NexusTextSecondary, modifier = Modifier.size(18.dp),
+                                    )
+                                },
+                                onClick = {
+                                    menuOpen = false
+                                    com.example.syntra.net.TrackArtStore.clear(artCtx, nowTrack.id)
+                                },
+                            )
+                        }
+                    }
+                }
             }
             // Square cover, centred in the flexible middle so the controls below are
             // always on screen (a fillMaxWidth-only image ate the whole height before).
@@ -1697,17 +1926,17 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) {
                 ArtworkImage(
-                    url = track.artworkUrl,
+                    url = rememberTrackArt(track),
                     modifier = Modifier.fillMaxWidth(0.88f).aspectRatio(1f).clip(RoundedCornerShape(18.dp)),
                 )
             }
             // Title + artist + like.
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(track.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                    Text(track.title, color = NexusTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(6.dp))
-                    Text(track.artist, color = Color.White.copy(alpha = 0.7f), fontSize = 15.sp,
+                    Text(track.artist, color = NexusTextSecondary, fontSize = 15.sp,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 PlayerIconButton(
@@ -1741,10 +1970,10 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                     contentAlignment = Alignment.Center,
                 ) {
                     if (MusicPlayer.preparing) {
-                        CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
+                        CircularProgressIndicator(color = NexusTextPrimary, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
                     } else {
                         Icon(if (MusicPlayer.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Putar/Jeda",
-                            tint = Color.White, modifier = Modifier.size(38.dp))
+                            tint = NexusTextPrimary, modifier = Modifier.size(38.dp))
                     }
                 }
                 PlayerIconButton(Icons.Filled.SkipNext, size = 52.dp, iconSize = 34.dp,
@@ -1797,7 +2026,9 @@ private fun PlayerIconButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     size: androidx.compose.ui.unit.Dp,
     iconSize: androidx.compose.ui.unit.Dp,
-    tint: Color = Color.White,
+    // Follows the theme by default. It used to default to white, which only worked
+    // while every surface that hosted this button was permanently dark.
+    tint: Color = NexusTextPrimary,
     onClick: () -> Unit,
 ) {
     Box(

@@ -128,6 +128,7 @@ import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VoiceEngine
 import com.example.syntra.ui.theme.DangerFill
+import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusOnline
@@ -601,7 +602,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
             // float on nothing.
             .background(
                 Brush.verticalGradient(
-                    listOf(Color(0xFF17131F), Color(0xFF121212), Color(0xFF15100A)),
+                    listOf(NexusSurfaceElevated, NexusBackground, NexusSurface),
                 ),
             ),
     ) {
@@ -1148,7 +1149,7 @@ private fun VolumeBar(
             colors = SliderDefaults.colors(
                 thumbColor = NexusAccentSoft,
                 activeTrackColor = NexusAccent,
-                inactiveTrackColor = Color(0xFF2B2B34),
+                inactiveTrackColor = NexusSurfaceElevated,
             ),
             modifier = Modifier.weight(1f),
         )
@@ -1546,7 +1547,7 @@ private fun JoinGate(
         modifier = Modifier
             .fillMaxSize()
             .background(
-                Brush.verticalGradient(listOf(Color(0xFF17131F), Color(0xFF121212), Color(0xFF121212))),
+                Brush.verticalGradient(listOf(NexusSurfaceElevated, NexusBackground, NexusBackground)),
             ),
         contentAlignment = Alignment.Center,
     ) {
@@ -1650,7 +1651,7 @@ private fun SpeakingStatusBanner(
         )
         else -> Triple(
             "Kamu mendengarkan. Angkat tangan untuk minta izin bicara.",
-            NexusTextSecondary, Color(0xFF1D1D24),
+            NexusTextSecondary, NexusSurfaceElevated,
         )
     }
     Row(
@@ -1849,7 +1850,7 @@ private fun CountBadge(value: Int, color: Color) {
         modifier = Modifier
             .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
             .background(color, CircleShape)
-            .border(2.dp, Color(0xFF17131F), CircleShape)
+            .border(2.dp, NexusSurfaceElevated, CircleShape)
             .padding(horizontal = if (label.length > 1) 5.dp else 0.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -2085,7 +2086,7 @@ private fun RoomListenerStrip(
                                         if (p.hasRaisedHand) NexusAccent else NexusSurfaceElevated,
                                         CircleShape,
                                     )
-                                    .border(2.dp, Color(0xFF121212), CircleShape)
+                                    .border(2.dp, NexusBackground, CircleShape)
                                     .clickable(
                                         indication = null,
                                         interactionSource = remember { MutableInteractionSource() },
@@ -2104,7 +2105,7 @@ private fun RoomListenerStrip(
                                 modifier = Modifier
                                     .size(18.dp)
                                     .background(NexusAccent, CircleShape)
-                                    .border(2.dp, Color(0xFF121212), CircleShape),
+                                    .border(2.dp, NexusBackground, CircleShape),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Icon(
@@ -2159,7 +2160,7 @@ private fun RoomVideoTile(
             .fillMaxWidth()
             .aspectRatio(0.82f)
             .clip(shape)
-            .background(Color(0xFF14141B))
+            .background(NexusSurface)
             .clickable(
                 enabled = manageable,
                 indication = null,
@@ -2573,7 +2574,7 @@ private fun RoomControlBar(
                     Brush.linearGradient(
                         listOf(
                             AuroraRose.copy(alpha = 0.30f),
-                            Color(0xFF120E1A).copy(alpha = 0.96f),
+                            NexusBackground.copy(alpha = 0.96f),
                             AuroraGold.copy(alpha = 0.16f),
                         ),
                     ),

@@ -79,8 +79,22 @@ fun SyntraSplash(onDone: () -> Unit) {
     val drift by sky.animateFloat(
         initialValue = 0f,
         targetValue = (2f * Math.PI).toFloat(),
-        animationSpec = infiniteRepeatable(tween(7000, easing = LinearEasing), RepeatMode.Restart),
+        // LinearEasing + Restart, and the target is exactly one full turn — every wave
+        // is driven by sin/cos of this, so wrapping 2π back to 0 lands on the identical
+        // frame. Anything else (an eased curve, or a target that is not a whole period)
+        // makes the loop visibly hitch each time it restarts.
+        animationSpec = infiniteRepeatable(tween(11000, easing = LinearEasing), RepeatMode.Restart),
         label = "aurora-drift",
+    )
+    // A second, slower clock at a deliberately non-harmonic ratio. With one clock the
+    // whole field repeats every cycle and the eye picks the pattern up quickly; two
+    // periods that do not divide each other take minutes to visibly repeat, so the
+    // light reads as continuous rather than looped.
+    val swell by sky.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(17000, easing = LinearEasing), RepeatMode.Restart),
+        label = "aurora-swell",
     )
 
     // A spring with a little overshoot: each piece arrives with weight and snaps home,
@@ -125,7 +139,13 @@ fun SyntraSplash(onDone: () -> Unit) {
         // Aurora — drifting sheets of blue light behind the mark. It brightens as the
         // pieces land, so the screen itself reacts to the assembly.
         Canvas(Modifier.fillMaxSize()) {
-            drawEnergyThreads(drift, 0.25f + 0.75f * ((chat.value + shorts.value + rooms.value) / 3f))
+            // Energy no longer bottoms out once the assembly finishes: the splash now
+            // HOLDS until the app is ready, so the aurora has to stay alive on its own
+            // instead of freezing on the last frame of the build-up. It breathes
+            // between 0.55 and 1.0 forever, lifted further while pieces are landing.
+            val assembly = (chat.value + shorts.value + rooms.value) / 3f
+            val breath = 0.78f + 0.22f * kotlin.math.sin(swell)
+            drawEnergyThreads(drift, swell, breath * (0.55f + 0.45f * assembly))
         }
 
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -345,7 +365,7 @@ private fun DrawScope.drawAssembly(
  * Drawn as short segments rather than one path, so the head can be brighter than the
  * tail — which is what makes each thread read as travelling in a direction.
  */
-private fun DrawScope.drawEnergyThreads(phase: Float, energy: Float) {
+private fun DrawScope.drawEnergyThreads(phase: Float, phase2: Float, energy: Float) {
     val w = size.width
     val h = size.height
     val threads = listOf(
@@ -356,21 +376,37 @@ private fun DrawScope.drawEnergyThreads(phase: Float, energy: Float) {
         Thread(0.58f, 0.045f, 2.1f, 0.72f, NexusAccent, 3.0f),
         Thread(0.66f, 0.070f, 1.35f, 1.18f, lighten(NexusAccent, 0.55f), 2.0f),
     )
-    val steps = 44
+    // More segments: at 44 the filaments visibly faceted where they curve hardest,
+    // which is most of what read as "not smooth".
+    val steps = 96
     val tau = 2f * Math.PI.toFloat()
-    threads.forEach { th ->
+    threads.forEachIndexed { index, th ->
         val baseY = h * th.y
         val amp = h * th.amp
         val head = ((phase * th.speed) % tau) / tau
+        // Each thread drifts vertically on the slow clock, offset per thread so they
+        // never move as a block. This is what stops the field looking like one texture
+        // sliding sideways.
+        val sway = h * 0.035f * kotlin.math.sin(phase2 + index * 1.7f)
         for (i in 0 until steps) {
             val f0 = i / steps.toFloat()
             val f1 = (i + 1) / steps.toFloat()
-            fun yAt(f: Float) = baseY + amp * kotlin.math.sin(f * th.wave * tau + phase * th.speed)
+            fun yAt(f: Float): Float {
+                // Two summed sines of unrelated frequency: a single sine is a rope, and
+                // the eye reads its period immediately.
+                val primary = kotlin.math.sin(f * th.wave * tau + phase * th.speed)
+                val ripple = 0.28f * kotlin.math.sin(f * th.wave * tau * 2.3f + phase2 * th.speed)
+                return baseY + sway + amp * (primary + ripple)
+            }
             var d = f0 - head
             if (d < 0f) d += 1f
-            val glow = (1f - d).let { it * it * it }
+            // Smoothstep instead of a cubic: the old falloff snapped as the head
+            // wrapped past the left edge. This eases in and out of the comet head, so
+            // the wrap is invisible.
+            val t = (1f - d).coerceIn(0f, 1f)
+            val glow = t * t * (3f - 2f * t) * t
             drawLine(
-                color = th.colour.copy(alpha = (0.08f + 0.7f * glow) * energy * 0.6f),
+                color = th.colour.copy(alpha = (0.06f + 0.7f * glow) * energy * 0.6f),
                 start = Offset(w * f0, yAt(f0)),
                 end = Offset(w * f1, yAt(f1)),
                 strokeWidth = th.weight * (0.6f + 0.9f * glow),

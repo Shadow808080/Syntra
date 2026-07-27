@@ -253,6 +253,11 @@ fun ProfileScreen(
     }
 
     suspend fun load() {
+        // MUST be raised here. PullToRefreshBox renders its spinner from `isRefreshing`,
+        // which is this flag — and load() only ever CLEARED it. So a pull refreshed the
+        // data in silence: no spinner, no movement, nothing to say the gesture landed.
+        loading = true
+        var failed: String? = null
         try {
             user = if (isMe) SyntraClient.getMyProfile() else SyntraClient.getUser(username!!)
             user?.let {
@@ -288,10 +293,13 @@ fun ProfileScreen(
             }
         } catch (c: CancellationException) {
             throw c
-        } catch (_: Exception) {
-            // Leave whatever loaded; the header still shows what we have.
+        } catch (e: Exception) {
+            // Leave whatever loaded; the header still shows what we have. But SAY so —
+            // a silently failed refresh is indistinguishable from a successful one.
+            failed = e.message ?: "Gagal memuat profil"
         }
         loading = false
+        failed?.let { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
     }
 
     val avatarUrl = user?.avatarMediaId?.takeIf { it.startsWith("http") }

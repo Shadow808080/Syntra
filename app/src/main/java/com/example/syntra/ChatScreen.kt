@@ -65,6 +65,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -80,6 +81,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PersonAddAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Visibility
@@ -526,31 +528,17 @@ fun ChatScreen(
     // Index of the story currently open in the full-screen viewer (null = closed).
     var openedStory by remember { mutableStateOf<Int?>(null) }
     // Conversation currently open in the detail screen (null = on the list).
-    // On a fresh appearance (cold start / after unlocking) we open the last chat
-    // right away from its stored snapshot — the detail screen is on screen from the
-    // first frame, so the list never flashes underneath it (WhatsApp-like).
-    val resumeCtx = LocalContext.current
-    var openedChat by remember {
-        val resume = if (ChatResume.pending && ChatNavRequest.conversationId == null) {
-            com.example.syntra.net.LastChatStore.get(resumeCtx)?.let { r ->
-                Conversation(
-                    id = r.id,
-                    name = r.name.ifBlank { "(tanpa nama)" },
-                    message = "",
-                    time = "",
-                    counterpartId = r.counterpartId,
-                    counterpartUsername = r.counterpartUsername,
-                    avatarUrl = r.avatarUrl,
-                    isGroup = r.isGroup,
-                )
-            }
-        } else {
-            null
-        }
-        mutableStateOf(resume)
-    }
-    // Consume the resume request once, after this appearance has used it.
-    LaunchedEffect(Unit) { ChatResume.pending = false }
+    //
+    // AUTO-RESUME REMOVED. Every launch used to open the last conversation from a
+    // stored snapshot, which meant a cold start paid for the chat list AND a full
+    // conversation — message history, avatars, reactions, presence, a socket
+    // subscription — before anything was interactive. On a low-end phone that is the
+    // single most expensive thing the app can do at startup, and it happened whether
+    // or not the user wanted that chat. Opening on the list is both faster and what
+    // the user actually asked for by launching the app.
+    //
+    // Notification deep-links are unaffected: those come through ChatNavRequest below.
+    var openedChat by remember { mutableStateOf<Conversation?>(null) }
     // Live data only. Sample chats are used solely when there is no backend to talk to;
     // the story row is never seeded — it shows exactly what GET /stories returns.
     val chats = remember {
@@ -996,7 +984,11 @@ fun ChatScreen(
         chats
     } else {
         chats.filter {
+            // Name and username, NOT just the last message. Matching on `message` meant
+            // a conversation with no messages yet could never be found by searching for
+            // the person or group in it — the emptiest chats were the hardest to reach.
             it.name.contains(query, ignoreCase = true) ||
+                it.counterpartUsername?.contains(query, ignoreCase = true) == true ||
                 it.message.contains(query, ignoreCase = true)
         }
     }
@@ -1240,8 +1232,42 @@ fun ChatScreen(
                     }
                     item { Spacer(Modifier.height(4.dp)) }
                 }
+                // While searching, results are SPLIT: groups and people are different
+                // kinds of thing, and one undifferentiated list made it impossible to
+                // tell at a glance which was which. Outside search the list stays one
+                // stream ordered by recency, which is what a chat list is for.
+                if (searching && query.isNotBlank()) {
+                    val groups = visible.filter { it.isGroup }
+                    val people = visible.filterNot { it.isGroup }
+                    if (groups.isNotEmpty()) {
+                        item(key = "hdr-groups") { SearchSectionHeader("Grup", groups.size) }
+                    }
+                    itemsIndexed(groups, key = { _, c -> "g_" + c.id }, contentType = { _, _ -> "conversation" }) { _, convo ->
+                        ConversationRow(
+                            convo = convo,
+                            selected = convo.id in selection,
+                            pinned = convo.id in pinnedIds,
+                            onClick = { if (selection.isEmpty()) openChat(convo) else if (!selection.remove(convo.id)) selection.add(convo.id) },
+                            onLongClick = { if (!selection.remove(convo.id)) selection.add(convo.id) },
+                            onFirstVisible = { resolveAvatarFor(convo) },
+                        )
+                    }
+                    if (people.isNotEmpty()) {
+                        item(key = "hdr-people") { SearchSectionHeader("Orang", people.size) }
+                    }
+                    itemsIndexed(people, key = { _, c -> "p_" + c.id }, contentType = { _, _ -> "conversation" }) { _, convo ->
+                        ConversationRow(
+                            convo = convo,
+                            selected = convo.id in selection,
+                            pinned = convo.id in pinnedIds,
+                            onClick = { if (selection.isEmpty()) openChat(convo) else if (!selection.remove(convo.id)) selection.add(convo.id) },
+                            onLongClick = { if (!selection.remove(convo.id)) selection.add(convo.id) },
+                            onFirstVisible = { resolveAvatarFor(convo) },
+                        )
+                    }
+                }
                 itemsIndexed(
-                    visible,
+                    if (searching && query.isNotBlank()) emptyList() else visible,
                     key = { _, convo -> convo.id },
                     // All body rows share one layout type, so Compose reuses the same
                     // node when recycling during a fling instead of rebuilding it.
@@ -1913,6 +1939,42 @@ private fun shiftHue(color: Color, degrees: Float): Color {
 // ---------------------------------------------------------------------------
 // Conversation row
 // ---------------------------------------------------------------------------
+
+/**
+ * Divider between the two kinds of search result.
+ *
+ * A label plus a count and a hairline, not a card: it has to separate without competing
+ * with the rows it introduces. The count is there because "did it find ALL my groups?"
+ * is the first question a search result raises.
+ */
+@Composable
+private fun SearchSectionHeader(label: String, count: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (label == "Grup") Icons.Filled.Groups else Icons.Filled.Person,
+            null,
+            tint = NexusAccentSoft,
+            modifier = Modifier.size(15.dp),
+        )
+        Spacer(Modifier.width(7.dp))
+        Text(
+            label.uppercase(),
+            color = NexusAccentSoft,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.8.sp,
+        )
+        Spacer(Modifier.width(6.dp))
+        Text("$count", color = NexusTextSecondary, fontSize = 11.sp)
+        Spacer(Modifier.width(10.dp))
+        Box(Modifier.weight(1f).height(1.dp).background(NexusStroke))
+    }
+}
 
 /** Corner presence badge on an avatar: a coloured dot with a card-coloured gap ring. */
 @Composable

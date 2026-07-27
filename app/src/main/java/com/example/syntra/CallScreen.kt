@@ -90,6 +90,10 @@ import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusOnline
+import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
+import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import io.livekit.android.renderer.TextureViewRenderer
@@ -228,7 +232,15 @@ private fun callEndLog(why: String) {
     android.util.Log.w(CALL_TAG, "END: " + why)
 }
 
-private val callBackdrop = listOf(Color(0xFF141726), Color(0xFF0B0C14))
+/**
+ * The call backdrop, derived from the theme.
+ *
+ * A getter, not a val, so it tracks the theme like every other brand colour. It used to
+ * be a fixed near-black, which meant an audio call stayed dark on the light theme while
+ * the rest of the app was white.
+ */
+private val callBackdrop: List<Color>
+    get() = listOf(NexusSurfaceElevated, NexusBackground)
 private val callAvatarGradient = listOf(Color(0xFF2E6BF0), Color(0xFF3B68F5))
 
 /** Renders the current call, if any. Mount once at the app root, above everything. */
@@ -787,6 +799,13 @@ private fun FullCallUi(
 
     val showVideoStage = isVideo && phase == CallPhase.ONGOING && remoteVideo != null
 
+    // WHAT THE TEXT SITS ON decides its colour, not the theme alone. Over live video
+    // the surface is the video itself (plus a scrim), so white is correct on every
+    // theme; over the backdrop it must follow the theme or it vanishes on light.
+    val onCall = if (showVideoStage) Color.White else NexusTextPrimary
+    val onCallDim = if (showVideoStage) Color.White.copy(alpha = 0.75f) else NexusTextSecondary
+    val onCallHair = if (showVideoStage) Color.White.copy(alpha = 0.18f) else NexusStroke
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -824,7 +843,7 @@ private fun FullCallUi(
                     ),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Rounded.KeyboardArrowDown, "Perkecil", tint = Color.White, modifier = Modifier.size(24.dp))
+                Icon(Icons.Rounded.KeyboardArrowDown, "Perkecil", tint = onCall, modifier = Modifier.size(24.dp))
             }
         }
 
@@ -837,7 +856,7 @@ private fun FullCallUi(
         ) {
             if (showVideoStage) {
                 Spacer(Modifier.height(8.dp))
-                CallHeaderPill(name = peerName.ifBlank { "Tanpa nama" }, subtitle = formatDuration(elapsed))
+                CallHeaderPill(onSurface = onCall, name = peerName.ifBlank { "Tanpa nama" }, subtitle = formatDuration(elapsed))
             } else {
                 Spacer(Modifier.height(64.dp))
                 Text(
@@ -938,8 +957,8 @@ private fun MiniCallWindow(
                 .offset { IntOffset(offset.x.roundToInt(), offset.y.roundToInt()) }
                 .size(width = winW, height = winH)
                 .clip(RoundedCornerShape(18.dp))
-                .background(Color(0xFF141726))
-                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
+                .background(NexusSurfaceElevated)
+                .border(1.dp, NexusStroke, RoundedCornerShape(18.dp))
                 .pointerInput(maxXpx, maxYpx) {
                     detectDragGestures { change, drag ->
                         change.consume()
@@ -967,7 +986,7 @@ private fun MiniCallWindow(
                         .padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(statusLine, color = Color.White, fontSize = 11.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    Text(statusLine, color = NexusTextPrimary, fontSize = 11.sp, maxLines = 1, modifier = Modifier.weight(1f))
                     MiniHangUp(onHangUp)
                 }
             } else {
@@ -986,7 +1005,7 @@ private fun MiniCallWindow(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             peerName.ifBlank { "Tanpa nama" },
-                            color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                            color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                         Text(statusLine, color = NexusAccentSoft, fontSize = 12.sp, maxLines = 1)
@@ -1150,21 +1169,31 @@ private fun OngoingControls(
 }
 
 @Composable
-private fun CallHeaderPill(name: String, subtitle: String) {
+private fun CallHeaderPill(name: String, subtitle: String, onSurface: Color = Color.White) {
+    // The pill is drawn over the video stage when there is one, and over the plain
+    // backdrop otherwise — so its scrim and text follow whichever it is sitting on.
+    val overVideo = onSurface == Color.White
     Row(
         modifier = Modifier
-            .background(Color.Black.copy(alpha = 0.32f), RoundedCornerShape(50))
-            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(50))
+            .background(
+                if (overVideo) Color.Black.copy(alpha = 0.32f) else NexusSurface,
+                RoundedCornerShape(50),
+            )
+            .border(
+                1.dp,
+                if (overVideo) Color.White.copy(alpha = 0.12f) else NexusStroke,
+                RoundedCornerShape(50),
+            )
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(modifier = Modifier.size(7.dp).background(Color(0xFF2FB463), CircleShape))
         Spacer(Modifier.width(8.dp))
-        Text(name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(name, color = onSurface, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Spacer(Modifier.width(8.dp))
-        Text("·", color = Color.White.copy(alpha = 0.5f), fontSize = 14.sp)
+        Text("·", color = onSurface.copy(alpha = 0.5f), fontSize = 14.sp)
         Spacer(Modifier.width(8.dp))
-        Text(subtitle, color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+        Text(subtitle, color = onSurface.copy(alpha = 0.8f), fontSize = 13.sp)
     }
 }
 
@@ -1197,14 +1226,17 @@ private fun CallControl(icon: ImageVector, description: String, active: Boolean 
     Box(
         modifier = Modifier
             .size(58.dp)
-            .background(if (active) Color.White else Color.White.copy(alpha = 0.14f), CircleShape)
+            .background(
+                if (active) NexusTextPrimary else NexusTextPrimary.copy(alpha = 0.14f),
+                CircleShape,
+            )
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = description,
-            tint = if (active) Color(0xFF141726) else Color.White,
+            tint = if (active) NexusBackground else NexusTextPrimary,
             modifier = Modifier.size(24.dp),
         )
     }

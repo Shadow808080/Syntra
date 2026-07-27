@@ -300,19 +300,18 @@ fun ChatWallpaperDialog(
 @Composable
 private fun GalleryWallpaperCard(selected: Boolean, onClick: () -> Unit) {
     Row(
-        verticalAlignment = Alignment.CenterVertically,
+        // Completely plain: no fill, no border. This started as an accent-gradient card
+        // with a coloured rim, which shouted louder than the wallpapers it offers to
+        // replace. Same treatment the Settings cards were given — a row reads as
+        // tappable from its content and position, not from a box drawn around it.
+        // Selection is the one state that earns an outline.
+        verticalAlignment = Alignment.Top,
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(
-                Brush.horizontalGradient(
-                    listOf(NexusAccent.copy(alpha = 0.30f), NexusAccent.copy(alpha = 0.10f)),
-                ),
-            )
-            .border(
-                if (selected) 2.dp else 1.dp,
-                if (selected) Color.White else NexusAccent.copy(alpha = 0.45f),
-                RoundedCornerShape(16.dp),
+            .then(
+                if (selected) Modifier.border(1.5.dp, NexusAccent, RoundedCornerShape(16.dp))
+                else Modifier,
             )
             .clickable(
                 indication = null,
@@ -321,19 +320,13 @@ private fun GalleryWallpaperCard(selected: Boolean, onClick: () -> Unit) {
             )
             .padding(horizontal = 14.dp, vertical = 13.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color.White.copy(alpha = 0.12f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.Filled.PhotoLibrary, null,
-                tint = Color.White, modifier = Modifier.size(22.dp),
-            )
-        }
-        Spacer(Modifier.width(13.dp))
+        // Bare icon at the start — no tile behind it either.
+        Icon(
+            Icons.Filled.PhotoLibrary, null,
+            tint = NexusTextSecondary,
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text("Dari galeri", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(2.dp))

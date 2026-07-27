@@ -55,6 +55,7 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.example.syntra.net.AppLock
 import com.example.syntra.net.AppLockStore
+import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
@@ -689,7 +690,7 @@ private fun PrimaryButton(text: String, destructive: Boolean = false, onClick: (
         modifier = Modifier
             .fillMaxWidth()
             .background(
-                if (destructive) Color(0xFF2A1620) else NexusAccent,
+                if (destructive) DangerFill else NexusAccent,
                 RoundedCornerShape(16.dp),
             )
             .clickable(

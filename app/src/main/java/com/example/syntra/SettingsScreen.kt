@@ -356,7 +356,7 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color(0xFF2A1620), RoundedCornerShape(16.dp))
+                            .background(DangerFill, RoundedCornerShape(16.dp))
                             .clickable(
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },

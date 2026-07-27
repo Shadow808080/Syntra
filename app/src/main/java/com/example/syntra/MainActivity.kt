@@ -68,16 +68,6 @@ object ReelNavRequest {
     var reelId by mutableStateOf<String?>(null)
 }
 
-/**
- * True when the chat screen should resume the last-open conversation the next time
- * it appears — i.e. on a cold start (the initial value) and after the app has been
- * in the background (so it fires again once the app-lock PIN is passed). A plain tab
- * switch never sets this, so returning to Chat from another tab stays on the list.
- */
-object ChatResume {
-    var pending by mutableStateOf(true)
-}
-
 // FragmentActivity (not plain ComponentActivity) so BiometricPrompt — used by the
 // app-lock unlock screen — has the host it needs.
 class MainActivity : FragmentActivity() {
@@ -153,8 +143,6 @@ class MainActivity : FragmentActivity() {
         if (isInPictureInPictureMode) return
         // Note when we left so the lock knows how long we were away.
         AppLock.onBackground()
-        // Coming back (especially after unlocking) should resume the last chat.
-        ChatResume.pending = true
         // App went to the background → let the foreground service post notifications.
         com.example.syntra.net.AppForeground.isForeground = false
         // Pause all media when the app is no longer on screen: music, and — via the
@@ -303,16 +291,21 @@ private fun NexusApp() {
     }
 
     when {
-        // The brand animation owns the first ~1.6s. It sits ahead of every other
-        // branch so the app opens the same way every time — a launch that sometimes
-        // animates and sometimes doesn't reads as a glitch, not a flourish.
-        !splashDone -> SyntraSplash(onDone = { splashDone = true })
+        // The brand animation owns the opening, and then HOLDS on its finished frame
+        // until the app is actually ready. It sits ahead of every other branch so the
+        // app opens the same way every time — a launch that sometimes animates and
+        // sometimes doesn't reads as a glitch, not a flourish.
+        //
+        // Holding is the point: the session restore usually outlasts the animation, and
+        // handing over to a SECOND loading screen meant the opening was two animations
+        // back to back. One mark, assembled once, held until there is something real to
+        // show. serverDown is excluded so a genuinely unreachable server still reaches
+        // the maintenance screen instead of holding here forever.
+        !splashDone || (signedIn == null && !serverDown) ->
+            SyntraSplash(onDone = { splashDone = true })
         serverDown -> MaintenanceScreen(
             onAgree = { (context as? android.app.Activity)?.finishAndRemoveTask() },
         )
-        // Still deciding after the animation finished — the plain spinner covers the
-        // rare slow case without repeating the logo.
-        signedIn == null -> AuthSplash()
         signedIn == false -> AuthScreen(
             onAuthenticated = { signedIn = true; deletedNotice = null },
             notice = deletedNotice,
