@@ -518,7 +518,11 @@ fun ChatDetailScreen(
     // scroll to animate — however long the history is, there is never a top-to-bottom
     // sweep on open. We only follow NEW messages: my own always, incoming ones only
     // when already near the bottom, so reading older history isn't yanked.
-    LaunchedEffect(messages.size) {
+    //
+    // Keyed on the NEWEST message id, not messages.size: loading an older page grows
+    // the list but doesn't change the newest message, so it must NOT trigger a scroll
+    // (that used to yank you to the bottom mid-history when your own message was last).
+    LaunchedEffect(messages.lastOrNull()?.id) {
         if (messages.isEmpty()) return@LaunchedEffect
         val mineIsNewest = messages.lastOrNull()?.fromMe == true
         val nearBottom = listState.firstVisibleItemIndex <= 1
