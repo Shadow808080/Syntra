@@ -1,10 +1,12 @@
 package com.example.syntra.net
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
 import androidx.compose.runtime.getValue
@@ -12,6 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.example.syntra.MainActivity
 import com.example.syntra.R
@@ -173,7 +176,15 @@ object Notifications {
 
         // Stable id per conversation so repeated messages update in place.
         val id = 2000 + (conversationId.hashCode() and 0x7FFF)
-        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+        // Explicit POST_NOTIFICATIONS check (Android 13+) before notifying — the
+        // areNotificationsEnabled() gate above already covers this, but the direct
+        // permission check keeps the call unambiguously safe (and satisfies lint).
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+        }
     }
 
     /**
@@ -233,7 +244,15 @@ object Notifications {
         // A distinct id per type so a reply and a like don't overwrite each other,
         // but repeats of the same type collapse instead of stacking endlessly.
         val id = 3000 + (type.hashCode() and 0x0FFF)
-        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+        // Explicit POST_NOTIFICATIONS check (Android 13+) before notifying — the
+        // areNotificationsEnabled() gate above already covers this, but the direct
+        // permission check keeps the call unambiguously safe (and satisfies lint).
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+        }
     }
 
     /** Opens the app straight into a specific reel (deep-link from a notification). */
