@@ -591,6 +591,37 @@ fun ChatScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // Remember whichever conversation is open, so the next fresh start can reopen it.
+    LaunchedEffect(openedChat?.id) {
+        openedChat?.id?.let { com.example.syntra.net.LastChatStore.set(context, it) }
+    }
+    // Resume the last-open conversation when the screen appears fresh (cold start or
+    // after unlocking with the PIN) — but not on a plain tab switch. `ChatResume.pending`
+    // is only set on a real background/cold start, and we act at most once per appearance.
+    var resumeHandled by remember { mutableStateOf(false) }
+    LaunchedEffect(chats.size, ChatResume.pending) {
+        if (resumeHandled || !ChatResume.pending) return@LaunchedEffect
+        // A notification deep-link takes priority — let it open its own chat.
+        if (ChatNavRequest.conversationId != null) return@LaunchedEffect
+        val last = com.example.syntra.net.LastChatStore.get(context)
+        if (openedChat != null || last == null) {
+            resumeHandled = true
+            ChatResume.pending = false
+            return@LaunchedEffect
+        }
+        // Wait until the list has loaded at least once before deciding.
+        if (chats.isEmpty()) return@LaunchedEffect
+        val hit = chats.firstOrNull { it.id == last }
+        if (hit != null) {
+            openedChat = hit
+        } else {
+            // That conversation is gone (left/deleted) — forget it.
+            com.example.syntra.net.LastChatStore.clear(context)
+        }
+        resumeHandled = true
+        ChatResume.pending = false
+    }
+
     // Collage: pick several photos, compose them into one portrait bitmap, then send
     // it through the normal photo-story preview.
     val collagePicker = rememberLauncherForActivityResult(

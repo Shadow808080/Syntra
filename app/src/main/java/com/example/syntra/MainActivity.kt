@@ -68,6 +68,16 @@ object ReelNavRequest {
     var reelId by mutableStateOf<String?>(null)
 }
 
+/**
+ * True when the chat screen should resume the last-open conversation the next time
+ * it appears — i.e. on a cold start (the initial value) and after the app has been
+ * in the background (so it fires again once the app-lock PIN is passed). A plain tab
+ * switch never sets this, so returning to Chat from another tab stays on the list.
+ */
+object ChatResume {
+    var pending by mutableStateOf(true)
+}
+
 // FragmentActivity (not plain ComponentActivity) so BiometricPrompt — used by the
 // app-lock unlock screen — has the host it needs.
 class MainActivity : FragmentActivity() {
@@ -143,6 +153,8 @@ class MainActivity : FragmentActivity() {
         if (isInPictureInPictureMode) return
         // Note when we left so the lock knows how long we were away.
         AppLock.onBackground()
+        // Coming back (especially after unlocking) should resume the last chat.
+        ChatResume.pending = true
         // App went to the background → let the foreground service post notifications.
         com.example.syntra.net.AppForeground.isForeground = false
         // Pause all media when the app is no longer on screen: music, and — via the
@@ -323,6 +335,7 @@ private fun NexusApp() {
             com.example.syntra.net.BlockStore.clear(context)
             com.example.syntra.net.HiddenMessageStore.clear(context)
             com.example.syntra.net.NotInterestedStore.clear(context)
+            com.example.syntra.net.LastChatStore.clear(context)
             signedIn = false
         })
     }
