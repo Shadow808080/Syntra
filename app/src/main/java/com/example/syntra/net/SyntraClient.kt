@@ -476,6 +476,23 @@ object SyntraClient {
         delete("/api/v1/conversations/$conversationId/members/$userId")
     }
 
+    /** Promote/demote a member. role = "admin" | "member" (admin/owner only). `PATCH .../members/{id}`. */
+    suspend fun setMemberRole(conversationId: String, userId: String, role: String) {
+        patchData("/api/v1/conversations/$conversationId/members/$userId", JSONObject().put("role", role))
+    }
+
+    /**
+     * Update a group's title and/or avatar (admin/owner only). `PATCH .../{id}`.
+     * Returns the new public avatar URL from the refreshed conversation.
+     */
+    suspend fun updateGroup(conversationId: String, title: String? = null, avatarMediaId: String? = null): String {
+        val payload = JSONObject()
+        if (!title.isNullOrBlank()) payload.put("title", title)
+        if (!avatarMediaId.isNullOrBlank()) payload.put("avatar_media_id", avatarMediaId)
+        val data = patchData("/api/v1/conversations/$conversationId", payload) as JSONObject
+        return data.optString("avatar_url", "")
+    }
+
     suspend fun getStories(): List<NetStoryGroup> =
         (getData("/api/v1/stories") as JSONArray).mapObjects { it.toStoryGroup() }
 

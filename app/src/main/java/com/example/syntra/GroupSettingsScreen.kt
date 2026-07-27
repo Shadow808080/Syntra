@@ -2,6 +2,7 @@ package com.example.syntra
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,10 +26,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PersonRemove
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -91,6 +95,36 @@ fun GroupSettingsScreen(
     val members = remember { mutableStateListOf<NetMember>() }
     var loading by remember { mutableStateOf(true) }
     var pendingKick by remember { mutableStateOf<NetMember?>(null) }
+    // Long-press member menu (jadikan admin / keluarkan), the group's live avatar, and
+    // the "uploading a new icon" flag.
+    var memberMenu by remember { mutableStateOf<NetMember?>(null) }
+    var avatarUrl by remember(conversation.id) { mutableStateOf(conversation.avatarUrl) }
+    var uploadingAvatar by remember { mutableStateOf(false) }
+
+    // Pick a new group icon from the gallery → downsample → upload → PATCH the group.
+    val pickAvatar = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            uploadingAvatar = true
+            scope.launch {
+                val newUrl = runCatching {
+                    val (bytes, w, h) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        decodeAvatarBytes(context, uri)
+                    } ?: error("Tidak bisa membaca gambar.")
+                    val mediaId = SyntraClient.uploadMedia("image", "jpg", "image/jpeg", bytes, w, h)
+                    SyntraClient.updateGroup(conversation.id, avatarMediaId = mediaId)
+                }.getOrNull()
+                uploadingAvatar = false
+                if (!newUrl.isNullOrBlank()) {
+                    avatarUrl = newUrl
+                    Toast.makeText(context, "Ikon grup diperbarui.", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Gagal mengubah ikon grup.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     suspend fun load() {
         if (!ApiConfig.ENABLED) { loading = false; return }
@@ -143,12 +177,44 @@ fun GroupSettingsScreen(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    GradientAvatar(
-                        gradient = MemberGradient,
-                        initial = conversation.name.firstOrNull()?.toString() ?: "#",
-                        size = 92.dp,
-                        photoUrl = conversation.avatarUrl,
-                    )
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = if (canManage) {
+                            Modifier.clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) {
+                                pickAvatar.launch(
+                                    androidx.activity.result.PickVisualMediaRequest(
+                                        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                    ),
+                                )
+                            }
+                        } else Modifier,
+                    ) {
+                        GradientAvatar(
+                            gradient = MemberGradient,
+                            initial = conversation.name.firstOrNull()?.toString() ?: "#",
+                            size = 92.dp,
+                            photoUrl = avatarUrl,
+                        )
+                        if (uploadingAvatar) {
+                            Box(
+                                modifier = Modifier.size(92.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
+                                contentAlignment = Alignment.Center,
+                            ) { CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)) }
+                        } else if (canManage) {
+                            // A small camera badge hints the icon can be changed.
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .size(30.dp)
+                                    .clip(CircleShape)
+                                    .background(NexusAccent)
+                                    .padding(6.dp),
+                            ) { Icon(Icons.Filled.PhotoCamera, "Ubah ikon grup", tint = Color.White, modifier = Modifier.size(18.dp)) }
+                        }
+                    }
                     Spacer(Modifier.height(12.dp))
                     Text(
                         conversation.name,
@@ -196,12 +262,13 @@ fun GroupSettingsScreen(
             } else {
                 items(members, key = { it.userId }) { member ->
                     val isMe = member.userId == SyntraClient.myUserId
-                    // Can kick: I manage the group, the target isn't the owner, and isn't me.
-                    val kickable = canManage && member.role != "owner" && !isMe
+                    // Manageable: I run the group, the target isn't the owner, and isn't me.
+                    // Long-press opens the actions menu (jadikan admin / keluarkan).
+                    val manageable = canManage && member.role != "owner" && !isMe
                     MemberRow(
                         member = member,
                         isMe = isMe,
-                        onKick = if (kickable) ({ pendingKick = member }) else null,
+                        onLongPress = if (manageable) ({ memberMenu = member }) else null,
                     )
                 }
             }
@@ -241,13 +308,85 @@ fun GroupSettingsScreen(
             },
         )
     }
+
+    // Long-press member menu: promote/demote, or remove from the group.
+    memberMenu?.let { member ->
+        fun changeRole(role: String, done: String) {
+            memberMenu = null
+            scope.launch {
+                runCatching { SyntraClient.setMemberRole(conversation.id, member.userId, role) }
+                    .onSuccess {
+                        val i = members.indexOfFirst { it.userId == member.userId }
+                        if (i >= 0) members[i] = members[i].copy(role = role)
+                        Toast.makeText(context, done, Toast.LENGTH_SHORT).show()
+                    }
+                    .onFailure { Toast.makeText(context, "Gagal: ${it.message}", Toast.LENGTH_SHORT).show() }
+            }
+        }
+        androidx.compose.ui.window.Dialog(onDismissRequest = { memberMenu = null }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(NexusSurface, RoundedCornerShape(20.dp))
+                    .padding(vertical = 8.dp),
+            ) {
+                Text(
+                    member.displayName,
+                    color = NexusTextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 10.dp),
+                )
+                if (member.role == "admin") {
+                    MemberMenuRow(Icons.Filled.Person, "Jadikan anggota") {
+                        changeRole("member", "${member.displayName} kini anggota biasa.")
+                    }
+                } else {
+                    MemberMenuRow(Icons.Filled.AdminPanelSettings, "Jadikan admin") {
+                        changeRole("admin", "${member.displayName} kini admin.")
+                    }
+                }
+                MemberMenuRow(Icons.Filled.PersonRemove, "Keluarkan dari grup", danger = true) {
+                    memberMenu = null
+                    pendingKick = member
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+    }
 }
 
 @Composable
-private fun MemberRow(member: NetMember, isMe: Boolean, onKick: (() -> Unit)?) {
+private fun MemberMenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, danger: Boolean = false, onClick: () -> Unit) {
+    val tint = if (danger) Color(0xFFFF6B6B) else NexusTextPrimary
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+    ) {
+        Icon(icon, null, tint = if (danger) tint else NexusAccentSoft, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(16.dp))
+        Text(label, color = tint, fontSize = 15.sp)
+    }
+}
+
+@Composable
+private fun MemberRow(member: NetMember, isMe: Boolean, onLongPress: (() -> Unit)?) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (onLongPress != null) {
+                    Modifier.combinedClickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = {},
+                        onLongClick = onLongPress,
+                    )
+                } else Modifier,
+            )
             .padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -277,24 +416,27 @@ private fun MemberRow(member: NetMember, isMe: Boolean, onKick: (() -> Unit)?) {
                 Text(roleLabel(member.role), color = NexusAccentSoft, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             }
         }
-        if (onKick != null) {
-            Spacer(Modifier.width(8.dp))
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                        onClick = onKick,
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Filled.PersonRemove, "Keluarkan", tint = Color(0xFFFF6B6B), modifier = Modifier.size(20.dp))
-            }
-        }
     }
 }
+
+/**
+ * Downsamples a picked image and returns JPEG bytes + dimensions for a group avatar.
+ * Small cap (1024) keeps the upload light and can never blow the Canvas bitmap limit.
+ */
+private fun decodeAvatarBytes(context: android.content.Context, uri: android.net.Uri): Triple<ByteArray, Int, Int>? = runCatching {
+    val cr = context.contentResolver
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    val maxDim = 1024
+    var sample = 1
+    while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
+    val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+    val bmp = cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, opts) } ?: return@runCatching null
+    val out = java.io.ByteArrayOutputStream()
+    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+    Triple(out.toByteArray(), bmp.width, bmp.height)
+}.getOrNull()
 
 @Composable
 private fun GroupActionRow(
