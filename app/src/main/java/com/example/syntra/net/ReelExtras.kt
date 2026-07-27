@@ -35,6 +35,15 @@ object PipController {
 }
 
 /**
+ * "Layar bersih" (clean screen) for Shorts: strips all the overlays (caption, username,
+ * action rail, progress) so you see just the video. Turned on from the long-press sheet
+ * and cleared by a single tap or by scrolling to another reel.
+ */
+object CleanScreen {
+    var on by mutableStateOf(false)
+}
+
+/**
  * Device-local "not interested" list for reels. There is no backend notion of this,
  * so we simply remember the ids the user dismissed and filter them out of the feed.
  * Cleared on sign-out so the next account starts fresh.

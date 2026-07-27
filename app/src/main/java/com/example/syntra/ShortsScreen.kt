@@ -63,6 +63,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.People
@@ -728,6 +729,7 @@ fun ShortsScreen(
             },
             speed = playbackSpeed,
             onSpeedChange = { playbackSpeed = it },
+            onCleanScreen = { reelSettingsFor = null; com.example.syntra.net.CleanScreen.on = true },
             onDownload = { reelSettingsFor = null; downloadReel(reel) },
             onPip = { reelSettingsFor = null; PipController.request() },
             onTranslate = { reelSettingsFor = null; translateReel(reel) },
@@ -857,7 +859,8 @@ private fun ReelPage(
     val scope = rememberCoroutineScope()
     // Tap-to-pause, per reel. Reset when the reel scrolls off so coming back plays.
     var paused by remember { mutableStateOf(false) }
-    LaunchedEffect(active) { if (!active) paused = false }
+    // Scrolling to another reel resets pause AND leaves "layar bersih" (clean screen).
+    LaunchedEffect(active) { if (!active) { paused = false; com.example.syntra.net.CleanScreen.on = false } }
 
     // Pinch-to-zoom: two fingers scale the video up to 4×; lifting them springs it
     // back. Reset when the reel scrolls off so it never comes back mid-zoom.
@@ -865,6 +868,8 @@ private fun ReelPage(
     LaunchedEffect(active) { if (!active) runCatching { zoom.snapTo(1f) } }
     // While in the floating PiP window, strip everything but the video.
     val inPip = PipController.inPip
+    // "Layar bersih": same idea, on demand — hide all chrome for a clean view.
+    val cleanScreen = com.example.syntra.net.CleanScreen.on
 
     // Scrubber state, per reel. `seekReq` is bumped to a fresh Int on every drag so
     // the same target twice still triggers a seek; `scrubbing` freezes the bar (and
@@ -936,7 +941,13 @@ private fun ReelPage(
                 .padding(bottom = 200.dp)
                 .pointerInput(Unit) {
                     detectTapGestures(
-                        onTap = { paused = !paused },
+                        // In clean-screen mode a tap brings the chrome back; otherwise it
+                        // toggles play/pause as usual. Read the flag live so the gesture
+                        // block (keyed on Unit) never acts on a stale value.
+                        onTap = {
+                            if (com.example.syntra.net.CleanScreen.on) com.example.syntra.net.CleanScreen.on = false
+                            else paused = !paused
+                        },
                         onLongPress = { onLongPress() },
                         onDoubleTap = { offset ->
                             // Always show the heart; only send a like when it isn't
@@ -956,7 +967,7 @@ private fun ReelPage(
         }
 
         // Paused indicator.
-        if (paused && active && !inPip) {
+        if (paused && active && !inPip && !cleanScreen) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -973,9 +984,9 @@ private fun ReelPage(
             }
         }
 
-        // Everything below is chrome over the video — hidden in the PiP window so the
-        // little floating player shows just the clip.
-        if (!inPip) {
+        // Everything below is chrome over the video — hidden in the PiP window and in
+        // "layar bersih" so the player shows just the clip.
+        if (!inPip && !cleanScreen) {
             // Bottom gradient so caption/rail stay legible over bright video.
             Box(
                 modifier = Modifier
@@ -1151,6 +1162,7 @@ private fun ReelSettingsSheet(
     onAutoScrollChange: (Boolean) -> Unit,
     speed: Float,
     onSpeedChange: (Float) -> Unit,
+    onCleanScreen: () -> Unit,
     onDownload: () -> Unit,
     onPip: () -> Unit,
     onTranslate: () -> Unit,
@@ -1271,6 +1283,12 @@ private fun ReelSettingsSheet(
             Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.07f)))
             Spacer(Modifier.height(6.dp))
 
+            ReelActionRow(
+                icon = Icons.Filled.Fullscreen,
+                title = "Layar bersih",
+                subtitle = "Sembunyikan tampilan, tampilkan video saja",
+                onClick = onCleanScreen,
+            )
             ReelActionRow(
                 icon = Icons.Filled.PictureInPictureAlt,
                 title = "Gambar-dalam-gambar",
