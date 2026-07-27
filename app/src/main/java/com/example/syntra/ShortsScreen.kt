@@ -1719,16 +1719,18 @@ private fun ReelVideo(
     }
 
     BoxWithConstraints(modifier = modifier.clipToBounds(), contentAlignment = Alignment.Center) {
-        // Fill the page without distorting: scale the stretched surface back to
-        // the video's real aspect ratio, cropping the overflow.
+        // Show the WHOLE video without distorting or cropping: scale the stretched
+        // surface back to the video's real aspect ratio and fit it inside the page
+        // ("contain"). A 9:16 clip still fills edge-to-edge; other ratios get black
+        // bars instead of having their edges cut off.
         val boxW = maxWidth.value
         val boxH = maxHeight.value
         val scaleX: Float
         val scaleY: Float
         if (videoW > 0 && videoH > 0 && boxW > 0f && boxH > 0f) {
-            val cover = maxOf(boxW / videoW, boxH / videoH)
-            scaleX = videoW * cover / boxW
-            scaleY = videoH * cover / boxH
+            val fit = minOf(boxW / videoW, boxH / videoH)
+            scaleX = videoW * fit / boxW
+            scaleY = videoH * fit / boxH
         } else {
             scaleX = 1f
             scaleY = 1f
