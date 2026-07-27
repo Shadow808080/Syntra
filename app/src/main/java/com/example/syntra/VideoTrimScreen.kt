@@ -118,7 +118,10 @@ fun VideoTrimScreen(
     LaunchedEffect(uri) {
         withContext(Dispatchers.IO) {
             runCatching {
-                MediaMetadataRetriever().use { r ->
+                // release() in finally, not `.use {}` — AutoCloseable on
+                // MediaMetadataRetriever is API 29+, and minSdk is 26.
+                val r = MediaMetadataRetriever()
+                try {
                     r.setDataSource(context, uri)
                     val dur = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
                     withContext(Dispatchers.Main) { durationMs = dur }
@@ -130,6 +133,8 @@ fun VideoTrimScreen(
                             withContext(Dispatchers.Main) { frames.add(small) }
                         }
                     }
+                } finally {
+                    r.release()
                 }
             }
         }
@@ -399,10 +404,13 @@ private fun trimVideo(context: Context, src: Uri, startMs: Long, endMs: Long): U
 
         // Keep the video upright: carry the source rotation onto the output.
         runCatching {
-            MediaMetadataRetriever().use { r ->
+            val r = MediaMetadataRetriever()
+            try {
                 r.setDataSource(context, src)
                 r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
                     ?.toIntOrNull()?.let { muxer.setOrientationHint(it) }
+            } finally {
+                r.release()
             }
         }
 
@@ -422,7 +430,14 @@ private fun trimVideo(context: Context, src: Uri, startMs: Long, endMs: Long): U
             if (sampleTime > endUs) break
             info.presentationTimeUs = (sampleTime - firstUs).coerceAtLeast(0)
             info.offset = 0
-            info.flags = extractor.sampleFlags
+            // MediaExtractor.SAMPLE_FLAG_* are NOT MediaCodec.BUFFER_FLAG_* — passing
+            // them raw can e.g. read SAMPLE_FLAG_PARTIAL_FRAME (4) as the muxer's
+            // BUFFER_FLAG_END_OF_STREAM (4) and truncate the clip. Translate instead.
+            info.flags = if (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) {
+                android.media.MediaCodec.BUFFER_FLAG_KEY_FRAME
+            } else {
+                0
+            }
             val outTrack = indexMap[extractor.sampleTrackIndex]
             if (outTrack != null) muxer.writeSampleData(outTrack, buffer, info)
             if (!extractor.advance()) break

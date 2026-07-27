@@ -2418,10 +2418,15 @@ private fun estimateUploadEtaMs(sizeBytes: Int): Long {
 /** A single frame from the video, for the upload card thumbnail. Best-effort. */
 private fun reelThumbnail(context: Context, uri: Uri): androidx.compose.ui.graphics.ImageBitmap? =
     runCatching {
-        android.media.MediaMetadataRetriever().use { r ->
+        // NOT `.use {}` — MediaMetadataRetriever only implements AutoCloseable on API
+        // 29+, and minSdk is 26; release() in a finally works on every version.
+        val r = android.media.MediaMetadataRetriever()
+        try {
             r.setDataSource(context, uri)
             r.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?.asImageBitmap()
+        } finally {
+            r.release()
         }
     }.getOrNull()
 
