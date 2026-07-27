@@ -134,6 +134,7 @@ import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
+import com.example.syntra.net.NetMember
 import com.example.syntra.net.NetMessage
 import com.example.syntra.net.NetPresence
 import com.example.syntra.net.SocketListener
@@ -176,6 +177,8 @@ private data class Message(
     val text: String,
     val fromMe: Boolean,
     val time: String,
+    /** Who sent it (server user id). Used to look up the avatar/name in group chats. */
+    val senderId: String? = null,
     /** Epoch millis of when the message was sent; drives the per-day date chips. */
     val at: Long = System.currentTimeMillis(),
     /**
@@ -282,6 +285,7 @@ private fun NetMessage.toUi(): Message {
             else -> displayBody
         },
         fromMe = senderId == SyntraClient.myUserId,
+        senderId = senderId,
         time = formatClock(createdAt),
         at = parseEpoch(createdAt),
         media = if (isDeleted) null else attachment ?: legacyUrl,
@@ -466,6 +470,17 @@ fun ChatDetailScreen(
     var confirmLeave by remember(conversation) { mutableStateOf(false) }
     // Bumped after adding members so the open group-settings screen reloads its list.
     var groupReload by remember(conversation) { mutableIntStateOf(0) }
+    // Group senders by id → their profile, so each incoming bubble can show the
+    // sender's avatar + name (WhatsApp-style). Only fetched for group conversations.
+    val groupMembers = remember(conversation) { mutableStateMapOf<String, NetMember>() }
+    LaunchedEffect(conversation.id, conversation.isGroup, groupReload) {
+        if (!conversation.isGroup) return@LaunchedEffect
+        runCatching { SyntraClient.getMembers(conversation.id) }
+            .onSuccess { list ->
+                groupMembers.clear()
+                list.forEach { groupMembers[it.userId] = it }
+            }
+    }
     var chatTheme by remember(conversation) { mutableStateOf(ChatThemeStore.get(context, conversation.id)) }
 
     fun startCall(video: Boolean) {
@@ -1293,8 +1308,18 @@ fun ChatDetailScreen(
                 if (older == null || dayKey(older.at) != dayKey(msg.at)) {
                     DateChip(dayLabel(msg.at))
                 }
+                // In a group, show who sent each incoming message. `older` (index+1)
+                // is the previous message from the same run; only the first message of
+                // a same-sender run gets the name+avatar so a burst isn't repeated.
+                val sameSenderAsOlder = older != null && older.senderId == msg.senderId &&
+                    dayKey(older.at) == dayKey(msg.at)
+                val member = if (conversation.isGroup && !msg.fromMe) msg.senderId?.let { groupMembers[it] } else null
                 MessageBubble(
                     msg = msg,
+                    isGroup = conversation.isGroup,
+                    senderName = member?.let { it.displayName.ifBlank { it.username } },
+                    senderAvatar = member?.avatarUrl,
+                    showSenderHeader = !sameSenderAsOlder,
                     reactions = aggregateReactions(reactions[msg.id]),
                     outgoingColor = chatTheme.bubble,
                     onLongPress = { pendingMessage = msg },
@@ -2975,6 +3000,14 @@ private fun MessageBubble(
     state: DeliveryState,
     outgoingColor: Color,
     onLongPress: () -> Unit,
+    /** True when this bubble is inside a group chat (drives the sender avatar/name). */
+    isGroup: Boolean = false,
+    /** Sender's display name — shown above the first bubble of their run in a group. */
+    senderName: String? = null,
+    /** Sender's profile photo URL, for the small avatar beside a group bubble. */
+    senderAvatar: String? = null,
+    /** First bubble of a same-sender run: draw the name + avatar; otherwise indent only. */
+    showSenderHeader: Boolean = true,
     onImageClick: (String) -> Unit = {},
     onReply: () -> Unit = {},
     quoted: Message? = null,
@@ -3044,6 +3077,22 @@ private fun MessageBubble(
             verticalAlignment = Alignment.Bottom,
         ) {
             if (msg.fromMe) Spacer(Modifier.weight(1f))
+            // Group chats: a small sender avatar hugs the bottom of the bubble. Only the
+            // first bubble of a same-sender run draws it; the rest reserve the width so
+            // every bubble in the run stays left-aligned.
+            if (isGroup && !msg.fromMe) {
+                Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                    if (showSenderHeader) {
+                        GradientAvatar(
+                            gradient = gradientFor(msg.senderId ?: senderName ?: ""),
+                            initial = (senderName?.firstOrNull() ?: '?').toString().uppercase(),
+                            size = 28.dp,
+                            photoUrl = senderAvatar,
+                        )
+                    }
+                }
+                Spacer(Modifier.width(6.dp))
+            }
             Column(
                 modifier = Modifier
                     .graphicsLayer {
@@ -3065,6 +3114,24 @@ private fun MessageBubble(
                         vertical = if (isPureMedia) 0.dp else 6.dp,
                     ),
             ) {
+                // Sender name (group chats): a coloured label above the first bubble of
+                // a same-sender run, so it's clear who is talking.
+                if (isGroup && !msg.fromMe && showSenderHeader && !senderName.isNullOrBlank()) {
+                    Text(
+                        text = senderName,
+                        color = gradientFor(msg.senderId ?: senderName).first(),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(
+                            start = if (isPureMedia) 4.dp else 0.dp,
+                            end = if (isPureMedia) 4.dp else 0.dp,
+                            top = if (isPureMedia) 4.dp else 0.dp,
+                            bottom = 2.dp,
+                        ),
+                    )
+                }
                 // Quoted message (WhatsApp-style): a small placeholder of the message
                 // this one replies to, shown above the body.
                 quoted?.let { q ->

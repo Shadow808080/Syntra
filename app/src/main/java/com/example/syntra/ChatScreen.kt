@@ -255,7 +255,7 @@ private val gradientPalettes = listOf(
     listOf(Color(0xFF2196F3), Color(0xFF3B68F5)),
 )
 
-private fun gradientFor(id: String): List<Color> =
+internal fun gradientFor(id: String): List<Color> =
     gradientPalettes[(id.hashCode() and Int.MAX_VALUE) % gradientPalettes.size]
 
 private fun newLocalId(): String = "local-${System.currentTimeMillis()}"
