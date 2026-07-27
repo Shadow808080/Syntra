@@ -349,36 +349,52 @@ object RoomVoiceFx {
  * 10 ms frames LiveKit hands it. A novelty-grade disguise, not studio quality.
  */
 class RoomVoicePitchProcessor : AudioProcessorInterface {
-    private var channels = 1
-    private var shifters: Array<GranularPitch> = arrayOf(GranularPitch(48_000))
+    // WebRTC hands us DEINTERLEAVED FLOAT samples: numChannels × numBands blocks, each
+    // numFrames long, laid out channel-major then band. Every block is its own little
+    // time-domain signal, so each gets its own shifter with independent state.
+    private var shifters: Array<GranularPitch> = emptyArray()
+    private var streams = -1
+    private var grain = -1
 
     override fun isEnabled(): Boolean = true
     override fun getName(): String = "syntra-room-voice-fx"
 
     override fun initializeAudioProcessing(sampleRateHz: Int, numChannels: Int) {
-        channels = numChannels.coerceAtLeast(1)
-        shifters = Array(channels) { GranularPitch(sampleRateHz) }
+        shifters = emptyArray(); streams = -1; grain = -1
     }
 
     override fun resetAudioProcessing(newRate: Int) {
-        shifters = Array(channels) { GranularPitch(newRate) }
+        shifters = emptyArray(); streams = -1; grain = -1
     }
 
     override fun processAudio(numBands: Int, numFrames: Int, buffer: ByteBuffer) {
         val p = RoomVoiceFx.pitch
         // Normal (or near it): leave the mic untouched — zero cost, zero artefacts.
         if (p in 0.99f..1.01f) return
+        if (numFrames <= 0) return
 
-        buffer.order(ByteOrder.LITTLE_ENDIAN)
-        val view = buffer.asShortBuffer()
+        // The buffer is a DIRECT ByteBuffer over native-endian 32-bit floats. Reading it
+        // as int16 (the earlier bug) turned speech into "radio" static.
+        buffer.order(ByteOrder.nativeOrder())
+        val view = buffer.asFloatBuffer()
         val total = view.remaining()
         if (total <= 0) return
-        val arr = ShortArray(total)
+
+        // Each block (channel × band) is numFrames long; a band runs at numFrames*100 Hz,
+        // so a 40 ms grain is numFrames*4 samples.
+        val blocks = (total / numFrames).coerceAtLeast(1)
+        val g = (numFrames * 4).coerceAtLeast(128)
+        if (streams != blocks || grain != g) {
+            shifters = Array(blocks) { GranularPitch(g) }
+            streams = blocks; grain = g
+        }
+
+        val arr = FloatArray(total)
         view.get(arr)
-        if (channels <= 1) {
-            shifters[0].process(arr, 0, 1, total, p)
-        } else {
-            for (c in 0 until channels) shifters[c].process(arr, c, channels, total, p)
+        var s = 0
+        while (s < blocks) {
+            shifters[s].process(arr, s * numFrames, numFrames, p)
+            s++
         }
         view.rewind()
         view.put(arr)
@@ -386,38 +402,38 @@ class RoomVoicePitchProcessor : AudioProcessorInterface {
 }
 
 /**
- * A real-time, tempo-preserving pitch shifter over one channel.
+ * A real-time, tempo-preserving pitch shifter over one float stream.
  *
  * Classic two-tap crossfading delay line: two read pointers, half a grain apart, sweep
  * the delay buffer at rate `pitch`; triangular windows (which sum to 1) crossfade them
  * so the wrap-around discontinuity is inaudible. Reading faster than writing raises the
- * pitch; slower lowers it. All state lives here so it survives frame boundaries.
+ * pitch; slower lowers it. Scale-agnostic (works on WebRTC's float range as-is) and all
+ * state lives here so it survives frame boundaries.
  */
-private class GranularPitch(sampleRate: Int) {
-    private val grain: Int = (sampleRate * 0.040f).toInt().coerceAtLeast(256)
+private class GranularPitch(private val grain: Int) {
     private val bufSize: Int = Integer.highestOneBit(grain * 4).let { if (it < grain * 4) it * 2 else it }
     private val mask: Int = bufSize - 1
     private val buf = FloatArray(bufSize)
     private var writeIdx = 0
     private var delay = 0f
 
-    /** Shift `data[offset], data[offset+stride], …` (one channel) in place. */
-    fun process(data: ShortArray, offset: Int, stride: Int, total: Int, pitch: Float) {
+    /** Shift `count` contiguous samples starting at `offset`, in place. */
+    fun process(data: FloatArray, offset: Int, count: Int, pitch: Float) {
         val half = grain / 2f
-        var i = offset
-        while (i < total) {
-            buf[writeIdx and mask] = data[i] / 32768f
+        var i = 0
+        while (i < count) {
+            val idx = offset + i
+            buf[writeIdx and mask] = data[idx]
             val d1 = delay
             var d2 = delay + half
             if (d2 >= grain) d2 -= grain
-            val out = tap(d1) * window(d1, half) + tap(d2) * window(d2, half)
-            data[i] = (out.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+            data[idx] = tap(d1) * window(d1, half) + tap(d2) * window(d2, half)
             // Read pointer advances at `pitch` per output sample (readPos = writeIdx - delay).
             delay += (1f - pitch)
             if (delay >= grain) delay -= grain
             if (delay < 0f) delay += grain
             writeIdx++
-            i += stride
+            i++
         }
     }
 

@@ -29,7 +29,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DataUsage
@@ -62,6 +61,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -532,24 +532,22 @@ private fun SettingsCategoryScreen(
 
 @Composable
 private fun ProfileCard(username: String, email: String, avatarUrl: String?, onClick: () -> Unit = {}) {
-    Row(
+    // Centred, WhatsApp-style: big avatar on top, name and email centred beneath it.
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(NexusSurface, RoundedCornerShape(20.dp))
-            .border(1.dp, NexusStroke, RoundedCornerShape(20.dp))
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onClick,
             )
-            .padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
             modifier = Modifier
-                .size(58.dp)
+                .size(96.dp)
                 .clip(CircleShape)
                 .background(
                     Brush.linearGradient(listOf(Color(0xFF7C4DFF), Color(0xFF3B68F5))),
@@ -567,32 +565,29 @@ private fun ProfileCard(username: String, email: String, avatarUrl: String?, onC
                 Text(
                     text = username.first().uppercase(),
                     color = Color.White,
-                    fontSize = 24.sp,
+                    fontSize = 38.sp,
                     fontWeight = FontWeight.Bold,
                 )
             }
         }
-        Spacer(Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = username.replaceFirstChar { it.uppercase() },
-                color = NexusTextPrimary,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = email.ifBlank { "Belum masuk" },
-                color = NexusTextSecondary,
-                fontSize = 13.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Icon(
-            Icons.Filled.ChevronRight, null,
-            tint = NexusTextSecondary, modifier = Modifier.size(20.dp),
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = username.replaceFirstChar { it.uppercase() },
+            color = NexusTextPrimary,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = email.ifBlank { "Belum masuk" },
+            color = NexusTextSecondary,
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
         )
     }
 }
