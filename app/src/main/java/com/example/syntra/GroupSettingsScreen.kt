@@ -100,6 +100,9 @@ fun GroupSettingsScreen(
     var memberMenu by remember { mutableStateOf<NetMember?>(null) }
     var avatarUrl by remember(conversation.id) { mutableStateOf(conversation.avatarUrl) }
     var uploadingAvatar by remember { mutableStateOf(false) }
+    // Group description (fetched from GET /conversations/{id}) + its edit dialog.
+    var description by remember(conversation.id) { mutableStateOf("") }
+    var editingDescription by remember { mutableStateOf(false) }
 
     // Pick a new group icon from the gallery → downsample → upload → PATCH the group.
     val pickAvatar = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -132,6 +135,8 @@ fun GroupSettingsScreen(
         runCatching { SyntraClient.getMembers(conversation.id) }
             .onSuccess { members.clear(); members.addAll(it) }
             .onFailure { Toast.makeText(context, "Gagal memuat anggota: ${it.message}", Toast.LENGTH_SHORT).show() }
+        // Best-effort: the description needs the newer backend; ignore if unavailable.
+        runCatching { SyntraClient.getGroupDescription(conversation.id) }.onSuccess { description = it }
         loading = false
     }
     LaunchedEffect(conversation.id, reloadKey) { load() }
@@ -229,6 +234,46 @@ fun GroupSettingsScreen(
                         fontSize = 13.sp,
                     )
                 }
+            }
+
+            // Group description — tap to edit (admin/owner).
+            item(key = "description") {
+                val hasDesc = description.isNotBlank()
+                Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(1.dp).background(NexusSurface))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (canManage) {
+                                Modifier.clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    onClick = { editingDescription = true },
+                                )
+                            } else Modifier,
+                        )
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Deskripsi", color = NexusTextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        if (canManage) {
+                            Spacer(Modifier.weight(1f))
+                            Text("Ubah", color = NexusAccentSoft, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = when {
+                            hasDesc -> description
+                            canManage -> "Tambahkan deskripsi grup"
+                            else -> "Belum ada deskripsi"
+                        },
+                        color = if (hasDesc) NexusTextPrimary else NexusTextSecondary,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                    )
+                }
+                Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(1.dp).background(NexusSurface))
             }
 
             // Add members (admin/owner only).
@@ -351,6 +396,85 @@ fun GroupSettingsScreen(
                     pendingKick = member
                 }
                 Spacer(Modifier.height(6.dp))
+            }
+        }
+    }
+
+    if (editingDescription) {
+        GroupDescriptionDialog(
+            initial = description,
+            onDismiss = { editingDescription = false },
+            onSave = { newDesc ->
+                editingDescription = false
+                scope.launch {
+                    runCatching { SyntraClient.updateGroup(conversation.id, description = newDesc) }
+                        .onSuccess {
+                            description = newDesc
+                            Toast.makeText(context, "Deskripsi grup diperbarui.", Toast.LENGTH_SHORT).show()
+                        }
+                        .onFailure {
+                            Toast.makeText(context, "Gagal memperbarui deskripsi: ${it.message}", Toast.LENGTH_SHORT).show()
+                        }
+                }
+            },
+        )
+    }
+}
+
+/** Edit dialog for the group description (up to 500 characters). */
+@Composable
+private fun GroupDescriptionDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurface, RoundedCornerShape(22.dp))
+                .padding(22.dp),
+        ) {
+            Text("Deskripsi grup", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(14.dp))
+            androidx.compose.foundation.text.BasicTextField(
+                value = text,
+                onValueChange = { if (it.length <= 500) text = it },
+                textStyle = androidx.compose.ui.text.TextStyle(color = NexusTextPrimary, fontSize = 15.sp, lineHeight = 20.sp),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(NexusAccentSoft),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 90.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(NexusBackground)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                decorationBox = { inner ->
+                    if (text.isEmpty()) {
+                        Text("Tulis deskripsi grup…", color = NexusTextSecondary, fontSize = 15.sp)
+                    }
+                    inner()
+                },
+            )
+            Spacer(Modifier.height(6.dp))
+            Text("${text.length}/500", color = NexusTextSecondary, fontSize = 11.sp, modifier = Modifier.align(Alignment.End))
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Batal",
+                    color = NexusTextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDismiss)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(NexusAccent)
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onSave(text.trim()) }
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                ) {
+                    Text("Simpan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }

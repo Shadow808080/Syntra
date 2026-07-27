@@ -482,16 +482,27 @@ object SyntraClient {
     }
 
     /**
-     * Update a group's title and/or avatar (admin/owner only). `PATCH .../{id}`.
+     * Update a group's title, avatar and/or description (admin/owner only). `PATCH .../{id}`.
+     * A non-null [description] is sent (use "" to clear); null leaves it unchanged.
      * Returns the new public avatar URL from the refreshed conversation.
      */
-    suspend fun updateGroup(conversationId: String, title: String? = null, avatarMediaId: String? = null): String {
+    suspend fun updateGroup(
+        conversationId: String,
+        title: String? = null,
+        avatarMediaId: String? = null,
+        description: String? = null,
+    ): String {
         val payload = JSONObject()
         if (!title.isNullOrBlank()) payload.put("title", title)
         if (!avatarMediaId.isNullOrBlank()) payload.put("avatar_media_id", avatarMediaId)
+        if (description != null) payload.put("description", description)
         val data = patchData("/api/v1/conversations/$conversationId", payload) as JSONObject
         return data.optString("avatar_url", "")
     }
+
+    /** The group's current description (empty when none). `GET .../{id}`. */
+    suspend fun getGroupDescription(conversationId: String): String =
+        (getData("/api/v1/conversations/$conversationId") as JSONObject).optString("description", "")
 
     suspend fun getStories(): List<NetStoryGroup> =
         (getData("/api/v1/stories") as JSONArray).mapObjects { it.toStoryGroup() }
