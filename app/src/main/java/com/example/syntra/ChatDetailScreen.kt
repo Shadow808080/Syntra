@@ -517,6 +517,10 @@ fun ChatDetailScreen(
     // when all are read), with no visible scroll from the top. Each message is one
     // lazy item now (the date chip renders inside it), so message i == lazy index i.
     var landed by remember(conversation) { mutableStateOf(false) }
+    // "Settled" = the initial two-phase load (cache → server refresh) is done. Until
+    // then every auto-scroll is INSTANT, so replacing the list with the server page
+    // never animates a visible scroll from the top down to the newest message.
+    var settled by remember(conversation) { mutableStateOf(false) }
     LaunchedEffect(messages.isNotEmpty()) {
         if (messages.isNotEmpty() && !landed) {
             val firstUnread = (messages.size - conversation.unread).coerceIn(0, messages.lastIndex)
@@ -524,17 +528,22 @@ fun ChatDetailScreen(
             listState.scrollToItem(target)
             landed = true
         }
+        // No backend to refresh from → the list we have is final, so mark it settled.
+        if (!ApiConfig.ENABLED) settled = true
     }
 
-    // After landing, keep the newest message in view. Always scroll for my own
-    // sent messages; for incoming ones, only when I'm already near the bottom so
-    // it doesn't yank me while reading history.
+    // Keep the newest message in view. Before the chat has settled this is instant
+    // (so the initial server refresh doesn't animate); after that, my own sent
+    // messages and incoming ones (only when already near the bottom) smooth-scroll.
     LaunchedEffect(messages.size) {
         if (!landed || messages.isEmpty()) return@LaunchedEffect
         val lastIndex = messages.lastIndex
         val mineIsNewest = messages.lastOrNull()?.fromMe == true
         val visibleLast = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (mineIsNewest || visibleLast >= lastIndex - 2) {
+        if (!settled) {
+            // Snap, don't animate, while the chat is still loading its history.
+            if (mineIsNewest || visibleLast >= lastIndex - 2) listState.scrollToItem(lastIndex)
+        } else if (mineIsNewest || visibleLast >= lastIndex - 2) {
             listState.animateScrollToItem(lastIndex)
         }
     }
@@ -595,6 +604,9 @@ fun ChatDetailScreen(
                     Toast.makeText(context, "Gagal memuat pesan: ${it.message}", Toast.LENGTH_SHORT).show()
                 }
             }
+            // Initial load done (whether the refresh succeeded or not): from here on
+            // live messages may smooth-scroll.
+            settled = true
         }
 
         // Scroll-to-top → load the previous day/page of history, with a skeleton.
