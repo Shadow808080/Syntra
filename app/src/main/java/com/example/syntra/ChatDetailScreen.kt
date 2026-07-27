@@ -62,7 +62,10 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.outlined.RecordVoiceOver
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Done
@@ -148,6 +151,9 @@ import com.example.syntra.net.Translate
 import com.example.syntra.net.MediaAutoDownload
 import com.example.syntra.net.OutgoingMediaStore
 import com.example.syntra.net.ViewOnceStore
+import com.example.syntra.net.VoiceEffect
+import com.example.syntra.net.VoiceFxStore
+import com.example.syntra.net.VoiceProcessor
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
 import com.example.syntra.ui.theme.DangerFill
@@ -544,6 +550,10 @@ fun ChatDetailScreen(
     var recording by remember { mutableStateOf(false) }
     var recordSeconds by remember { mutableStateOf(0) }
     val recorder = remember { VoiceRecorder(context) }
+    // "Mode suara": a persistent voice changer applied to outgoing voice notes.
+    var voiceMode by remember { mutableStateOf(VoiceFxStore.get(context)) }
+    var showVoiceModes by remember { mutableStateOf(false) }
+    var applyingVoiceFx by remember { mutableStateOf(false) }
 
     LaunchedEffect(recording) {
         while (recording) {
@@ -983,8 +993,24 @@ fun ChatDetailScreen(
             return
         }
         val (file, millis) = result
-        sendMedia("voice_note", "m4a", "audio/mp4", file.readBytes(), millis)
-        file.delete()
+        if (voiceMode == VoiceEffect.NORMAL) {
+            sendMedia("voice_note", "m4a", "audio/mp4", file.readBytes(), millis)
+            file.delete()
+        } else {
+            // Apply the voice changer off the main thread, then send. Falls back to the
+            // untouched recording if processing fails for any reason.
+            applyingVoiceFx = true
+            scope.launch {
+                val processed = withContext(Dispatchers.IO) {
+                    VoiceProcessor.process(context, file, voiceMode)
+                }
+                val toSend = processed ?: file
+                sendMedia("voice_note", "m4a", "audio/mp4", toSend.readBytes(), millis)
+                if (processed != null && processed != file) processed.delete()
+                file.delete()
+                applyingVoiceFx = false
+            }
+        }
     }
 
     fun cancelRecording() {
@@ -1425,6 +1451,29 @@ fun ChatDetailScreen(
         if (recording) {
             RecordingBar(seconds = recordSeconds, onCancel = { cancelRecording() })
         }
+        if (applyingVoiceFx) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .background(NexusSurface, RoundedCornerShape(24.dp))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = NexusAccentSoft,
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    "Menerapkan mode suara ${voiceMode.label}…",
+                    color = NexusTextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
 
         // Edit banner above the composer — shows we're editing an existing message.
         if (editingId != null) {
@@ -1565,6 +1614,8 @@ fun ChatDetailScreen(
             onAttach = { showAttach = true },
             onStartRecording = { startRecording() },
             onStopRecording = { stopRecording() },
+            voiceMode = voiceMode,
+            onPickVoiceMode = { showVoiceModes = true },
             onValueChange = { text ->
                 val wasBlank = input.isBlank()
                 input = text
@@ -1625,6 +1676,18 @@ fun ChatDetailScreen(
                 )
             },
             onDismiss = { showAttach = false },
+        )
+    }
+
+    if (showVoiceModes) {
+        VoiceModeSheet(
+            current = voiceMode,
+            onSelect = {
+                voiceMode = it
+                VoiceFxStore.set(context, it)
+                showVoiceModes = false
+            },
+            onDismiss = { showVoiceModes = false },
         )
     }
 
@@ -3629,6 +3692,82 @@ private fun DeliveryTicks(state: DeliveryState, base: Color) {
 }
 
 // ---------------------------------------------------------------------------
+// Voice mode (voice changer) picker
+// ---------------------------------------------------------------------------
+
+/** Bottom dialog to pick the "mode suara" applied to outgoing voice notes. */
+@Composable
+private fun VoiceModeSheet(
+    current: VoiceEffect,
+    onSelect: (VoiceEffect) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurface, RoundedCornerShape(20.dp))
+                .padding(vertical = 8.dp),
+        ) {
+            Text(
+                text = "Mode suara",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp),
+            )
+            Text(
+                text = "Ubah suaramu di pesan suara sebelum dikirim.",
+                color = NexusTextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
+            )
+            VoiceEffect.entries.forEach { effect ->
+                val selected = effect == current
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = { onSelect(effect) },
+                        )
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) NexusAccentSoft.copy(alpha = 0.18f) else NexusSurfaceElevated),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(effect.emoji, fontSize = 20.sp)
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Text(
+                        effect.label,
+                        color = if (selected) NexusAccentSoft else NexusTextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (selected) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = "Dipilih",
+                            tint = NexusAccentSoft,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Input bar
 // ---------------------------------------------------------------------------
 
@@ -3644,6 +3783,8 @@ private fun MessageInputBar(
     onStopRecording: () -> Unit,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
+    voiceMode: VoiceEffect = VoiceEffect.NORMAL,
+    onPickVoiceMode: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -3705,6 +3846,22 @@ private fun MessageInputBar(
                         },
                 )
             }
+            Spacer(Modifier.width(10.dp))
+            // "Mode suara" — the voice changer for voice notes. Tinted + faintly
+            // highlighted when an effect other than Normal is active.
+            val voiceActive = voiceMode != VoiceEffect.NORMAL
+            Icon(
+                imageVector = if (voiceActive) Icons.Filled.RecordVoiceOver else Icons.Outlined.RecordVoiceOver,
+                contentDescription = "Mode suara",
+                tint = if (voiceActive) NexusAccentSoft else NexusTextSecondary,
+                modifier = Modifier
+                    .size(22.dp)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onPickVoiceMode,
+                    ),
+            )
             Spacer(Modifier.width(10.dp))
             Icon(
                 imageVector = Icons.Filled.PhotoCamera,
