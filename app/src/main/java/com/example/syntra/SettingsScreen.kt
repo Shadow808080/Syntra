@@ -119,6 +119,15 @@ object SettingsStore {
 
 private enum class SettingsPage { PROFILE, SECURITY, APP_LOCK, BLOCKED, THEME, STORAGE, AUTO_DOWNLOAD, PRIVACY_POLICY, TERMS }
 
+/** Top-level settings categories; each opens a sub-page holding its own menus. */
+private enum class SettingsCategory(val title: String) {
+    AKUN("Akun"),
+    PRIVASI("Privasi"),
+    NOTIFIKASI("Notifikasi"),
+    MEDIA("Media & tampilan"),
+    TENTANG("Tentang"),
+}
+
 @Composable
 fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
     BackHandler(onBack = onClose)
@@ -126,8 +135,8 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var confirmSignOut by remember { mutableStateOf(false) }
-    var showAbout by remember { mutableStateOf(false) }
     var open by remember { mutableStateOf<SettingsPage?>(null) }
+    var openCategory by remember { mutableStateOf<SettingsCategory?>(null) }
     var showMyProfile by remember { mutableStateOf(false) }
 
     // Tapping the profile card opens the full TikTok-style profile page.
@@ -136,7 +145,9 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
         return
     }
 
-    // Sub-screens take over the whole surface when open.
+    // Leaf sub-screens take over the whole surface when open. Checked FIRST so a page
+    // opened from inside a category (e.g. Profil under Akun) shows, and backing out of
+    // it returns to that category page (which is still open underneath).
     open?.let { page ->
         when (page) {
             SettingsPage.PROFILE -> ProfileSettingsScreen { open = null }
@@ -155,19 +166,18 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
         return
     }
 
+    // A category page (Akun / Privasi / …) holds the actual menus for that group.
+    openCategory?.let { category ->
+        SettingsCategoryScreen(
+            category = category,
+            onClose = { openCategory = null },
+            onOpenPage = { open = it },
+        )
+        return
+    }
+
     val email = SessionStore.signedInEmail(context).orEmpty()
     val username = ProfileStore.displayName(context, email)
-
-    // Local toggles
-    var notifMessages by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.NOTIF_MESSAGES, true)) }
-    var notifRooms by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.NOTIF_ROOMS, true)) }
-    var notifSound by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.NOTIF_SOUND, true)) }
-    var readReceipts by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.READ_RECEIPTS, true)) }
-    var showPresence by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.SHOW_PRESENCE, true)) }
-    var autoPlay by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.AUTO_PLAY_VIDEO, true)) }
-    var loudSpeaker by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.LOUD_SPEAKER, true)) }
-
-    fun save(key: String, value: Boolean) = SettingsStore.setBool(context, key, value)
 
     Column(
         modifier = Modifier
@@ -210,139 +220,28 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                 )
             }
 
-            item { SectionHeader("Akun") }
+            // Top level = one card of categories. Each opens its own page holding the
+            // menus that belong to it (Akun → Profil, Keamanan, Kunci aplikasi, dst.).
             item {
                 SettingsGroup {
-                    NavRow(Icons.Filled.Person, "Profil", "Ubah nama tampilan") {
-                        open = SettingsPage.PROFILE
+                    NavRow(Icons.Filled.Person, "Akun", "Profil, keamanan, kunci aplikasi") {
+                        openCategory = SettingsCategory.AKUN
                     }
                     Divider()
-                    NavRow(Icons.Filled.Lock, "Keamanan", "Sesi aktif") {
-                        open = SettingsPage.SECURITY
+                    NavRow(Icons.Filled.Visibility, "Privasi", "Status dibaca, status aktif, blokir") {
+                        openCategory = SettingsCategory.PRIVASI
                     }
                     Divider()
-                    NavRow(
-                        Icons.Filled.Fingerprint,
-                        "Kunci aplikasi",
-                        if (com.example.syntra.net.AppLockStore.isEnabled(context)) "Aktif — PIN & sidik jari" else "Nonaktif",
-                    ) { open = SettingsPage.APP_LOCK }
-                }
-            }
-
-            item { SectionHeader("Privasi") }
-            item {
-                SettingsGroup {
-                    ToggleRow(
-                        icon = Icons.Filled.Visibility,
-                        title = "Status dibaca",
-                        subtitle = "Orang lain melihat centang biru saat kamu membaca",
-                        checked = readReceipts,
-                        onChange = { readReceipts = it; save(SettingsStore.READ_RECEIPTS, it) },
-                    )
-                    Divider()
-                    ToggleRow(
-                        icon = Icons.Filled.Person,
-                        title = "Status aktif",
-                        subtitle = "Tampilkan titik hijau & \"terakhir dilihat\" saat kamu aktif",
-                        checked = showPresence,
-                        onChange = { on ->
-                            showPresence = on
-                            save(SettingsStore.SHOW_PRESENCE, on)
-                            // Enforced server-side: PATCH presence_visible, then reconnect
-                            // so the backend re-reads it and stops/starts broadcasting my
-                            // online status from the next connection.
-                            if (ApiConfig.ENABLED) scope.launch {
-                                runCatching { SyntraClient.updateProfile(presenceVisible = on) }
-                                runCatching { SyntraClient.reconnect() }
-                            }
-                        },
-                    )
-                    Divider()
-                    NavRow(
-                        Icons.Filled.Block,
-                        "Kontak diblokir",
-                        "${BlockStore.all(context).size} kontak",
-                    ) { open = SettingsPage.BLOCKED }
-                }
-            }
-
-            item { SectionHeader("Notifikasi") }
-            item {
-                SettingsGroup {
-                    ToggleRow(
-                        icon = Icons.Filled.Notifications,
-                        title = "Pesan",
-                        subtitle = "Notifikasi untuk chat pribadi dan grup",
-                        checked = notifMessages,
-                        onChange = { notifMessages = it; save(SettingsStore.NOTIF_MESSAGES, it) },
-                    )
-                    Divider()
-                    ToggleRow(
-                        icon = Icons.AutoMirrored.Filled.VolumeUp,
-                        title = "Voice room",
-                        subtitle = "Beri tahu saat room yang kamu ikuti dimulai",
-                        checked = notifRooms,
-                        onChange = { notifRooms = it; save(SettingsStore.NOTIF_ROOMS, it) },
-                    )
-                    Divider()
-                    ToggleRow(
-                        icon = Icons.Filled.Notifications,
-                        title = "Suara & getar",
-                        subtitle = null,
-                        checked = notifSound,
-                        onChange = { notifSound = it; save(SettingsStore.NOTIF_SOUND, it) },
-                    )
-                }
-            }
-
-            item { SectionHeader("Media & tampilan") }
-            item {
-                SettingsGroup {
-                    ToggleRow(
-                        icon = Icons.Filled.DataUsage,
-                        title = "Putar video otomatis",
-                        subtitle = "Story video langsung diputar saat dibuka",
-                        checked = autoPlay,
-                        onChange = { autoPlay = it; save(SettingsStore.AUTO_PLAY_VIDEO, it) },
-                    )
-                    Divider()
-                    ToggleRow(
-                        icon = Icons.AutoMirrored.Filled.VolumeUp,
-                        title = "Pengeras suara di room",
-                        subtitle = "Audio keluar lewat speaker, bukan earpiece",
-                        checked = loudSpeaker,
-                        onChange = { loudSpeaker = it; save(SettingsStore.LOUD_SPEAKER, it) },
-                    )
-                    Divider()
-                    NavRow(Icons.Filled.DarkMode, "Tema", AppTheme.current.label) {
-                        open = SettingsPage.THEME
+                    NavRow(Icons.Filled.Notifications, "Notifikasi", "Pesan, voice room, suara") {
+                        openCategory = SettingsCategory.NOTIFIKASI
                     }
                     Divider()
-                    NavRow(
-                        Icons.Filled.CloudDownload,
-                        "Unduh otomatis",
-                        "Pilih media yang diunduh sendiri di obrolan",
-                    ) {
-                        open = SettingsPage.AUTO_DOWNLOAD
+                    NavRow(Icons.Filled.DarkMode, "Media & tampilan", "Video, tema, unduh, penyimpanan") {
+                        openCategory = SettingsCategory.MEDIA
                     }
                     Divider()
-                    NavRow(Icons.Filled.Storage, "Penyimpanan", "Kelola cache media") {
-                        open = SettingsPage.STORAGE
-                    }
-                }
-            }
-
-            item { SectionHeader("Tentang") }
-            item {
-                SettingsGroup {
-                    NavRow(Icons.Filled.Info, "Tentang Syntra", "Versi 1.0") { showAbout = true }
-                    Divider()
-                    NavRow(Icons.Filled.Policy, "Kebijakan privasi", "Data apa yang kami simpan") {
-                        open = SettingsPage.PRIVACY_POLICY
-                    }
-                    Divider()
-                    NavRow(Icons.Filled.Gavel, "Ketentuan layanan", "Aturan memakai Syntra") {
-                        open = SettingsPage.TERMS
+                    NavRow(Icons.Filled.Info, "Tentang", "Info aplikasi, kebijakan, ketentuan") {
+                        openCategory = SettingsCategory.TENTANG
                     }
                 }
             }
@@ -410,6 +309,193 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                 }
             },
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Category page — the menus that belong to one settings category
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun SettingsCategoryScreen(
+    category: SettingsCategory,
+    onClose: () -> Unit,
+    onOpenPage: (SettingsPage) -> Unit,
+) {
+    BackHandler(onBack = onClose)
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showAbout by remember { mutableStateOf(false) }
+
+    // Toggle state for whichever category needs it (read once from device prefs).
+    var notifMessages by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.NOTIF_MESSAGES, true)) }
+    var notifRooms by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.NOTIF_ROOMS, true)) }
+    var notifSound by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.NOTIF_SOUND, true)) }
+    var readReceipts by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.READ_RECEIPTS, true)) }
+    var showPresence by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.SHOW_PRESENCE, true)) }
+    var autoPlay by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.AUTO_PLAY_VIDEO, true)) }
+    var loudSpeaker by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.LOUD_SPEAKER, true)) }
+
+    fun save(key: String, value: Boolean) = SettingsStore.setBool(context, key, value)
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(NexusBackground),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onClose,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack, "Kembali",
+                    tint = NexusTextPrimary, modifier = Modifier.size(22.dp),
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+            Text(category.title, color = NexusTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+
+        LazyColumn(contentPadding = PaddingValues(top = 8.dp, bottom = 32.dp)) {
+            item {
+                SettingsGroup {
+                    when (category) {
+                        SettingsCategory.AKUN -> {
+                            NavRow(Icons.Filled.Person, "Profil", "Ubah nama tampilan") {
+                                onOpenPage(SettingsPage.PROFILE)
+                            }
+                            Divider()
+                            NavRow(Icons.Filled.Lock, "Keamanan", "Sesi aktif") {
+                                onOpenPage(SettingsPage.SECURITY)
+                            }
+                            Divider()
+                            NavRow(
+                                Icons.Filled.Fingerprint,
+                                "Kunci aplikasi",
+                                if (com.example.syntra.net.AppLockStore.isEnabled(context)) "Aktif — PIN & sidik jari" else "Nonaktif",
+                            ) { onOpenPage(SettingsPage.APP_LOCK) }
+                        }
+
+                        SettingsCategory.PRIVASI -> {
+                            ToggleRow(
+                                icon = Icons.Filled.Visibility,
+                                title = "Status dibaca",
+                                subtitle = "Orang lain melihat centang biru saat kamu membaca",
+                                checked = readReceipts,
+                                onChange = { readReceipts = it; save(SettingsStore.READ_RECEIPTS, it) },
+                            )
+                            Divider()
+                            ToggleRow(
+                                icon = Icons.Filled.Person,
+                                title = "Status aktif",
+                                subtitle = "Tampilkan titik hijau & \"terakhir dilihat\" saat kamu aktif",
+                                checked = showPresence,
+                                onChange = { on ->
+                                    showPresence = on
+                                    save(SettingsStore.SHOW_PRESENCE, on)
+                                    // Enforced server-side: PATCH presence_visible, then reconnect
+                                    // so the backend re-reads it and stops/starts broadcasting my
+                                    // online status from the next connection.
+                                    if (ApiConfig.ENABLED) scope.launch {
+                                        runCatching { SyntraClient.updateProfile(presenceVisible = on) }
+                                        runCatching { SyntraClient.reconnect() }
+                                    }
+                                },
+                            )
+                            Divider()
+                            NavRow(
+                                Icons.Filled.Block,
+                                "Kontak diblokir",
+                                "${BlockStore.all(context).size} kontak",
+                            ) { onOpenPage(SettingsPage.BLOCKED) }
+                        }
+
+                        SettingsCategory.NOTIFIKASI -> {
+                            ToggleRow(
+                                icon = Icons.Filled.Notifications,
+                                title = "Pesan",
+                                subtitle = "Notifikasi untuk chat pribadi dan grup",
+                                checked = notifMessages,
+                                onChange = { notifMessages = it; save(SettingsStore.NOTIF_MESSAGES, it) },
+                            )
+                            Divider()
+                            ToggleRow(
+                                icon = Icons.AutoMirrored.Filled.VolumeUp,
+                                title = "Voice room",
+                                subtitle = "Beri tahu saat room yang kamu ikuti dimulai",
+                                checked = notifRooms,
+                                onChange = { notifRooms = it; save(SettingsStore.NOTIF_ROOMS, it) },
+                            )
+                            Divider()
+                            ToggleRow(
+                                icon = Icons.Filled.Notifications,
+                                title = "Suara & getar",
+                                subtitle = null,
+                                checked = notifSound,
+                                onChange = { notifSound = it; save(SettingsStore.NOTIF_SOUND, it) },
+                            )
+                        }
+
+                        SettingsCategory.MEDIA -> {
+                            ToggleRow(
+                                icon = Icons.Filled.DataUsage,
+                                title = "Putar video otomatis",
+                                subtitle = "Story video langsung diputar saat dibuka",
+                                checked = autoPlay,
+                                onChange = { autoPlay = it; save(SettingsStore.AUTO_PLAY_VIDEO, it) },
+                            )
+                            Divider()
+                            ToggleRow(
+                                icon = Icons.AutoMirrored.Filled.VolumeUp,
+                                title = "Pengeras suara di room",
+                                subtitle = "Audio keluar lewat speaker, bukan earpiece",
+                                checked = loudSpeaker,
+                                onChange = { loudSpeaker = it; save(SettingsStore.LOUD_SPEAKER, it) },
+                            )
+                            Divider()
+                            NavRow(Icons.Filled.DarkMode, "Tema", AppTheme.current.label) {
+                                onOpenPage(SettingsPage.THEME)
+                            }
+                            Divider()
+                            NavRow(
+                                Icons.Filled.CloudDownload,
+                                "Unduh otomatis",
+                                "Pilih media yang diunduh sendiri di obrolan",
+                            ) { onOpenPage(SettingsPage.AUTO_DOWNLOAD) }
+                            Divider()
+                            NavRow(Icons.Filled.Storage, "Penyimpanan", "Kelola cache media") {
+                                onOpenPage(SettingsPage.STORAGE)
+                            }
+                        }
+
+                        SettingsCategory.TENTANG -> {
+                            NavRow(Icons.Filled.Info, "Tentang Syntra", "Versi 1.0") { showAbout = true }
+                            Divider()
+                            NavRow(Icons.Filled.Policy, "Kebijakan privasi", "Data apa yang kami simpan") {
+                                onOpenPage(SettingsPage.PRIVACY_POLICY)
+                            }
+                            Divider()
+                            NavRow(Icons.Filled.Gavel, "Ketentuan layanan", "Aturan memakai Syntra") {
+                                onOpenPage(SettingsPage.TERMS)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if (showAbout) {
@@ -494,17 +580,6 @@ private fun ProfileCard(username: String, email: String, avatarUrl: String?, onC
             tint = NexusTextSecondary, modifier = Modifier.size(20.dp),
         )
     }
-}
-
-@Composable
-private fun SectionHeader(text: String) {
-    Text(
-        text = text.uppercase(),
-        color = NexusTextSecondary,
-        fontSize = 11.sp,
-        fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(start = 22.dp, top = 20.dp, bottom = 8.dp),
-    )
 }
 
 @Composable
