@@ -584,17 +584,12 @@ private fun ProfileCard(username: String, email: String, avatarUrl: String?, onC
 
 @Composable
 private fun SettingsGroup(content: @Composable () -> Unit) {
-    // Each section is its own boxed card (surface fill + outline + rounded corners), so
-    // "Akun", "Privasi", dst. jadi kotak terpisah yang jelas. Baris di dalamnya sudah
-    // punya padding sendiri, jadi kartu ini cukup memberi bingkai.
+    // Tampilan datar: tanpa kotak, tanpa bingkai. Pemisah antar-baris sudah cukup
+    // menandai batas tiap item.
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .clip(RoundedCornerShape(18.dp))
-            .background(NexusSurface)
-            .border(1.dp, NexusStroke, RoundedCornerShape(18.dp))
-            .padding(vertical = 4.dp),
+            .padding(horizontal = 16.dp),
     ) {
         content()
     }
@@ -632,10 +627,6 @@ private fun NavRow(icon: ImageVector, title: String, subtitle: String?, onClick:
                 Text(subtitle, color = NexusTextSecondary, fontSize = 12.sp)
             }
         }
-        Icon(
-            Icons.Filled.ChevronRight, null,
-            tint = NexusTextSecondary, modifier = Modifier.size(18.dp),
-        )
     }
 }
 

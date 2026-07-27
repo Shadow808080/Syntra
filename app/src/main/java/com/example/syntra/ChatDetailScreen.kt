@@ -3111,6 +3111,32 @@ private fun MessageBubble(
     val swipeX = remember { Animatable(0f) }
     val swipeScope = rememberCoroutineScope()
     Column(modifier = Modifier.fillMaxWidth()) {
+        // Group chats: sender avatar + name sit ABOVE the message, on the first bubble
+        // of a same-sender run. WhatsApp-style header over the chat.
+        if (isGroup && !msg.fromMe && showSenderHeader) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 2.dp, top = 2.dp, bottom = 3.dp),
+            ) {
+                GradientAvatar(
+                    gradient = gradientFor(msg.senderId ?: senderName ?: ""),
+                    initial = (senderName?.firstOrNull() ?: '?').toString().uppercase(),
+                    size = 28.dp,
+                    photoUrl = senderAvatar,
+                )
+                if (!senderName.isNullOrBlank()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = senderName,
+                        color = gradientFor(msg.senderId ?: senderName).first(),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -3140,22 +3166,6 @@ private fun MessageBubble(
             verticalAlignment = Alignment.Bottom,
         ) {
             if (msg.fromMe) Spacer(Modifier.weight(1f))
-            // Group chats: a small sender avatar hugs the bottom of the bubble. Only the
-            // first bubble of a same-sender run draws it; the rest reserve the width so
-            // every bubble in the run stays left-aligned.
-            if (isGroup && !msg.fromMe) {
-                Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
-                    if (showSenderHeader) {
-                        GradientAvatar(
-                            gradient = gradientFor(msg.senderId ?: senderName ?: ""),
-                            initial = (senderName?.firstOrNull() ?: '?').toString().uppercase(),
-                            size = 28.dp,
-                            photoUrl = senderAvatar,
-                        )
-                    }
-                }
-                Spacer(Modifier.width(6.dp))
-            }
             Column(
                 modifier = Modifier
                     .graphicsLayer {
@@ -3177,24 +3187,6 @@ private fun MessageBubble(
                         vertical = if (isPureMedia) 0.dp else 6.dp,
                     ),
             ) {
-                // Sender name (group chats): a coloured label above the first bubble of
-                // a same-sender run, so it's clear who is talking.
-                if (isGroup && !msg.fromMe && showSenderHeader && !senderName.isNullOrBlank()) {
-                    Text(
-                        text = senderName,
-                        color = gradientFor(msg.senderId ?: senderName).first(),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(
-                            start = if (isPureMedia) 4.dp else 0.dp,
-                            end = if (isPureMedia) 4.dp else 0.dp,
-                            top = if (isPureMedia) 4.dp else 0.dp,
-                            bottom = 2.dp,
-                        ),
-                    )
-                }
                 // Quoted message (WhatsApp-style): a small placeholder of the message
                 // this one replies to, shown above the body.
                 quoted?.let { q ->
