@@ -1332,14 +1332,14 @@ fun ChatScreen(
         Column(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 20.dp, bottom = 24.dp),
+                .padding(end = 20.dp, bottom = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             // People+ (find people) — secondary FAB, above the camera.
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(56.dp)
                     .background(NexusSurface, CircleShape)
                     .border(1.dp, NexusStroke, CircleShape)
                     .clickable(
@@ -1355,13 +1355,13 @@ fun ChatScreen(
                     // above the camera FAB — two blue circles stacked read as equals,
                     // and the eye had no way to tell which one was the main one.
                     tint = NexusTextSecondary,
-                    modifier = Modifier.size(24.dp),
+                    modifier = Modifier.size(27.dp),
                 )
             }
             // Camera (add story) — primary FAB.
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(56.dp)
                     .background(
                         brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
                         shape = CircleShape,
@@ -1376,7 +1376,7 @@ fun ChatScreen(
                     imageVector = Icons.Filled.AddAPhoto,
                     contentDescription = "Tambah story",
                     tint = Color.White,
-                    modifier = Modifier.size(23.dp),
+                    modifier = Modifier.size(26.dp),
                 )
             }
         }
@@ -1844,14 +1844,16 @@ private fun ActiveRow(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     StoryAvatar(
                         photo = person.photo,
-                        size = 58.dp,
+                        // Photo matches the chat-row avatar (54dp): the ring adds a 10dp
+                        // inset, so 64dp total leaves a 54dp face like a conversation row.
+                        size = 64.dp,
                         posts = person.posts,
                         // Per-segment: watched stories dim, unwatched stay lit. Watching
                         // updates each item's `viewed`, so this reflects progress live.
                         viewedCount = person.items.count { it.viewed },
                         onClick = { onStoryClick(index) },
                     )
-                    Spacer(Modifier.height(7.dp))
+                    Spacer(Modifier.height(3.dp))
                     Text(
                         text = if (person.isMine) "Kamu" else person.name,
                         color = if (person.isMine) NexusTextPrimary else NexusTextSecondary,
@@ -1882,57 +1884,76 @@ private fun StoryAuroraBackground(modifier: Modifier = Modifier) {
     val p1 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(9000, easing = LinearEasing)), label = "a1")
     val p2 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(14000, easing = LinearEasing)), label = "a2")
     val p3 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(11000, easing = LinearEasing)), label = "a3")
+    val p4 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(17000, easing = LinearEasing)), label = "a4")
+    // Sideways drift of the crests, plus an out-of-phase shimmer of the ribbon glow.
+    val drift by t.animateFloat(0f, 1f, infiniteRepeatable(tween(22000, easing = LinearEasing)), label = "drift")
+    val shimmer by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(4200, easing = LinearEasing)), label = "shimmer")
+
+    // Aurora-borealis spectrum derived from the theme accent — not one flat blue. The
+    // hue spread (green ↔ teal ↔ violet) is what gives it the "northern lights" feel
+    // while still following whatever accent the user's theme supplies.
+    val cA = NexusAccentSoft
+    val cB = shiftHue(NexusAccent, 62f)
+    val cC = shiftHue(NexusAccent, 140f)
+    val cD = shiftHue(NexusAccent, -48f)
 
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
 
-        fun ribbon(centerY: Float, amp: Float, waves: Float, phase: Float, thickness: Float): androidx.compose.ui.graphics.Path {
+        // A wavy horizontal band; `xShift` slides the wave sideways so crests travel.
+        fun ribbon(centerY: Float, amp: Float, waves: Float, phase: Float, xShift: Float, thickness: Float): androidx.compose.ui.graphics.Path {
             val path = androidx.compose.ui.graphics.Path()
-            val steps = 40
+            val steps = 48
             for (i in 0..steps) {
-                val x = w * i / steps
-                val y = centerY + (kotlin.math.sin(phase + i.toFloat() / steps * waves * twoPi) * amp)
+                val f = i.toFloat() / steps
+                val x = w * f
+                val y = centerY + kotlin.math.sin(phase + (f + xShift) * waves * twoPi) * amp
                 if (i == 0) path.moveTo(x, y - thickness / 2f) else path.lineTo(x, y - thickness / 2f)
             }
             for (i in steps downTo 0) {
-                val x = w * i / steps
-                val y = centerY + (kotlin.math.sin(phase + i.toFloat() / steps * waves * twoPi) * amp)
+                val f = i.toFloat() / steps
+                val x = w * f
+                val y = centerY + kotlin.math.sin(phase + (f + xShift) * waves * twoPi) * amp
                 path.lineTo(x, y + thickness / 2f)
             }
             path.close()
             return path
         }
 
-        // Three woven aurora ribbons. Soft vertical gradients (transparent → tint →
-        // transparent) make each ribbon a glow rather than a hard band.
-        //
-        // The tints are DERIVED from the theme accent, not fixed. They used to be a
-        // hardcoded blue/teal/periwinkle, so the header kept glowing blue behind a
-        // Forest or Sunset theme — the one part of the screen that ignored the user's
-        // choice. Two of the three are hue-shifted off the accent so the ribbons still
-        // read as separate layers instead of one flat wash.
-        val a1 = NexusAccentSoft
-        val a2 = shiftHue(NexusAccent, 34f)
-        val a3 = NexusAccent
-        drawPath(
-            ribbon(h * 0.42f, h * 0.16f, 1.4f, p1, h * 0.5f),
-            brush = Brush.verticalGradient(
-                listOf(Color.Transparent, a1.copy(alpha = 0.22f), Color.Transparent),
-            ),
-        )
-        drawPath(
-            ribbon(h * 0.58f, h * 0.20f, 1.1f, p2, h * 0.55f),
-            brush = Brush.verticalGradient(
-                listOf(Color.Transparent, a2.copy(alpha = 0.18f), Color.Transparent),
-            ),
-        )
-        drawPath(
-            ribbon(h * 0.5f, h * 0.18f, 1.7f, p3, h * 0.42f),
-            brush = Brush.verticalGradient(
-                listOf(Color.Transparent, a3.copy(alpha = 0.2f), Color.Transparent),
-            ),
-        )
+        fun glow(base: Color, a: Float) =
+            Brush.verticalGradient(listOf(Color.Transparent, base.copy(alpha = a.coerceIn(0f, 1f)), Color.Transparent))
+
+        // Four woven ribbons across the spectrum; each breathes on its own shimmer phase.
+        val s1 = 0.5f + 0.5f * kotlin.math.sin(shimmer)
+        val s2 = 0.5f + 0.5f * kotlin.math.sin(shimmer + 2.1f)
+        val s3 = 0.5f + 0.5f * kotlin.math.sin(shimmer + 4.2f)
+        drawPath(ribbon(h * 0.40f, h * 0.17f, 1.4f, p1, drift, h * 0.50f), glow(cA, 0.16f + 0.10f * s1))
+        drawPath(ribbon(h * 0.58f, h * 0.21f, 1.1f, p2, -drift, h * 0.55f), glow(cB, 0.12f + 0.09f * s2))
+        drawPath(ribbon(h * 0.50f, h * 0.18f, 1.7f, p3, drift * 0.6f, h * 0.42f), glow(cC, 0.12f + 0.09f * s3))
+        drawPath(ribbon(h * 0.46f, h * 0.14f, 2.2f, p4, -drift * 0.4f, h * 0.36f), glow(cD, 0.10f + 0.08f * s1))
+
+        // A scatter of slow-drifting light specks — the sparkle of a real aurora.
+        val palette = listOf(cA, cB, cC, cD)
+        val specks = 7
+        for (k in 0 until specks) {
+            val seed = k * 1.6180339f
+            val x = w * ((seed + drift * (0.6f + 0.15f * k)) % 1f)
+            val bob = kotlin.math.sin(p2 + seed * twoPi) * h * 0.16f
+            val y = h * (0.30f + 0.40f * ((seed * 2.3f) % 1f)) + bob
+            val twk = 0.5f + 0.5f * kotlin.math.sin(shimmer + seed * 3f)
+            val r = (2f + 2f * ((seed * 1.7f) % 1f)).dp.toPx()
+            val col = palette[k % palette.size]
+            drawCircle(
+                brush = Brush.radialGradient(
+                    listOf(col.copy(alpha = 0.5f * twk), Color.Transparent),
+                    center = Offset(x, y),
+                    radius = r * 3f,
+                ),
+                radius = r * 3f,
+                center = Offset(x, y),
+            )
+        }
     }
 }
 
