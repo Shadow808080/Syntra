@@ -503,6 +503,8 @@ fun ChatDetailScreen(
     var confirmClear by remember(conversation) { mutableStateOf(false) }
     var pendingMessage by remember(conversation) { mutableStateOf<Message?>(null) }
     var fullscreenImage by remember(conversation) { mutableStateOf<String?>(null) }
+    // A chat video opened for full-screen playback (its URL), or null.
+    var fullscreenVideo by remember(conversation) { mutableStateOf<String?>(null) }
     // Caption shown with the full-screen photo. For a view-once photo this is the
     // ONLY place it appears — the bubble deliberately hides it until it's opened.
     var fullscreenCaption by remember(conversation) { mutableStateOf("") }
@@ -1069,10 +1071,44 @@ fun ChatDetailScreen(
     val gallery = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
-        if (uri != null) scope.launch {
-            // Decode DOWNSAMPLED off the main thread and hand off to the edit screen;
-            // nothing is sent until the user confirms there. Full-res photos would decode
-            // to a bitmap too large for the Canvas and crash the app on draw.
+        if (uri == null) return@rememberLauncherForActivityResult
+        val mime = context.contentResolver.getType(uri) ?: ""
+        if (mime.startsWith("video")) {
+            // Video: no bitmap editor — read the bytes and send straight through the
+            // media pipeline (the same one photos/voice notes use). The bubble shows a
+            // "mengirim" clock immediately, then swaps to the bucket URL once uploaded.
+            scope.launch {
+                // Reject an oversized clip BEFORE reading it all into memory, so a huge
+                // pick can't OOM the app just to be rejected by sendMedia afterwards.
+                val size = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
+                    }.getOrNull() ?: -1L
+                }
+                if (size > 100L * 1024 * 1024) {
+                    Toast.makeText(context, "Video terlalu besar (maks 100 MB).", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                val bytes = withContext(Dispatchers.IO) {
+                    runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+                }
+                if (bytes == null) {
+                    Toast.makeText(context, "Tidak bisa membuka video.", Toast.LENGTH_SHORT).show()
+                } else {
+                    val ext = when {
+                        mime.contains("webm") -> "webm"
+                        mime.contains("3gp") || mime.contains("3gpp") -> "3gp"
+                        mime.contains("quicktime") -> "mov"
+                        mime.contains("matroska") -> "mkv"
+                        else -> "mp4"
+                    }
+                    sendMedia("video", ext, mime, bytes)
+                }
+            }
+        } else scope.launch {
+            // Photo: decode DOWNSAMPLED off the main thread and hand off to the edit
+            // screen; nothing is sent until the user confirms there. Full-res photos would
+            // decode to a bitmap too large for the Canvas and crash the app on draw.
             val bmp = withContext(Dispatchers.IO) { decodeSampledBitmap(context, uri) }
             if (bmp != null) pendingImage = bmp
             else Toast.makeText(context, "Tidak bisa membuka gambar.", Toast.LENGTH_SHORT).show()
@@ -1328,6 +1364,7 @@ fun ChatDetailScreen(
                         Text(
                             text = when {
                                 pinned.media != null && pinned.media.isAudioUrl() -> "🎤 Pesan suara"
+                                pinned.media != null && pinned.media.isVideoUrl() -> "🎬 Video"
                                 pinned.media != null -> "📷 Foto"
                                 else -> pinned.text
                             },
@@ -1396,7 +1433,11 @@ fun ChatDetailScreen(
                         reactions = aggregateReactions(reactions[msg.id]),
                         outgoingColor = chatTheme.bubble,
                         onLongPress = { pendingMessage = msg },
-                        onImageClick = { fullscreenCaption = msg.text; fullscreenImage = it },
+                        onImageClick = {
+                            // A video opens the player; a photo/GIF opens the image viewer.
+                            if (it.isVideoUrl()) fullscreenVideo = it
+                            else { fullscreenCaption = msg.text; fullscreenImage = it }
+                        },
                         onReply = { replyingTo = msg },
                         // Spent from THIS side's point of view: for a received photo that's
                         // my own open; for one I sent it's the recipient having opened it
@@ -1586,6 +1627,7 @@ fun ChatDetailScreen(
                     Text(
                         text = when {
                             q.media != null && q.media.isAudioUrl() -> "🎤 Pesan suara"
+                            q.media != null && q.media.isVideoUrl() -> "🎬 Video"
                             q.media != null -> "📷 Foto"
                             else -> q.text
                         },
@@ -1720,7 +1762,7 @@ fun ChatDetailScreen(
             onGallery = {
                 showAttach = false
                 gallery.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
                 )
             },
             onDismiss = { showAttach = false },
@@ -1999,6 +2041,11 @@ fun ChatDetailScreen(
                 )
             }
         }
+    }
+
+    // Fullscreen video player — tap a chat video to play it edge-to-edge.
+    fullscreenVideo?.let { url ->
+        FullscreenVideoPlayer(url = url, onClose = { fullscreenVideo = null })
     }
 
     // Edit-before-send screen for a picked/captured photo. Sending compresses the
@@ -3266,6 +3313,7 @@ private fun MessageBubble(
                             Text(
                                 text = when {
                                     q.media != null && q.media.isAudioUrl() -> "🎤 Pesan suara"
+                                    q.media != null && q.media.isVideoUrl() -> "🎬 Video"
                                     q.media != null -> "📷 Foto"
                                     else -> q.text
                                 },
@@ -3347,6 +3395,11 @@ private fun MessageBubble(
                                     interactionSource = remember { MutableInteractionSource() },
                                 ) { onImageClick(media) },
                         )
+                    media != null && media.isVideoUrl() -> ChatVideoBubble(
+                        media = media,
+                        autoDownload = MediaAutoDownload.allowed(context, MediaAutoDownload.Kind.VIDEO),
+                        onClick = { onImageClick(media) },
+                    )
                     media != null -> ChatMediaImage(
                         model = media,
                         contentDescription = "Foto",
@@ -3460,6 +3513,183 @@ private fun String.isMediaUrl(): Boolean =
 
 private fun String.isAudioUrl(): Boolean =
     endsWith(".m4a", true) || endsWith(".mp3", true) || endsWith(".aac", true)
+
+/** A media URL that points at a video clip (drives the play button + player). */
+private fun String.isVideoUrl(): Boolean {
+    val u = substringBefore('?').lowercase()
+    return u.endsWith(".mp4") || u.endsWith(".mov") || u.endsWith(".webm") ||
+        u.endsWith(".mkv") || u.endsWith(".3gp") || u.endsWith(".m4v")
+}
+
+/**
+ * A chat video: the first frame as a poster (Coil decodes it via VideoFrameDecoder)
+ * with a play button on top. Tapping opens [FullscreenVideoPlayer]. When auto-download
+ * of video is off, [ChatMediaImage] shows a tap-to-download cover instead and the play
+ * button stays hidden until the clip is actually on the phone.
+ */
+@Composable
+private fun ChatVideoBubble(
+    media: String,
+    autoDownload: Boolean,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(width = 220.dp, height = 260.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+            ) { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        ChatMediaImage(
+            model = media,
+            contentDescription = "Video",
+            contentScale = ContentScale.Crop,
+            autoDownload = autoDownload,
+            label = "Video",
+            modifier = Modifier.matchParentSize(),
+        )
+        if (autoDownload) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .background(Color.Black.copy(alpha = 0.45f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = "Putar video",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Edge-to-edge player for a chat video. Uses ExoPlayer over a plain TextureView (the
+ * same surface Shorts uses) rather than the media3 PlayerView, so no extra dependency
+ * is pulled in. The video is fit ("contain") to its real aspect ratio; a tap toggles
+ * play/pause, and the X (or system back) closes it.
+ */
+@Composable
+private fun FullscreenVideoPlayer(url: String, onClose: () -> Unit) {
+    val context = LocalContext.current
+    androidx.activity.compose.BackHandler { onClose() }
+    var playing by remember(url) { mutableStateOf(true) }
+    var videoW by remember(url) { mutableFloatStateOf(0f) }
+    var videoH by remember(url) { mutableFloatStateOf(0f) }
+    val player = remember(url) {
+        androidx.media3.exoplayer.ExoPlayer.Builder(context).build().apply {
+            // Play the cached copy if it's already on disk; otherwise stream the URL now
+            // and warm the cache in the background so a replay is instant and offline-safe.
+            val src = if (url.startsWith("http")) {
+                VideoCache.cachedFile(context, url)?.absolutePath ?: url.also { VideoCache.prefetch(context, url) }
+            } else {
+                url
+            }
+            setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.parse(src)))
+            playWhenReady = true
+            prepare()
+        }
+    }
+    DisposableEffect(url) {
+        val listener = object : androidx.media3.common.Player.Listener {
+            override fun onVideoSizeChanged(size: androidx.media3.common.VideoSize) {
+                videoW = size.width.toFloat()
+                videoH = size.height.toFloat()
+            }
+            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+        }
+        player.addListener(listener)
+        com.example.syntra.net.MusicPlayer.pauseForExternalAudio()
+        onDispose { runCatching { player.release() } }
+    }
+    LaunchedEffect(playing) { runCatching { player.playWhenReady = playing } }
+
+    Box(
+        modifier = Modifier.fillMaxSize().background(Color.Black),
+        contentAlignment = Alignment.Center,
+    ) {
+        androidx.compose.foundation.layout.BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { playing = !playing },
+            contentAlignment = Alignment.Center,
+        ) {
+            val boxW = maxWidth.value
+            val boxH = maxHeight.value
+            val sx: Float
+            val sy: Float
+            if (videoW > 0 && videoH > 0 && boxW > 0f && boxH > 0f) {
+                val fit = minOf(boxW / videoW, boxH / videoH)
+                sx = videoW * fit / boxW
+                sy = videoH * fit / boxH
+            } else {
+                sx = 1f
+                sy = 1f
+            }
+            androidx.compose.ui.viewinterop.AndroidView(
+                factory = { ctx ->
+                    android.view.TextureView(ctx).apply {
+                        surfaceTextureListener = object : android.view.TextureView.SurfaceTextureListener {
+                            override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
+                                runCatching { player.setVideoSurface(android.view.Surface(st)) }
+                            }
+                            override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) = Unit
+                            override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture): Boolean {
+                                runCatching { player.clearVideoSurface() }
+                                return true
+                            }
+                            override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) = Unit
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = sx
+                        scaleY = sy
+                    },
+            )
+            if (!playing) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .background(Color.Black.copy(alpha = 0.4f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = "Putar",
+                        tint = Color.White,
+                        modifier = Modifier.size(40.dp),
+                    )
+                }
+            }
+        }
+        Icon(
+            imageVector = Icons.Filled.Close,
+            contentDescription = "Tutup",
+            tint = Color.White,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(12.dp)
+                .size(28.dp)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { onClose() },
+        )
+    }
+}
 
 /**
  * Only ONE voice note plays at a time across the whole chat. When a bubble starts,
