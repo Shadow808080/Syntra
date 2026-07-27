@@ -5,11 +5,17 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import io.livekit.android.audio.AudioProcessorInterface
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.floor
 
 /**
  * "Mode suara" — a voice changer for outgoing voice notes.
@@ -304,4 +310,127 @@ object VoiceProcessor {
 
     private fun floatToShort(f: FloatArray): ShortArray =
         ShortArray(f.size) { (f[it].coerceIn(-1f, 1f) * 32767f).toInt().toShort() }
+}
+
+// ---------------------------------------------------------------------------
+// "Mode suara" for VOICE ROOMS — real-time pitch shift on the outgoing mic.
+// ---------------------------------------------------------------------------
+
+/**
+ * The voice mode currently applied to MY microphone in a voice room.
+ *
+ * Unlike the chat voice note (which processes a finished file), a room is live: the
+ * pitch is read by the audio thread every frame via [pitch], while [effect] drives the
+ * picker UI. A room disguise is per-session — [reset] on leaving a room.
+ */
+object RoomVoiceFx {
+    var effect by mutableStateOf(VoiceEffect.NORMAL)
+        private set
+
+    /** Read on the real-time audio thread — keep it a plain volatile float. */
+    @Volatile
+    var pitch: Float = 1f
+        private set
+
+    fun set(e: VoiceEffect) {
+        effect = e
+        pitch = e.pitch
+    }
+
+    fun reset() = set(VoiceEffect.NORMAL)
+}
+
+/**
+ * LiveKit capture post-processor that pitch-shifts the outgoing microphone in real time,
+ * so the room hears the chosen [RoomVoiceFx] voice. Bypasses entirely at Normal pitch.
+ *
+ * Uses a streaming granular (two-tap crossfading delay line) pitch shifter: it keeps the
+ * tempo, needs no look-ahead beyond one grain (~40 ms), and carries state across the
+ * 10 ms frames LiveKit hands it. A novelty-grade disguise, not studio quality.
+ */
+class RoomVoicePitchProcessor : AudioProcessorInterface {
+    private var channels = 1
+    private var shifters: Array<GranularPitch> = arrayOf(GranularPitch(48_000))
+
+    override fun isEnabled(): Boolean = true
+    override fun getName(): String = "syntra-room-voice-fx"
+
+    override fun initializeAudioProcessing(sampleRateHz: Int, numChannels: Int) {
+        channels = numChannels.coerceAtLeast(1)
+        shifters = Array(channels) { GranularPitch(sampleRateHz) }
+    }
+
+    override fun resetAudioProcessing(newRate: Int) {
+        shifters = Array(channels) { GranularPitch(newRate) }
+    }
+
+    override fun processAudio(numBands: Int, numFrames: Int, buffer: ByteBuffer) {
+        val p = RoomVoiceFx.pitch
+        // Normal (or near it): leave the mic untouched — zero cost, zero artefacts.
+        if (p in 0.99f..1.01f) return
+
+        buffer.order(ByteOrder.LITTLE_ENDIAN)
+        val view = buffer.asShortBuffer()
+        val total = view.remaining()
+        if (total <= 0) return
+        val arr = ShortArray(total)
+        view.get(arr)
+        if (channels <= 1) {
+            shifters[0].process(arr, 0, 1, total, p)
+        } else {
+            for (c in 0 until channels) shifters[c].process(arr, c, channels, total, p)
+        }
+        view.rewind()
+        view.put(arr)
+    }
+}
+
+/**
+ * A real-time, tempo-preserving pitch shifter over one channel.
+ *
+ * Classic two-tap crossfading delay line: two read pointers, half a grain apart, sweep
+ * the delay buffer at rate `pitch`; triangular windows (which sum to 1) crossfade them
+ * so the wrap-around discontinuity is inaudible. Reading faster than writing raises the
+ * pitch; slower lowers it. All state lives here so it survives frame boundaries.
+ */
+private class GranularPitch(sampleRate: Int) {
+    private val grain: Int = (sampleRate * 0.040f).toInt().coerceAtLeast(256)
+    private val bufSize: Int = Integer.highestOneBit(grain * 4).let { if (it < grain * 4) it * 2 else it }
+    private val mask: Int = bufSize - 1
+    private val buf = FloatArray(bufSize)
+    private var writeIdx = 0
+    private var delay = 0f
+
+    /** Shift `data[offset], data[offset+stride], …` (one channel) in place. */
+    fun process(data: ShortArray, offset: Int, stride: Int, total: Int, pitch: Float) {
+        val half = grain / 2f
+        var i = offset
+        while (i < total) {
+            buf[writeIdx and mask] = data[i] / 32768f
+            val d1 = delay
+            var d2 = delay + half
+            if (d2 >= grain) d2 -= grain
+            val out = tap(d1) * window(d1, half) + tap(d2) * window(d2, half)
+            data[i] = (out.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+            // Read pointer advances at `pitch` per output sample (readPos = writeIdx - delay).
+            delay += (1f - pitch)
+            if (delay >= grain) delay -= grain
+            if (delay < 0f) delay += grain
+            writeIdx++
+            i += stride
+        }
+    }
+
+    /** Fractionally-interpolated sample `delay` behind the write head. */
+    private fun tap(d: Float): Float {
+        val pos = writeIdx - d
+        val i0 = floor(pos).toInt()
+        val frac = pos - i0
+        val a = buf[i0 and mask]
+        val b = buf[(i0 + 1) and mask]
+        return a + (b - a) * frac
+    }
+
+    /** Triangular window: 0 at the grain edges, 1 at its centre. */
+    private fun window(d: Float, half: Float): Float = (1f - abs(d - half) / half).coerceIn(0f, 1f)
 }

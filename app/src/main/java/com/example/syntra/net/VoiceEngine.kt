@@ -63,7 +63,16 @@ object VoiceEngine {
     /** Connects to the SFU. Safe to call again; the previous session is dropped first. */
     suspend fun connect(context: Context, url: String, token: String) {
         disconnect()
-        val r = LiveKit.create(appContext = context.applicationContext)
+        // Inject the real-time voice changer as a mic capture post-processor. It bypasses
+        // itself when the mode is Normal, so an untouched room pays nothing.
+        val overrides = io.livekit.android.LiveKitOverrides(
+            audioOptions = io.livekit.android.AudioOptions(
+                audioProcessorOptions = io.livekit.android.audio.AudioProcessorOptions(
+                    RoomVoicePitchProcessor(), false, null, false,
+                ),
+            ),
+        )
+        val r = LiveKit.create(appContext = context.applicationContext, overrides = overrides)
 
         // Route audio BEFORE connecting so the very first remote frames play out of
         // the loudspeaker instead of the (near-silent) earpiece.
@@ -196,6 +205,8 @@ object VoiceEngine {
     fun disconnect() {
         runCatching { scope?.cancel() }
         scope = null
+        // A voice disguise is per-session — the next room starts as your real voice.
+        RoomVoiceFx.reset()
         _audioLevels.value = emptyMap()
         _videoTracks.value = emptyMap()
         _cameraOn.value = false

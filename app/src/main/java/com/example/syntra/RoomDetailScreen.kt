@@ -64,6 +64,8 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
@@ -214,6 +216,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     // Bottom sheets reachable from the control bar / top bar.
     var showMore by remember { mutableStateOf(false) }
     var showPeople by remember { mutableStateOf(false) }
+    var showVoiceModes by remember { mutableStateOf(false) }
 
     // Elapsed time since the room UI went live, shown as a call timer in the top bar.
     var elapsed by remember(room.id) { mutableIntStateOf(0) }
@@ -780,21 +783,32 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
             )
         }
 
-        // "More" — volume, loudspeaker, switch camera, and (host) end room.
+        // "More" — volume, loudspeaker, voice mode, switch camera, and (host) end room.
         if (showMore) {
             RoomMoreSheet(
                 volume = volume,
                 loudspeaker = loudspeaker,
                 cameraOn = cameraOn,
                 isHost = isHost,
+                voiceMode = com.example.syntra.net.RoomVoiceFx.effect,
                 onVolume = { applyVolume(it) },
                 onToggleLoudspeaker = {
                     loudspeaker = !loudspeaker
                     VoiceEngine.setLoudspeaker(loudspeaker)
                 },
                 onSwitchCamera = { VoiceEngine.switchCamera() },
+                onVoiceMode = { showMore = false; showVoiceModes = true },
                 onEndRoom = { showMore = false; confirmLeave = true },
                 onDismiss = { showMore = false },
+            )
+        }
+
+        // Voice-changer picker for my mic.
+        if (showVoiceModes) {
+            RoomVoiceModeSheet(
+                current = com.example.syntra.net.RoomVoiceFx.effect,
+                onSelect = { com.example.syntra.net.RoomVoiceFx.set(it); showVoiceModes = false },
+                onDismiss = { showVoiceModes = false },
             )
         }
     }
@@ -1490,9 +1504,11 @@ private fun RoomMoreSheet(
     loudspeaker: Boolean,
     cameraOn: Boolean,
     isHost: Boolean,
+    voiceMode: com.example.syntra.net.VoiceEffect,
     onVolume: (Float) -> Unit,
     onToggleLoudspeaker: () -> Unit,
     onSwitchCamera: () -> Unit,
+    onVoiceMode: () -> Unit,
     onEndRoom: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1519,6 +1535,8 @@ private fun RoomMoreSheet(
                 onToggleLoudspeaker = onToggleLoudspeaker,
             )
             Spacer(Modifier.height(6.dp))
+            // Voice changer for MY mic in this room.
+            SheetAction("Mode suara · ${voiceMode.label}", Icons.Filled.RecordVoiceOver, NexusTextPrimary, onVoiceMode)
             // Chat lives on the switch above the room body, not buried in here.
             if (cameraOn) {
                 SheetAction("Ganti kamera", Icons.Filled.Cameraswitch, NexusTextPrimary, onSwitchCamera)
@@ -1527,6 +1545,65 @@ private fun RoomMoreSheet(
                 SheetAction("Akhiri room", Icons.Filled.CallEnd, Color(0xFFFF5D5D), onEndRoom)
             }
             SheetAction("Tutup", Icons.Filled.Close, NexusTextSecondary, onDismiss)
+        }
+    }
+}
+
+/** Picks the real-time voice changer applied to my mic in this room. */
+@Composable
+private fun RoomVoiceModeSheet(
+    current: com.example.syntra.net.VoiceEffect,
+    onSelect: (com.example.syntra.net.VoiceEffect) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
+                .padding(vertical = 18.dp),
+        ) {
+            Text(
+                "Mode suara",
+                color = NexusTextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 22.dp),
+            )
+            Text(
+                "Ubah suaramu untuk semua orang di room ini.",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 2.dp, bottom = 10.dp),
+            )
+            com.example.syntra.net.VoiceEffect.entries.forEach { effect ->
+                val selected = effect == current
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = { onSelect(effect) },
+                        )
+                        .padding(horizontal = 22.dp, vertical = 13.dp),
+                ) {
+                    Text(effect.emoji, fontSize = 19.sp)
+                    Spacer(Modifier.width(14.dp))
+                    Text(
+                        effect.label,
+                        color = if (selected) NexusAccentSoft else NexusTextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (selected) {
+                        Icon(Icons.Filled.Check, null, tint = NexusAccentSoft, modifier = Modifier.size(20.dp))
+                    }
+                }
+            }
         }
     }
 }
