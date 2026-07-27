@@ -1,7 +1,10 @@
 package com.example.syntra
 
+import android.app.PictureInPictureParams
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Bundle
+import android.util.Rational
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
@@ -74,6 +77,8 @@ class MainActivity : FragmentActivity() {
         AppTheme.load(this)
         applySystemBars()
         handleNavIntent(intent)
+        // Let the Shorts feed ask the Activity to shrink into a floating window.
+        com.example.syntra.net.PipController.enter = { enterPip() }
         setContent {
             SyntraTheme {
                 // Re-apply whenever the user switches theme, so the Android system
@@ -115,8 +120,27 @@ class MainActivity : FragmentActivity() {
         AppLock.onForeground(this)
     }
 
+    /** Shrink the app into a 9:16 floating window showing the current reel. */
+    private fun enterPip() {
+        val params = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(9, 16))
+            .build()
+        runCatching { enterPictureInPictureMode(params) }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        com.example.syntra.net.PipController.inPip = isInPictureInPictureMode
+    }
+
     override fun onStop() {
         super.onStop()
+        // In PiP the app is "stopped" but the little window is still showing our reel —
+        // keep everything playing and don't re-lock; a normal background does both.
+        if (isInPictureInPictureMode) return
         // Note when we left so the lock knows how long we were away.
         AppLock.onBackground()
         // App went to the background → let the foreground service post notifications.
@@ -298,6 +322,7 @@ private fun NexusApp() {
             com.example.syntra.net.LikedMusicStore.clear(context)
             com.example.syntra.net.BlockStore.clear(context)
             com.example.syntra.net.HiddenMessageStore.clear(context)
+            com.example.syntra.net.NotInterestedStore.clear(context)
             signedIn = false
         })
     }

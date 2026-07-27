@@ -46,6 +46,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -57,17 +59,23 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.ModeComment
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -95,6 +103,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.layout.onSizeChanged
@@ -138,8 +151,12 @@ import com.example.syntra.net.NetReelComment
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.BlockStore
+import com.example.syntra.net.NotInterestedStore
+import com.example.syntra.net.PipController
 import com.example.syntra.net.ReelCache
+import com.example.syntra.net.ReelDownloader
 import com.example.syntra.net.ShortsFeedCache
+import com.example.syntra.net.Translate
 import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
@@ -179,9 +196,15 @@ fun ShortsScreen(
     // whenever the tab comes back so a change in Settings takes effect immediately.
     var autoScroll by remember { mutableStateOf(SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true)) }
     LaunchedEffect(visible) { if (visible) autoScroll = SettingsStore.getBool(context, SettingsStore.AUTO_SCROLL_REELS, true) }
-    // Long-press on a reel opens this playback-settings sheet (moved out of the
-    // app-wide Settings so it lives right where you watch).
-    var showReelSettings by remember { mutableStateOf(false) }
+    // Long-press on a reel opens the playback-settings sheet (moved out of the
+    // app-wide Settings so it lives right where you watch). Non-null = which reel.
+    var reelSettingsFor by remember { mutableStateOf<NetReel?>(null) }
+    // Playback speed for the feed (applies to the current and following reels).
+    var playbackSpeed by remember { mutableStateOf(1f) }
+    // Reel awaiting a report (a reason dialog is shown), and the translated-caption
+    // dialog (null = closed, "" = still translating).
+    var reportFor by remember { mutableStateOf<NetReel?>(null) }
+    var translation by remember { mutableStateOf<String?>(null) }
     // Tell the notifier we're on Shorts, so a "comment reply" toast is suppressed
     // here (it shows live) but still fires on every other screen.
     DisposableEffect(visible) {
@@ -253,8 +276,10 @@ fun ShortsScreen(
             // and a single repeated id from the feed endpoint (paging overlap) crashes
             // the whole screen with "Key … was already used". Never trust the list.
             // Blocked creators are dropped here so their reels never reach the pager.
+            // "Not interested" reels are hidden the same way (device-local).
             val base = reels.filterNot {
-                BlockStore.isBlocked(context, username = it.creatorUsername, userId = it.authorId)
+                BlockStore.isBlocked(context, username = it.creatorUsername, userId = it.authorId) ||
+                    NotInterestedStore.isHidden(context, it.id)
             }
             if (showFollowing) {
                 base.filter { it.isFollowing && it.authorId != SyntraClient.myUserId }
@@ -390,6 +415,42 @@ fun ShortsScreen(
                 }
         }
         Toast.makeText(context, if (now) "Disimpan" else "Dihapus dari simpanan", Toast.LENGTH_SHORT).show()
+    }
+
+    // "Tidak tertarik": remember the id and drop it from the feed straight away, so
+    // it vanishes now and never returns (even after a refresh re-fetches the list).
+    fun notInterested(reel: NetReel) {
+        NotInterestedStore.mark(context, reel.id)
+        reels.removeAll { it.id == reel.id }
+        Toast.makeText(context, "Tidak akan ditampilkan lagi", Toast.LENGTH_SHORT).show()
+    }
+
+    // Download the reel's video to the phone's gallery (Movies/Syntra).
+    fun downloadReel(reel: NetReel) {
+        Toast.makeText(context, "Mengunduh video…", Toast.LENGTH_SHORT).show()
+        scope.launch {
+            val ok = ReelDownloader.saveVideo(context, reel.mediaUrl, "syntra-${reel.id}.mp4")
+            Toast.makeText(
+                context,
+                if (ok) "Tersimpan di galeri (Movies/Syntra)" else "Gagal mengunduh video",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
+
+    // Translate the reel's caption to Indonesian. Full spoken-word subtitles would
+    // need speech recognition we don't have; the caption is what we can translate.
+    fun translateReel(reel: NetReel) {
+        val text = reel.caption.trim()
+        if (text.isBlank()) {
+            Toast.makeText(context, "Video ini tidak punya keterangan untuk diterjemahkan.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        translation = "" // opens the dialog in its loading state
+        scope.launch {
+            val t = Translate.translate(text, "id")
+            translation = t?.ifBlank { null } ?: "Gagal menerjemahkan. Coba lagi."
+        }
     }
 
     // Hide the host's bottom bar for the whole add-reels flow (trim + details).
@@ -550,6 +611,7 @@ fun ShortsScreen(
                                 if (reel.creatorUsername.isNotBlank()) openProfileUser = reel.creatorUsername
                             },
                             autoScroll = autoScroll,
+                            speed = playbackSpeed,
                             onVideoEnded = {
                                 // Auto-advance only when there's a next reel; the last
                                 // one just stops (its own player already replayed once).
@@ -557,7 +619,7 @@ fun ShortsScreen(
                                     scope.launch { pager.animateScrollToPage(page + 1) }
                                 }
                             },
-                            onLongPress = { showReelSettings = true },
+                            onLongPress = { reelSettingsFor = reel },
                         )
                     }
                 }
@@ -645,15 +707,40 @@ fun ShortsScreen(
         )
     }
 
-    if (showReelSettings) {
+    reelSettingsFor?.let { reel ->
         ReelSettingsSheet(
             autoScroll = autoScroll,
             onAutoScrollChange = { on ->
                 autoScroll = on
                 SettingsStore.setBool(context, SettingsStore.AUTO_SCROLL_REELS, on)
             },
-            onDismiss = { showReelSettings = false },
+            speed = playbackSpeed,
+            onSpeedChange = { playbackSpeed = it },
+            onDownload = { reelSettingsFor = null; downloadReel(reel) },
+            onPip = { reelSettingsFor = null; PipController.request() },
+            onTranslate = { reelSettingsFor = null; translateReel(reel) },
+            onNotInterested = { reelSettingsFor = null; notInterested(reel) },
+            onReport = { reelSettingsFor = null; reportFor = reel },
+            onDismiss = { reelSettingsFor = null },
         )
+    }
+
+    reportFor?.let { reel ->
+        ReportReelDialog(
+            onDismiss = { reportFor = null },
+            onSubmit = { reason ->
+                reportFor = null
+                scope.launch {
+                    runCatching { SyntraClient.reportReel(reel.id, reason) }
+                        .onSuccess { Toast.makeText(context, "Laporan terkirim. Terima kasih.", Toast.LENGTH_SHORT).show() }
+                        .onFailure { Toast.makeText(context, "Gagal mengirim laporan: ${it.message}", Toast.LENGTH_LONG).show() }
+                }
+            },
+        )
+    }
+
+    translation?.let { result ->
+        TranslationDialog(text = result, onDismiss = { translation = null })
     }
 
     pendingDelete?.let { reel ->
@@ -749,13 +836,23 @@ private fun ReelPage(
     onOpenProfile: () -> Unit = {},
     /** When true, the clip plays once and [onVideoEnded] advances to the next reel. */
     autoScroll: Boolean = false,
+    /** Playback speed multiplier (0.5–2×), driven by the settings sheet. */
+    speed: Float = 1f,
     onVideoEnded: () -> Unit = {},
     /** Long-press on the video opens the playback settings (auto-scroll). */
     onLongPress: () -> Unit = {},
 ) {
+    val scope = rememberCoroutineScope()
     // Tap-to-pause, per reel. Reset when the reel scrolls off so coming back plays.
     var paused by remember { mutableStateOf(false) }
     LaunchedEffect(active) { if (!active) paused = false }
+
+    // Pinch-to-zoom: two fingers scale the video up to 4×; lifting them springs it
+    // back. Reset when the reel scrolls off so it never comes back mid-zoom.
+    val zoom = remember(reel.id) { Animatable(1f) }
+    LaunchedEffect(active) { if (!active) runCatching { zoom.snapTo(1f) } }
+    // While in the floating PiP window, strip everything but the video.
+    val inPip = PipController.inPip
 
     // Scrubber state, per reel. `seekReq` is bumped to a fresh Int on every drag so
     // the same target twice still triggers a seek; `scrubbing` freezes the bar (and
@@ -770,12 +867,44 @@ private fun ReelPage(
             url = reel.mediaUrl,
             playing = active && !paused && !scrubbing,
             prewarm = prewarm,
-            modifier = Modifier.fillMaxSize(),
+            speed = speed,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = zoom.value
+                    scaleY = zoom.value
+                },
             loop = !autoScroll,
             seekToMs = seekReq,
             onDuration = { durMs = it },
             onPosition = { if (!scrubbing) posMs = it },
             onEnded = onVideoEnded,
+        )
+
+        // Pinch-to-zoom layer, on top so it sees the gesture first — but it only
+        // consumes when TWO fingers are down, so a single tap/double-tap/long-press
+        // still falls through to the tap layer below. Lifting the fingers springs
+        // the zoom back to 1×.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(reel.id) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        do {
+                            val event = awaitPointerEvent()
+                            if (event.changes.size >= 2) {
+                                val factor = event.calculateZoom()
+                                if (factor != 1f) {
+                                    val next = (zoom.value * factor).coerceIn(1f, 4f)
+                                    scope.launch { zoom.snapTo(next) }
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
+                        if (zoom.value != 1f) scope.launch { zoom.animateTo(1f, spring()) }
+                    }
+                },
         )
 
         // Tap layer over the upper video area only. The bottom strip (caption,
@@ -811,7 +940,7 @@ private fun ReelPage(
         }
 
         // Paused indicator.
-        if (paused && active) {
+        if (paused && active && !inPip) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -828,56 +957,60 @@ private fun ReelPage(
             }
         }
 
-        // Bottom gradient so caption/rail stay legible over bright video.
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .height(260.dp)
-                .background(ReelBottomScrim),
-        )
+        // Everything below is chrome over the video — hidden in the PiP window so the
+        // little floating player shows just the clip.
+        if (!inPip) {
+            // Bottom gradient so caption/rail stay legible over bright video.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(260.dp)
+                    .background(ReelBottomScrim),
+            )
 
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars),
             ) {
-                ReelCaption(
-                    reel = reel,
-                    onOpenProfile = onOpenProfile,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(start = 20.dp, end = 12.dp, bottom = 14.dp),
-                )
-                ReelActions(
-                    reel = reel,
-                    onLike = onLike,
-                    onComment = onComment,
-                    onSave = onSave,
-                    onShare = onShare,
-                    onDelete = onDelete,
-                    onOpenProfile = onOpenProfile,
-                    modifier = Modifier.padding(end = 12.dp, bottom = 14.dp),
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    ReelCaption(
+                        reel = reel,
+                        onOpenProfile = onOpenProfile,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 20.dp, end = 12.dp, bottom = 14.dp),
+                    )
+                    ReelActions(
+                        reel = reel,
+                        onLike = onLike,
+                        onComment = onComment,
+                        onSave = onSave,
+                        onShare = onShare,
+                        onDelete = onDelete,
+                        onOpenProfile = onOpenProfile,
+                        modifier = Modifier.padding(end = 12.dp, bottom = 14.dp),
+                    )
+                }
+                // Scrubber pill — drag to jump anywhere in the clip. Sits at the very
+                // bottom, full width, and swells while dragging (modern short-video feel).
+                ReelScrubber(
+                    // Deferred read: posMs updates every frame but only the scrubber cares.
+                    positionMs = { posMs },
+                    durationMs = durMs,
+                    onScrubStart = { scrubbing = true },
+                    onScrub = { ms -> posMs = ms; seekReq = ms },
+                    // After releasing, stay PAUSED on the chosen frame (don't auto-resume
+                    // and don't restart) — tap the video to continue from there.
+                    onScrubEnd = { scrubbing = false; paused = true },
+                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
                 )
             }
-            // Scrubber pill — drag to jump anywhere in the clip. Sits at the very
-            // bottom, full width, and swells while dragging (modern short-video feel).
-            ReelScrubber(
-                // Deferred read: posMs updates every frame but only the scrubber cares.
-                positionMs = { posMs },
-                durationMs = durMs,
-                onScrubStart = { scrubbing = true },
-                onScrub = { ms -> posMs = ms; seekReq = ms },
-                // After releasing, stay PAUSED on the chosen frame (don't auto-resume
-                // and don't restart) — tap the video to continue from there.
-                onScrubEnd = { scrubbing = false; paused = true },
-                modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
-            )
         }
     }
 }
@@ -923,15 +1056,22 @@ private fun LikeBurst(pos: Offset, triggerKey: Int) {
 }
 
 /**
- * Playback-settings sheet for Shorts, opened by long-pressing a reel. Currently
- * hosts the "auto-scroll" toggle that used to live in the app-wide Settings —
- * it belongs here, right where you're watching.
+ * Playback & actions sheet for Shorts, opened by long-pressing a reel. Hosts the
+ * playback controls (speed, auto-scroll, picture-in-picture) plus per-reel actions
+ * (download, translate, not-interested, report) — all right where you're watching.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun ReelSettingsSheet(
     autoScroll: Boolean,
     onAutoScrollChange: (Boolean) -> Unit,
+    speed: Float,
+    onSpeedChange: (Float) -> Unit,
+    onDownload: () -> Unit,
+    onPip: () -> Unit,
+    onTranslate: () -> Unit,
+    onNotInterested: () -> Unit,
+    onReport: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -944,16 +1084,63 @@ private fun ReelSettingsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .windowInsetsPadding(WindowInsets.navigationBars)
                 .padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 20.dp),
         ) {
             Text(
-                "Pengaturan pemutaran",
+                "Pengaturan",
                 color = NexusTextPrimary,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.Bold,
             )
             Spacer(Modifier.height(16.dp))
+
+            // Speed — a row of pills; the active one is highlighted.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(ShortsTeal.copy(alpha = 0.16f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.Speed, null, tint = ShortsTeal, modifier = Modifier.size(22.dp))
+                }
+                Spacer(Modifier.width(14.dp))
+                Text("Kecepatan", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(0.5f, 0.75f, 1f, 1.5f, 2f).forEach { s ->
+                    val selected = kotlin.math.abs(s - speed) < 0.01f
+                    val label = if (s == s.toInt().toFloat()) "${s.toInt()}×" else "${s}×"
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) ShortsTeal else Color(0xFF26262F))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { onSpeedChange(s) }
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            label,
+                            color = if (selected) Color.Black else NexusTextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            // Auto-scroll toggle.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -971,21 +1158,11 @@ private fun ReelSettingsSheet(
                         .background(ShortsTeal.copy(alpha = 0.16f), CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.SwapVert,
-                        contentDescription = null,
-                        tint = ShortsTeal,
-                        modifier = Modifier.size(22.dp),
-                    )
+                    Icon(Icons.Filled.SwapVert, null, tint = ShortsTeal, modifier = Modifier.size(22.dp))
                 }
                 Spacer(Modifier.width(14.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "Geser otomatis",
-                        color = NexusTextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Text("Geser otomatis", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         "Lanjut ke video berikutnya setelah selesai menonton",
                         color = NexusTextSecondary,
@@ -1005,6 +1182,187 @@ private fun ReelSettingsSheet(
                     ),
                 )
             }
+
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.07f)))
+            Spacer(Modifier.height(6.dp))
+
+            ReelActionRow(
+                icon = Icons.Filled.PictureInPictureAlt,
+                title = "Gambar-dalam-gambar",
+                subtitle = "Putar dalam jendela mengambang",
+                onClick = onPip,
+            )
+            ReelActionRow(
+                icon = Icons.Filled.Download,
+                title = "Unduh",
+                subtitle = "Simpan video ke galeri",
+                onClick = onDownload,
+            )
+            ReelActionRow(
+                icon = Icons.Filled.Translate,
+                title = "Subtitel & terjemahan",
+                subtitle = "Terjemahkan keterangan ke bahasa Indonesia",
+                onClick = onTranslate,
+            )
+            ReelActionRow(
+                icon = Icons.Filled.VisibilityOff,
+                title = "Tidak tertarik",
+                subtitle = "Sembunyikan video ini dari beranda",
+                onClick = onNotInterested,
+            )
+            ReelActionRow(
+                icon = Icons.Filled.Flag,
+                title = "Laporkan",
+                subtitle = "Beri tahu kami jika ada masalah",
+                tint = Color(0xFFFF6B6B),
+                onClick = onReport,
+            )
+        }
+    }
+}
+
+/** One tappable action row in the reel settings sheet (icon + title + subtitle). */
+@Composable
+private fun ReelActionRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    tint: Color = ShortsTeal,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .background(tint.copy(alpha = 0.16f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, null, tint = tint, modifier = Modifier.size(22.dp))
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, color = NexusTextSecondary, fontSize = 12.sp)
+        }
+    }
+}
+
+/**
+ * Report reasons for a reel. Picking one submits immediately — no free-text step,
+ * which is both simpler and how most short-video apps do a first-pass report.
+ */
+@Composable
+private fun ReportReelDialog(onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
+    val reasons = listOf(
+        "Spam atau menyesatkan",
+        "Konten seksual",
+        "Kekerasan atau berbahaya",
+        "Ujaran kebencian",
+        "Pelecehan atau perundungan",
+        "Lainnya",
+    )
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .padding(vertical = 18.dp),
+        ) {
+            Text(
+                "Laporkan video",
+                color = NexusTextPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 22.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Pilih alasan pelaporan.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(horizontal = 22.dp),
+            )
+            Spacer(Modifier.height(10.dp))
+            reasons.forEach { reason ->
+                Text(
+                    reason,
+                    color = NexusTextPrimary,
+                    fontSize = 15.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { onSubmit(reason) }
+                        .padding(horizontal = 22.dp, vertical = 13.dp),
+                )
+            }
+            Text(
+                "Batal",
+                color = NexusTextSecondary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .align(Alignment.End)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onDismiss,
+                    )
+                    .padding(horizontal = 22.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+/** Shows the translated caption ([text] == "" while still translating). */
+@Composable
+private fun TranslationDialog(text: String, onDismiss: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .padding(22.dp),
+        ) {
+            Text("Terjemahan", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(12.dp))
+            if (text.isEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Text("Menerjemahkan…", color = NexusTextSecondary, fontSize = 14.sp)
+                }
+            } else {
+                Text(text, color = NexusTextPrimary, fontSize = 15.sp, lineHeight = 22.sp)
+            }
+            Spacer(Modifier.height(18.dp))
+            Text(
+                "Tutup",
+                color = NexusAccentSoft,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .align(Alignment.End)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onDismiss,
+                    )
+                    .padding(8.dp),
+            )
         }
     }
 }
@@ -1134,6 +1492,8 @@ private fun ReelVideo(
     prewarm: Boolean = true,
     /** Loop forever (true) vs play once then fire [onEnded] (used for auto-scroll). */
     loop: Boolean = true,
+    /** Playback speed multiplier applied to the player (1× = normal). */
+    speed: Float = 1f,
     /** When this changes to a non-null value, seek there (ms). Drives the scrubber. */
     seekToMs: Int? = null,
     /** Reports total duration (ms) once the video is prepared; 0 until then. */
@@ -1230,6 +1590,11 @@ private fun ReelVideo(
         } else {
             androidx.media3.common.Player.REPEAT_MODE_OFF
         }
+    }
+
+    // Apply the chosen playback speed (pitch left at 1 so audio stays natural-ish).
+    LaunchedEffect(speed, player) {
+        runCatching { player?.setPlaybackSpeed(speed) }
     }
 
     // Seek when the scrubber asks. ExoPlayer's default seek parameters are exact, so

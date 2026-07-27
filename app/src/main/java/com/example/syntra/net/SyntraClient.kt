@@ -789,6 +789,14 @@ object SyntraClient {
         )
     }
 
+    /** Reports a reel. Same `/reports` endpoint; target_type "reel" is accepted. */
+    suspend fun reportReel(reelId: String, reason: String) {
+        postData(
+            "/api/v1/reports",
+            JSONObject().put("reason", reason).put("target_type", "reel").put("target_id", reelId),
+        )
+    }
+
     /** Mute a conversation for [minutes], or `null` to unmute. `PUT .../mute`. */
     suspend fun setConversationMute(conversationId: String, minutes: Int?) {
         val body = JSONObject().put("duration_minutes", minutes ?: JSONObject.NULL)
