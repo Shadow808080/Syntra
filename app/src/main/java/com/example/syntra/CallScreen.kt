@@ -12,6 +12,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -78,7 +80,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.activity.compose.BackHandler
+import com.example.syntra.net.AvatarCache
 import com.example.syntra.net.ApiConfig
+import com.example.syntra.net.AppLock
 import com.example.syntra.net.CallEngine
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
@@ -115,6 +119,16 @@ class CallDescriptor(
     val video: Boolean,
     val incoming: Boolean,
     val incomingCallId: String?,
+    /**
+     * The peer's photo, when the screen that started the call already had it.
+     *
+     * Nullable, and resolved again from [AvatarCache] inside the call screen: a call
+     * placed from a notification knows almost nothing about the person, and the call
+     * screen was showing a bare LETTER for someone whose photo the app already had on
+     * disk. Where there genuinely is no photo, the Syntra placeholder is used — never
+     * an initial.
+     */
+    val peerAvatar: String? = null,
 )
 
 /**
@@ -147,9 +161,18 @@ object CallController {
 
     val isBusy: Boolean get() = call != null
 
-    fun startOutgoing(conversationId: String, peerName: String, peerId: String, video: Boolean) {
+    fun startOutgoing(
+        conversationId: String,
+        peerName: String,
+        peerId: String,
+        video: Boolean,
+        peerAvatar: String? = null,
+    ) {
         if (call != null) return
-        call = CallDescriptor(conversationId, peerName, peerId, video, incoming = false, incomingCallId = null)
+        call = CallDescriptor(
+            conversationId, peerName, peerId, video,
+            incoming = false, incomingCallId = null, peerAvatar = peerAvatar,
+        )
         minimized = false
         compact = false
     }
@@ -162,9 +185,13 @@ object CallController {
         callId: String,
         /** True to ring as a banner instead of taking the screen — see [compact]. */
         asBanner: Boolean = false,
+        peerAvatar: String? = null,
     ) {
         if (call != null) return
-        call = CallDescriptor(conversationId, peerName, peerId, video, incoming = true, incomingCallId = callId)
+        call = CallDescriptor(
+            conversationId, peerName, peerId, video,
+            incoming = true, incomingCallId = callId, peerAvatar = peerAvatar,
+        )
         minimized = false
         compact = asBanner
     }
@@ -187,6 +214,19 @@ object CallController {
 }
 
 private enum class CallPhase { INCOMING, CONNECTING, RINGING, ONGOING, ENDED }
+
+/**
+ * Logs every transition into ENDED with its cause.
+ *
+ * "The call just ends" has been diagnosed twice from reasoning alone and both fixes
+ * missed, because several independent paths can end a call and the screen looks
+ * identical whichever fires. One tag, greppable, so the next call answers it.
+ */
+private const val CALL_TAG = "SyntraCall"
+
+private fun callEndLog(why: String) {
+    android.util.Log.w(CALL_TAG, "END: " + why)
+}
 
 private val callBackdrop = listOf(Color(0xFF141726), Color(0xFF0B0C14))
 private val callAvatarGradient = listOf(Color(0xFF2E6BF0), Color(0xFF3B68F5))
@@ -334,6 +374,25 @@ private fun CallSession(d: CallDescriptor) {
     var statusLine by remember { mutableStateOf(if (incoming) "Panggilan masuk" else "Memanggil…") }
     var everConnected by remember { mutableStateOf(false) }
 
+    // Photo resolution, best → worst: what the caller passed, then the persisted cache
+    // (keyed by BOTH id and username elsewhere in the app), then a one-off fetch.
+    var peerPhoto by remember(d) {
+        mutableStateOf(d.peerAvatar ?: AvatarCache.get(context, d.peerId))
+    }
+    LaunchedEffect(d.peerId) {
+        if (peerPhoto.isNullOrBlank() && d.peerId.isNotBlank() && ApiConfig.ENABLED) {
+            runCatching { SyntraClient.getConversations() }
+                .getOrNull()
+                ?.firstOrNull { it.counterpartId == d.peerId }
+                ?.avatarMediaId
+                ?.takeIf { it.startsWith("http") }
+                ?.let {
+                    peerPhoto = it
+                    AvatarCache.put(context, d.peerId, it)
+                }
+        }
+    }
+
     val remoteJoined = CallEngine.remoteJoined
     val remoteVideo = CallEngine.remoteVideo
     val localVideo = CallEngine.localVideo
@@ -365,6 +424,15 @@ private fun CallSession(d: CallDescriptor) {
 
     suspend fun connectNow() {
         if (connectStarted) return
+        // Remounted while the media session is still up (app lock, config change):
+        // adopt the live call instead of answering it a second time. Re-answering is
+        // what made the first call visibly reconnect.
+        if (CallEngine.isActive) {
+            connectStarted = true
+            phase = if (CallEngine.remoteJoined) CallPhase.ONGOING else CallPhase.CONNECTING
+            if (phase == CallPhase.ONGOING) everConnected = true
+            return
+        }
         connectStarted = true
         if (!ApiConfig.ENABLED) {
             statusLine = "Server belum aktif"; phase = CallPhase.ENDED; return
@@ -402,6 +470,7 @@ private fun CallSession(d: CallDescriptor) {
             if (it is kotlinx.coroutines.CancellationException &&
                 it !is kotlinx.coroutines.TimeoutCancellationException
             ) throw it
+            callEndLog("connectNow failed: ${it::class.java.simpleName}: ${it.message}")
             statusLine = it.message ?: "Panggilan gagal"
             Toast.makeText(context, statusLine, Toast.LENGTH_LONG).show()
             phase = CallPhase.ENDED
@@ -444,14 +513,25 @@ private fun CallSession(d: CallDescriptor) {
             PackageManager.PERMISSION_GRANTED
         val camOk = !isVideo || ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
-        if (micOk && camOk) callScope.launch { connectNow() }
-        else permLauncher.launch(permissions)
+        if (micOk && camOk) {
+            callScope.launch { connectNow() }
+        } else {
+            // The permission dialog stops this activity, which the app lock would
+            // otherwise read as "the user left" and re-lock — dropping MainTabs, and
+            // this whole call with it. Tell the lock it's our own dialog first.
+            AppLock.expectSystemDialog()
+            permLauncher.launch(permissions)
+        }
     }
 
     // Outgoing dials immediately; incoming waits for the user to accept.
     LaunchedEffect(Unit) { if (!incoming) proceed() }
 
     // Promote to "ongoing" the moment the other side is really in the room.
+    LaunchedEffect(CallEngine.connected) {
+        android.util.Log.i(CALL_TAG, "engine.connected=${CallEngine.connected} phase=$phase")
+    }
+
     LaunchedEffect(remoteJoined) {
         if (remoteJoined && phase != CallPhase.ONGOING && phase != CallPhase.ENDED) {
             phase = CallPhase.ONGOING; everConnected = true
@@ -466,6 +546,12 @@ private fun CallSession(d: CallDescriptor) {
     LaunchedEffect(phase) {
         val pending = phase == CallPhase.INCOMING || phase == CallPhase.RINGING || phase == CallPhase.CONNECTING
         if (!pending || d.conversationId.isBlank()) return@LaunchedEffect
+        // Two consecutive "no active call" answers are required before this ends
+        // anything. One is not evidence: the request is in flight for hundreds of
+        // milliseconds, and around the moment of answering the backend legitimately
+        // reports nothing yet — start_call has been issued but the row is not
+        // 'ringing'/'ongoing' at the instant we ask.
+        var missed = 0
         while (true) {
             delay(3000)
             if (phase == CallPhase.ONGOING || phase == CallPhase.ENDED) break
@@ -473,10 +559,27 @@ private fun CallSession(d: CallDescriptor) {
             // transient network error — only the former should end the screen, or a
             // glitchy poll would kill a perfectly good ringing call.
             val result = runCatching { SyntraClient.getActiveCall(d.conversationId) }
+
+            // RE-CHECK AFTER THE AWAIT. This is the bug that dropped every answered
+            // call a few seconds in: the phase is checked BEFORE the request, the
+            // request then takes time, the user answers meanwhile — and the stale
+            // result was applied anyway, ending a call that had just become live.
+            // The device log caught it red-handed: "no active call (phase=ONGOING)".
+            if (phase == CallPhase.ONGOING || phase == CallPhase.ENDED) break
+            // Media is up and the far side is here: whatever the poll says, this call
+            // is demonstrably alive. The socket net has done its job.
+            if (CallEngine.isActive && CallEngine.remoteJoined) break
+
             if (result.isSuccess && result.getOrNull() == null) {
-                statusLine = "Panggilan berakhir"
-                phase = CallPhase.ENDED
-                break
+                missed++
+                if (missed >= 2) {
+                    callEndLog("poll: no active call twice in a row (phase=$phase)")
+                    statusLine = "Panggilan berakhir"
+                    phase = CallPhase.ENDED
+                    break
+                }
+            } else if (result.isSuccess) {
+                missed = 0
             }
         }
     }
@@ -497,6 +600,7 @@ private fun CallSession(d: CallDescriptor) {
         if (ringingOut || ringingIn) {
             delay(35_000)
             if ((ringingOut && phase == CallPhase.RINGING) || (ringingIn && phase == CallPhase.INCOMING)) {
+                callEndLog("ring timeout after 35s (incoming=$incoming)")
                 statusLine = if (ringingIn) "Panggilan tak terjawab" else "Tidak dijawab"
                 val id = callId
                 if (id.isNotBlank() && ApiConfig.ENABLED) {
@@ -546,6 +650,7 @@ private fun CallSession(d: CallDescriptor) {
                 // (always present) or the call id once we know it.
                 if (endedConversationId.isNotBlank() && endedConversationId != d.conversationId) return
                 if (endedCallId.isNotBlank() && callId.isNotBlank() && endedCallId != callId) return
+                callEndLog("socket call.ended reason=$reason id=$endedCallId conv=$endedConversationId myCallId=$callId")
                 statusLine = if (reason == "declined") "Panggilan ditolak" else "Panggilan berakhir"
                 phase = CallPhase.ENDED
             }
@@ -557,6 +662,13 @@ private fun CallSession(d: CallDescriptor) {
         SyntraClient.addListener(listener)
         onDispose {
             SyntraClient.removeListener(listener)
+            // Only tear the CALL down when the call is genuinely over. This composable
+            // can also be disposed while the call is still live — the app lock taking
+            // the screen, a configuration change — and the old code hung up regardless,
+            // then re-answered on remount, which is what "auto reconnect" was. If the
+            // controller still holds this descriptor, we are being remounted, not ended:
+            // leave the media session and the backend call alone.
+            if (CallController.call === d) return@onDispose
             CallEngine.disconnect()
             // CRUCIAL: always tell the backend we left, on EVERY teardown path — not
             // just the hang-up button. Otherwise a call that ended some other way
@@ -613,6 +725,7 @@ private fun CallSession(d: CallDescriptor) {
     if (CallController.minimized) {
         MiniCallWindow(
             peerName = d.peerName,
+            peerPhoto = peerPhoto,
             elapsed = elapsed,
             statusLine = if (phase == CallPhase.ONGOING) formatDuration(elapsed) else statusLine,
             isVideo = isVideo,
@@ -623,6 +736,7 @@ private fun CallSession(d: CallDescriptor) {
     } else {
         FullCallUi(
             peerName = d.peerName,
+            peerPhoto = peerPhoto,
             phase = phase,
             statusLine = statusLine,
             elapsed = elapsed,
@@ -644,6 +758,7 @@ private fun CallSession(d: CallDescriptor) {
 @Composable
 private fun FullCallUi(
     peerName: String,
+    peerPhoto: String? = null,
     phase: CallPhase,
     statusLine: String,
     elapsed: Int,
@@ -741,7 +856,7 @@ private fun FullCallUi(
                 }
                 Spacer(Modifier.height(56.dp))
                 PulsingAvatar(
-                    initial = peerName.firstOrNull()?.uppercase() ?: "?",
+                    photoUrl = peerPhoto,
                     // Pulse while ringing, waiting to be answered, AND while connecting
                     // media — so "Menyambungkan…" reads as active loading, not frozen.
                     pulsing = phase == CallPhase.RINGING || phase == CallPhase.INCOMING ||
@@ -795,6 +910,7 @@ private fun FullCallUi(
 @Composable
 private fun MiniCallWindow(
     peerName: String,
+    peerPhoto: String? = null,
     elapsed: Int,
     statusLine: String,
     isVideo: Boolean,
@@ -860,17 +976,12 @@ private fun MiniCallWindow(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .background(Brush.verticalGradient(callAvatarGradient), CircleShape),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            peerName.firstOrNull()?.uppercase() ?: "?",
-                            color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
-                        )
-                    }
+                    GradientAvatar(
+                        gradient = callAvatarGradient,
+                        initial = "",
+                        size = 44.dp,
+                        photoUrl = peerPhoto,
+                    )
                     Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -946,10 +1057,59 @@ private fun OngoingControls(
     onSwitchCamera: () -> Unit,
     onHangUp: () -> Unit,
 ) {
+    // Aurora behind the controls: two slow counter-drifting bands of the theme accent,
+    // drawn INSIDE the pill and clipped to it, under a glass wash. The bar used to be a
+    // flat 7%-white rectangle — correct, and completely lifeless.
+    val aurora = rememberInfiniteTransition(label = "call-aurora")
+    val drift by aurora.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(6200, easing = LinearEasing), RepeatMode.Restart),
+        label = "call-aurora-drift",
+    )
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(44.dp))
+            .drawBehind {
+                // Two offset radial washes sliding in opposite directions. Radial rather
+                // than linear so the light has a source instead of being a gradient
+                // smeared across the bar.
+                val w = size.width
+                val h = size.height
+                val x1 = w * (0.30f + 0.22f * kotlin.math.sin(drift))
+                val x2 = w * (0.70f + 0.22f * kotlin.math.sin(drift + 2.2f))
+                drawRect(Color.White.copy(alpha = 0.06f))
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(NexusAccent.copy(alpha = 0.38f), Color.Transparent),
+                        center = Offset(x1, h * 0.35f),
+                        radius = h * 1.5f,
+                    ),
+                    radius = h * 1.5f,
+                    center = Offset(x1, h * 0.35f),
+                )
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(NexusAccentSoft.copy(alpha = 0.30f), Color.Transparent),
+                        center = Offset(x2, h * 0.75f),
+                        radius = h * 1.3f,
+                    ),
+                    radius = h * 1.3f,
+                    center = Offset(x2, h * 0.75f),
+                )
+                // Top sheen, so the pill reads as glass over the light rather than paint.
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0f to Color.White.copy(alpha = 0.16f),
+                        0.5f to Color.Transparent,
+                        1f to Color.Black.copy(alpha = 0.10f),
+                    ),
+                )
+            }
+            .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(44.dp)),
+    ) {
     Row(
         modifier = Modifier
-            .background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(44.dp))
-            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(44.dp))
             .padding(horizontal = 20.dp, vertical = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(20.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -985,6 +1145,7 @@ private fun OngoingControls(
         ) {
             Icon(Icons.Rounded.CallEnd, "Akhiri", tint = Color.White, modifier = Modifier.size(26.dp))
         }
+    }
     }
 }
 
@@ -1063,7 +1224,7 @@ private fun RoundActionButton(icon: ImageVector, background: Color, onClick: () 
 }
 
 @Composable
-private fun PulsingAvatar(initial: String, pulsing: Boolean) {
+private fun PulsingAvatar(photoUrl: String?, pulsing: Boolean) {
     val transition = rememberInfiniteTransition(label = "ring")
     val scale by transition.animateFloat(
         initialValue = 1f,
@@ -1076,10 +1237,17 @@ private fun PulsingAvatar(initial: String, pulsing: Boolean) {
             Box(modifier = Modifier.size((132 * scale).dp).background(NexusAccent.copy(alpha = 0.12f), CircleShape))
         }
         Box(
-            modifier = Modifier.size(120.dp).background(Brush.verticalGradient(callAvatarGradient), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Text(initial, color = Color.White, fontSize = 46.sp, fontWeight = FontWeight.SemiBold)
+            // The shared avatar: real photo when there is one, Syntra's own empty-profile
+            // mark when there isn't. A letter tile was never the fallback anywhere else
+            // in the app — the call screen was the one place still doing it.
+            GradientAvatar(
+                gradient = callAvatarGradient,
+                initial = "",
+                size = 120.dp,
+                photoUrl = photoUrl,
+            )
         }
     }
 }

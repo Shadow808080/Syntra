@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import androidx.compose.ui.platform.LocalContext
+import com.example.syntra.net.BlockMask
 import com.example.syntra.net.BlockStore
 import com.example.syntra.net.NetUser
 import com.example.syntra.net.SyntraClient
@@ -112,7 +113,7 @@ fun DiscoverScreen(onClose: () -> Unit, onOpenProfile: (String) -> Unit) {
             // Blocked people are removed from search entirely — being able to look
             // someone up after blocking them defeats the point of blocking.
             val allowed = list.filterNot {
-                BlockStore.isBlocked(context, username = it.username, userId = it.id)
+                BlockMask.hidden(context, it.username, it.id)
             }
             // Suggestions are capped; typed searches are not.
             results.addAll(if (query.isBlank()) allowed.take(DISCOVER_SUGGESTION_MAX) else allowed)

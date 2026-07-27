@@ -295,6 +295,7 @@ private fun NexusApp() {
                     context, android.Manifest.permission.POST_NOTIFICATIONS,
                 ) != android.content.pm.PackageManager.PERMISSION_GRANTED
             ) {
+                AppLock.expectSystemDialog()
                 notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             }
             com.example.syntra.net.ChatConnectionService.start(context)
@@ -333,6 +334,9 @@ private fun NexusApp() {
             com.example.syntra.net.AvatarCache.clear(context)
             com.example.syntra.net.LikedMusicStore.clear(context)
             com.example.syntra.net.BlockStore.clear(context)
+            // Both directions go with the session — the next account on this phone
+            // must not inherit who blocked the previous one.
+            com.example.syntra.net.BlockedByStore.clear(context)
             com.example.syntra.net.HiddenMessageStore.clear(context)
             com.example.syntra.net.NotInterestedStore.clear(context)
             com.example.syntra.net.LastChatStore.clear(context)
@@ -490,6 +494,31 @@ private fun MainTabs(onSignOut: () -> Unit) {
         if (!ApiConfig.ENABLED) return@LaunchedEffect
         runCatching { SyntraClient.getBlocked() }
             .onSuccess { com.example.syntra.net.BlockStore.sync(appContext, it) }
+        // ...and who has blocked ME. Without this the blocked side starts every cold
+        // start assuming nobody blocked it, and shows the blocker's real name, photo and
+        // online dot until an event happens to arrive.
+        runCatching { SyntraClient.getBlockedBy() }
+            .onSuccess { com.example.syntra.net.BlockedByStore.sync(appContext, it) }
+    }
+
+    // Realtime: someone blocked or unblocked me. Handled at the app root so it lands
+    // whatever screen is open — the store is Compose state, so every surface reading it
+    // repaints on the spot, with no refresh and no reopening.
+    DisposableEffect(Unit) {
+        val blockListener = object : com.example.syntra.net.SocketListener {
+            override fun onBlockedByUser(actorId: String, actorUsername: String, blocked: Boolean) {
+                if (blocked) {
+                    com.example.syntra.net.BlockedByStore.add(appContext, actorId, actorUsername)
+                    // If their call or chat is on screen right now, drop it: staying in
+                    // a live call with someone who just blocked you makes no sense.
+                    if (CallController.isBusy) CallController.end()
+                } else {
+                    com.example.syntra.net.BlockedByStore.remove(appContext, actorId, actorUsername)
+                }
+            }
+        }
+        SyntraClient.addListener(blockListener)
+        onDispose { SyntraClient.removeListener(blockListener) }
     }
 
     // Listen for incoming calls anywhere in the app and hand them to CallController,

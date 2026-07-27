@@ -150,6 +150,7 @@ import com.example.syntra.net.NetReel
 import com.example.syntra.net.NetReelComment
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
+import com.example.syntra.net.BlockMask
 import com.example.syntra.net.BlockStore
 import com.example.syntra.net.NotInterestedStore
 import com.example.syntra.net.PipController
@@ -278,7 +279,7 @@ fun ShortsScreen(
             // Blocked creators are dropped here so their reels never reach the pager.
             // "Not interested" reels are hidden the same way (device-local).
             val base = reels.filterNot {
-                BlockStore.isBlocked(context, username = it.creatorUsername, userId = it.authorId) ||
+                BlockMask.hidden(context, it.creatorUsername, it.authorId) ||
                     NotInterestedStore.isHidden(context, it.id)
             }
             if (showFollowing) {

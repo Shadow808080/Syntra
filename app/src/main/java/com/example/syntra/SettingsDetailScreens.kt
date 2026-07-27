@@ -1,5 +1,6 @@
 package com.example.syntra
 
+import androidx.compose.runtime.mutableStateListOf
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -79,6 +80,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.MediaAutoDownload
+import com.example.syntra.net.BlockActions
 import com.example.syntra.net.BlockStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.AppTheme
@@ -743,7 +745,10 @@ fun SecurityScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
 @Composable
 fun BlockedContactsScreen(onClose: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val blocked = remember { mutableStateOf(BlockStore.all(context).toList()) }
+    // Rows mid-request, so a double tap can't fire two unblocks.
+    val busy = remember { mutableStateListOf<String>() }
 
     // Pull the authoritative list, so a block made on another device shows up here —
     // and so unblocking there stops being enforced here.
@@ -772,9 +777,8 @@ fun BlockedContactsScreen(onClose: () -> Unit) {
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Pemblokiran diterapkan di perangkat ini: chat mereka " +
-                        "disembunyikan. Server belum punya endpoint blokir, jadi mereka " +
-                        "masih bisa mengirim pesan.",
+                    text = "Orang yang kamu blokir tidak bisa mengirim pesan, " +
+                        "menemukanmu lewat pencarian, atau melihat reels dan profilmu.",
                     color = NexusTextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
@@ -809,9 +813,28 @@ fun BlockedContactsScreen(onClose: () -> Unit) {
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
                             ) {
-                                BlockStore.remove(context, username, null)
-                                SyntraClient.fireAndForget { SyntraClient.unblockUser(username) }
-                                blocked.value = BlockStore.all(context).toList()
+                                // AWAIT the server. fireAndForget swallowed the result,
+                                // so a failed unblock still cleared the local mirror —
+                                // and the next sync, which trusts the server, silently
+                                // put the block back. That is the "sudah dibuka tapi
+                                // masih terblokir" report: it never actually unblocked.
+                                if (busy.contains(username)) return@clickable
+                                busy.add(username)
+                                scope.launch {
+                                    // userId resolved from the stored pairing inside
+                                    // BlockActions/BlockStore — this screen only has names.
+                                    val ok = BlockActions.unblock(context, username, null)
+                                    busy.remove(username)
+                                    if (ok) {
+                                        blocked.value = BlockStore.all(context).toList()
+                                    } else {
+                                        Toast.makeText(
+                                            context,
+                                            "Gagal membuka blokir. Periksa koneksi lalu coba lagi.",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
+                                }
                             },
                         )
                     }

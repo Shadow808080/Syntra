@@ -146,6 +146,9 @@ import com.example.syntra.ui.theme.NexusTextPrimary
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.AvatarCache
+import com.example.syntra.net.BlockActions
+import com.example.syntra.net.BlockedByStore
+import com.example.syntra.net.BlockMask
 import com.example.syntra.net.BlockStore
 import com.example.syntra.net.MessageCache
 import com.example.syntra.net.NetConversation
@@ -675,8 +678,10 @@ fun ChatScreen(
         // Blocked: strip the photo. Their name stays (you need to know whose chat this
         // is to unblock them), but their face does not — even from a chat you had
         // before the block, which is the case the user actually notices.
-        if (BlockStore.isBlocked(context, counterpartUsername, counterpartId)) {
-            return copy(avatarUrl = null)
+        // Either direction. Someone who blocked me kept their photo showing in my
+        // list, which is exactly the leak the block is supposed to close.
+        if (BlockMask.hidden(context, counterpartUsername, counterpartId)) {
+            return copy(avatarUrl = null, name = BlockMask.name(context, name, counterpartUsername, counterpartId))
         }
         if (!avatarUrl.isNullOrBlank()) {
             keys.forEach { AvatarCache.put(context, it, avatarUrl) }
@@ -700,6 +705,11 @@ fun ChatScreen(
             seenStories.clear()
             val watchedOwn = ChatFlags.watchedOwnStories(context)
             val built = groups.mapNotNull { g ->
+                // Blocked people's stories were still riding the "Cerita" rail — their
+                // face at the top of the home screen, which is the most visible place a
+                // block could fail. The server filter is the real defence; this makes
+                // the block apply instantly instead of after the next fetch.
+                if (BlockMask.hidden(context, g.username, g.authorId)) return@mapNotNull null
                 g.toUi()?.let { person ->
                     // My own stories: the backend never marks them viewed, so apply the
                     // local "watched" set so the ring stays dimmed after a refresh.
@@ -1044,6 +1054,34 @@ fun ChatScreen(
         }
     }
 
+    /**
+     * Opens the direct chat with a story's author, who is known only by user id.
+     *
+     * Prefers the conversation already in the list, so the chat opens with its real
+     * title, avatar and unread state instead of a bare shell built from the story —
+     * createDirect returns the same id either way, but the cached row carries
+     * everything the header needs to render immediately.
+     */
+    fun openDirectWithId(userId: String, fallbackName: String) {
+        if (userId.isBlank()) return
+        chats.firstOrNull { it.counterpartId == userId }?.let { openChat(it); return }
+        scope.launch {
+            runCatching {
+                val convId = SyntraClient.createDirect(userId)
+                chats.firstOrNull { it.id == convId }?.let { openChat(it); return@runCatching }
+                openedChat = Conversation(
+                    id = convId,
+                    name = fallbackName,
+                    message = "",
+                    time = "",
+                    counterpartId = userId,
+                )
+            }.onFailure {
+                Toast.makeText(context, "Buka chat gagal: ${it.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
 
     // Device back peels off one layer at a time: selection, then search.
     BackHandler(enabled = selection.isNotEmpty()) { selection.clear() }
@@ -1069,6 +1107,9 @@ fun ChatScreen(
                     searching = false
                     query = ""
                 },
+                allSelectedBlocked = selection.isNotEmpty() && chats
+                    .filter { it.id in selection }
+                    .all { BlockStore.isBlocked(context, it.counterpartUsername, it.counterpartId) },
                 onMenuItem = { label ->
                     val picked = chats.filter { it.id in selection }
                     when (label) {
@@ -1104,19 +1145,48 @@ fun ChatScreen(
                         "Hapus percakapan" -> {
                             pendingDelete = picked.firstOrNull()
                         }
+                        "Buka blokir" -> {
+                            val targets = picked.toList()
+                            selection.clear()
+                            scope.launch {
+                                val failed = targets.count { convo ->
+                                    !BlockActions.unblock(
+                                        context,
+                                        convo.counterpartUsername,
+                                        convo.counterpartId,
+                                    )
+                                }
+                                if (failed > 0) BlockActions.reportFailure(context, blocking = false)
+                                else Toast.makeText(context, "Blokir dibuka.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                         "Blokir" -> {
-                            picked.forEach { convo ->
-                                BlockStore.add(context, convo.counterpartUsername, convo.counterpartId)
-                                convo.counterpartUsername?.takeIf { it.isNotBlank() }?.let { u ->
-                                    SyntraClient.fireAndForget { SyntraClient.blockUser(u) }
+                            // Same BlockActions call the chat screen makes, so blocking
+                            // from here and from inside a chat can no longer end up in
+                            // different states — that divergence, plus the old "server
+                            // belum punya fitur blokir" toast, is why blocking from the
+                            // home list behaved nothing like blocking from the chat.
+                            val targets = picked.toList()
+                            selection.clear()
+                            scope.launch {
+                                val failed = targets.count { convo ->
+                                    !BlockActions.block(
+                                        context,
+                                        convo.counterpartUsername,
+                                        convo.counterpartId,
+                                    )
+                                }
+                                if (failed > 0) {
+                                    BlockActions.reportFailure(context, blocking = true)
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        if (targets.size == 1) "${targets.first().name} diblokir."
+                                        else "${targets.size} kontak diblokir.",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
                                 }
                             }
-                            selection.clear()
-                            Toast.makeText(
-                                context,
-                                "Diblokir di perangkat ini. Server belum punya fitur blokir.",
-                                Toast.LENGTH_LONG,
-                            ).show()
                         }
                         else -> Toast.makeText(context, label, Toast.LENGTH_SHORT).show()
                     }
@@ -1342,6 +1412,13 @@ fun ChatScreen(
                             }
                     }
                 },
+                onOpenChat = { userId, name ->
+                    // Close the viewer FIRST. Both are full-screen overlays, and leaving
+                    // the story mounted would keep its timer and music running behind
+                    // the chat.
+                    openedStory = null
+                    openDirectWithId(userId, name)
+                },
             )
         }
 
@@ -1545,6 +1622,8 @@ private fun NexusHeader(
     onStartSearch: () -> Unit,
     onStopSearch: () -> Unit,
     onMenuItem: (String) -> Unit,
+    /** True when EVERY picked conversation is already blocked — flips the menu label. */
+    allSelectedBlocked: Boolean = false,
 ) {
     Row(
         modifier = Modifier
@@ -1568,12 +1647,19 @@ private fun NexusHeader(
                 var menuOpen by remember { mutableStateOf(false) }
                 HeaderIcon(Icons.Filled.MoreVert, "Aksi chat") { menuOpen = true }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    listOf("Tandai sudah dibaca", "Arsipkan", "Sematkan", "Hapus percakapan", "Blokir").forEach { label ->
+                    // "Blokir" was hardcoded here too, so a blocked chat still offered
+                    // to block it again and never offered to undo it.
+                    val blockLabel = if (allSelectedBlocked) "Buka blokir" else "Blokir"
+                    listOf(
+                        "Tandai sudah dibaca", "Arsipkan", "Sematkan", "Hapus percakapan", blockLabel,
+                    ).forEach { label ->
                         DropdownMenuItem(
                             text = {
                                 Text(
                                     text = label,
-                                    color = if (label == "Hapus percakapan" || label == "Blokir") {
+                                    color = if (label == "Hapus percakapan" || label == "Blokir" ||
+                                        label == "Buka blokir"
+                                    ) {
                                         Color(0xFFFF5D5D)
                                     } else {
                                         NexusTextPrimary
@@ -1856,8 +1942,23 @@ private fun ConversationRow(
     LaunchedEffect(convo.id) { if (convo.avatarUrl.isNullOrBlank()) onFirstVisible() }
 
     val unread = convo.unread > 0
-    val online = convo.presence == Presence.ONLINE
-    val typing = convo.presence == Presence.TYPING
+    // A blocked person shows no presence in the list either — an "online" dot beside
+    // someone you blocked is the same leak as showing their photo, and the row was the
+    // one place the block stayed completely invisible.
+    val rowContext = LocalContext.current
+    val rowBlocked = BlockStore.isBlocked(
+        rowContext,
+        convo.counterpartUsername,
+        convo.counterpartId,
+    )
+    // They blocked ME: same hiding, different explanation.
+    val rowBlockedMe = BlockedByStore.isBlockedBy(
+        rowContext,
+        convo.counterpartUsername,
+        convo.counterpartId,
+    )
+    val online = !rowBlocked && !rowBlockedMe && convo.presence == Presence.ONLINE
+    val typing = !rowBlocked && !rowBlockedMe && convo.presence == Presence.TYPING
 
     // A view-once photo previews as "[Foto 1x]" until its single view is spent, then
     // as "[sudah dibuka]" — matching the bubble inside the chat. Read straight from the
@@ -1865,12 +1966,15 @@ private fun ConversationRow(
     // — on the recipient's device, and on the sender's when the peer opens it.
     val context = LocalContext.current
     val lastId = convo.lastMessageId
-    val preview = if (convo.message == VIEW_ONCE_PREVIEW && lastId != null &&
-        com.example.syntra.net.ViewOnceStore.isSpent(context, lastId, convo.sent)
-    ) {
-        VIEW_ONCE_OPENED_PREVIEW
-    } else {
-        convo.message
+    val preview = when {
+        // Blocked rows say so instead of showing the last thing they said — that line
+        // was the strongest signal the block hadn't taken effect.
+        rowBlocked -> "Kamu memblokir kontak ini"
+        rowBlockedMe -> "Tidak tersedia"
+        convo.message == VIEW_ONCE_PREVIEW && lastId != null &&
+            com.example.syntra.net.ViewOnceStore.isSpent(context, lastId, convo.sent) ->
+            VIEW_ONCE_OPENED_PREVIEW
+        else -> convo.message
     }
 
     // Flat, plain rows — no card fill, no border. Only a picked row (selection mode)
@@ -2554,6 +2658,8 @@ private fun StoryViewer(
     onSeen: (Int) -> Unit,
     onViewed: (personIndex: Int, segment: Int) -> Unit,
     onDeleteStory: (personIndex: Int, segment: Int) -> Unit,
+    /** Tapping the author opens the direct chat with them. */
+    onOpenChat: (userId: String, name: String) -> Unit = { _, _ -> },
 ) {
     var personIndex by remember { mutableIntStateOf(startIndex) }
     // Open on the first unwatched story — already-watched ones are skipped.
@@ -2923,25 +3029,42 @@ private fun StoryViewer(
             }
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                StoryPhoto(
-                    photo = person.photo,
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape),
-                )
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = person.name,
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
+                // Tapping the author (photo or name) opens the chat with them. The two
+                // are one target rather than two, because a 38dp avatar alone is a poor
+                // thing to hit — and there is nothing else the author's name could do.
+                // My own story is excluded: there is no chat with yourself.
+                val authorTap = if (person.isMine) {
+                    Modifier
+                } else {
+                    Modifier.clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { onOpenChat(person.id, person.name) }
+                }
+                Row(
+                    modifier = authorTap,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StoryPhoto(
+                        photo = person.photo,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape),
                     )
-                    Text(
-                        text = relativeTime(current.createdAt),
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 12.sp,
-                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = person.name,
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = relativeTime(current.createdAt),
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 12.sp,
+                        )
+                    }
                 }
                 Spacer(Modifier.weight(1f))
                 if (person.isMine) {
@@ -3094,19 +3217,37 @@ private fun StoryViewer(
                     Box(
                         modifier = Modifier
                             .size(46.dp)
-                            .background(NexusAccent, CircleShape)
+                            // Dimmed while in flight, so the button itself shows that
+                            // something is happening rather than looking simply tappable.
+                            .background(
+                                if (replySending) NexusAccent.copy(alpha = 0.55f) else NexusAccent,
+                                CircleShape,
+                            )
                             .clickable(
+                                enabled = !replySending,
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
                             ) { sendReply() },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Kirim balasan",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp),
-                        )
+                        // The send arrow becomes a spinner for the whole request. The
+                        // reply goes over REST and can take a moment; with no feedback
+                        // people tapped again and again, which is also why duplicate
+                        // replies were possible.
+                        if (replySending) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Kirim balasan",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
                     }
                 }
             }

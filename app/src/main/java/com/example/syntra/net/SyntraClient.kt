@@ -48,6 +48,14 @@ interface SocketListener {
     fun onMessageReaction(conversationId: String, messageId: String, userId: String, emoji: String) {}
     /** A user changed their name/photo — sync it (own devices or a contact). */
     fun onUserUpdated(userId: String, displayName: String, avatarUrl: String?) {}
+
+    /**
+     * Someone blocked (or unblocked) ME, right now.
+     *
+     * Delivered on my own `user:<id>` topic, which the client already subscribes to on
+     * connect. This is what lets the blocked side change without reopening the app.
+     */
+    fun onBlockedByUser(actorId: String, actorUsername: String, blocked: Boolean) {}
     /** Someone liked/unliked a reel — bump the counter live. */
     fun onReelLike(reelId: String, userId: String, liked: Boolean) {}
     /** A new comment landed on a reel — bump the count live. */
@@ -840,6 +848,16 @@ object SyntraClient {
 
     suspend fun unblockUser(username: String) = delete("/api/v1/users/$username/block")
 
+    /** Users who have blocked ME — drives the blocked-side UI on a cold start. */
+    suspend fun getBlockedBy(): List<NetUser> =
+        (getData("/api/v1/users/me/blocked-by") as JSONArray).mapObjects {
+            NetUser(
+                id = it.optString("user_id", ""),
+                username = it.optString("username", ""),
+                displayName = "",
+            )
+        }
+
     /** Users I've blocked (each has `user_id`, `username`, `display_name`). */
     suspend fun getBlocked(): List<NetUser> =
         (getData("/api/v1/users/me/blocked") as JSONArray).mapObjects {
@@ -1114,11 +1132,19 @@ object SyntraClient {
         connect()
     }
 
-    private fun sendFrame(type: String, data: JSONObject? = null, ref: String? = null) {
+    /**
+     * Returns false when the frame could not be handed to the socket.
+     *
+     * It used to return Unit, so `socket?.send(...)` on a closed or not-yet-open socket
+     * dropped the frame in silence. For typing indicators that is harmless; for
+     * message.send it meant the message was never transmitted while the bubble sat
+     * there showing a "sending" clock forever. Callers that matter can now fall back.
+     */
+    private fun sendFrame(type: String, data: JSONObject? = null, ref: String? = null): Boolean {
         val frame = JSONObject().put("type", type)
         if (ref != null) frame.put("ref", ref)
         if (data != null) frame.put("data", data)
-        socket?.send(frame.toString())
+        return socket?.send(frame.toString()) ?: false
     }
 
     fun subscribe(topics: List<String>) {
@@ -1222,6 +1248,18 @@ object SyntraClient {
                             d.optString("user_id"),
                             d.optString("display_name"),
                             d.strOrNull("avatar_url"),
+                        )
+                    }
+                }
+                "user.blocked", "user.unblocked" -> (data as? JSONObject)?.let { d ->
+                    // Only dispatched here — the STORE is updated by the app-level
+                    // listener in MainActivity, which owns a Context. Keeping Android
+                    // types out of the networking layer is why this split exists.
+                    dispatch {
+                        it.onBlockedByUser(
+                            d.optString("actor_id"),
+                            d.optString("actor_username"),
+                            type == "user.blocked",
                         )
                     }
                 }

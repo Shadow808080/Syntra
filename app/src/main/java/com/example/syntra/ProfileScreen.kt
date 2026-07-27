@@ -1,5 +1,6 @@
 package com.example.syntra
 
+import android.widget.Toast
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
@@ -38,6 +39,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.PersonOff
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ChatBubbleOutline
@@ -89,7 +91,9 @@ import com.example.syntra.net.NetStory
 import com.example.syntra.net.NetStoryGroup
 import com.example.syntra.net.NetReel
 import com.example.syntra.net.AvatarCache
+import com.example.syntra.net.BlockActions
 import com.example.syntra.net.BlockStore
+import com.example.syntra.net.BlockedByStore
 import com.example.syntra.net.NetUser
 import com.example.syntra.net.ProfileCache
 import com.example.syntra.net.NetVisitor
@@ -150,9 +154,19 @@ fun ProfileScreen(
     var following by remember(username) { mutableStateOf(false) }
     // Seeded from the local mirror — this used to start `false` every time, so a
     // blocked person's profile opened as if nothing had happened.
+    // Re-derived once the profile loads, because the id only arrives with it: a profile
+    // opened from a reel or a notification has no username to match on, so a
+    // username-only check let a blocked person's page open normally from those routes.
     var blocked by remember(username) {
         mutableStateOf(BlockStore.isBlocked(context, username = username))
     }
+    LaunchedEffect(user?.id) {
+        if (BlockStore.isBlocked(context, username = username, userId = user?.id)) blocked = true
+    }
+    // They blocked ME. Their profile must not be browsable either — but this is NOT
+    // "blocked", because there is nothing here for me to undo. Separate state, separate
+    // wall, no unblock button.
+    val blockedByThem = BlockedByStore.isBlockedBy(context, username = username, userId = user?.id)
     // This person's active story (if any) — drives the avatar ring and the tap
     // behaviour (story vs. full-screen photo).
     var story by remember(username) { mutableStateOf<NetStoryGroup?>(null) }
@@ -301,14 +315,28 @@ fun ProfileScreen(
     // A blocked person's profile is a wall, not a page. No photo, no cover, no shorts,
     // no counts — blocking someone and still browsing their profile makes the block
     // meaningless. Unblocking is offered right here so it is never a trap.
+    if (blockedByThem && !isMe) {
+        UnavailableProfileWall(onClose = onClose)
+        return
+    }
     if (blocked && !isMe) {
         BlockedProfileWall(
             name = username.orEmpty(),
             onUnblock = {
                 val u = username ?: return@BlockedProfileWall
-                blocked = false
-                BlockStore.remove(context, u, user?.id)
-                scope.launch { runCatching { SyntraClient.unblockUser(u) } }
+                // Server first. An optimistic unblock whose request failed was undone
+                // by the next sync, so the wall came straight back.
+                scope.launch {
+                    if (BlockActions.unblock(context, u, user?.id)) {
+                        blocked = false
+                    } else {
+                        Toast.makeText(
+                            context,
+                            "Gagal membuka blokir. Periksa koneksi lalu coba lagi.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
             },
             onClose = onClose,
         )
@@ -390,17 +418,34 @@ fun ProfileScreen(
                                 val u = username ?: return@ProfileActions
                                 val uid = user?.id
                                 if (blocked) {
-                                    blocked = false
-                                    BlockStore.remove(context, u, uid)
-                                    scope.launch { runCatching { SyntraClient.unblockUser(u) } }
+                                    scope.launch {
+                                        if (BlockActions.unblock(context, u, uid)) {
+                                            blocked = false
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "Gagal membuka blokir. Periksa koneksi lalu coba lagi.",
+                                                Toast.LENGTH_LONG,
+                                            ).show()
+                                        }
+                                    }
                                 } else {
+                                    // Blocking stays optimistic ON PURPOSE: the safe
+                                    // direction is to stop showing someone immediately.
+                                    // Unblocking is the one that must be confirmed, since
+                                    // being wrong there exposes you to someone you blocked.
                                     blocked = true
                                     following = false
-                                    // Record locally too, so search, reels and chat all
-                                    // honour the block immediately instead of waiting
-                                    // for a refetch that may never come.
-                                    BlockStore.add(context, u, uid)
-                                    scope.launch { runCatching { SyntraClient.blockUser(u) } }
+                                    scope.launch {
+                                        if (!BlockActions.block(context, u, uid)) {
+                                            blocked = false
+                                            Toast.makeText(
+                                                context,
+                                                "Gagal memblokir. Periksa koneksi lalu coba lagi.",
+                                                Toast.LENGTH_LONG,
+                                            ).show()
+                                        }
+                                    }
                                 }
                             },
                         )
@@ -1407,6 +1452,64 @@ private fun CoverOptionRow(
  * Deliberately shows nothing of theirs — not the avatar, not the cover, not a single
  * count. Those are exactly the details a block is meant to put away.
  */
+/**
+ * The wall shown to someone who HAS BEEN blocked.
+ *
+ * Says only that the account is unavailable. It deliberately does not say "you were
+ * blocked by X", and offers no action: naming the cause turns a block into a
+ * confrontation, and there is nothing this person can do about it anyway.
+ */
+@Composable
+private fun UnavailableProfileWall(onClose: () -> Unit) {
+    BackHandler(onBack = onClose)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(NexusBackground)
+            .windowInsetsPadding(WindowInsets.statusBars),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onClose,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack, "Kembali",
+                tint = NexusTextPrimary, modifier = Modifier.size(22.dp),
+            )
+        }
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 40.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Box(
+                modifier = Modifier.size(84.dp).background(NexusSurface, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.PersonOff, null,
+                    tint = NexusTextSecondary, modifier = Modifier.size(40.dp),
+                )
+            }
+            Spacer(Modifier.height(18.dp))
+            Text("Pengguna", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Profil ini tidak tersedia.",
+                color = NexusTextSecondary,
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
 @Composable
 private fun BlockedProfileWall(name: String, onUnblock: () -> Unit, onClose: () -> Unit) {
     BackHandler(onBack = onClose)

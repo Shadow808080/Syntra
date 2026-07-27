@@ -190,12 +190,33 @@ fun MusicScreen(
     // just a warm neighbour of the home. Fetching the catalogue (network + a wall of
     // cover images) the instant the app opens is a big part of why entering felt heavy;
     // now the Music tab pays that cost only when you open it.
+    // The latch is set only AFTER a load actually SUCCEEDS. Setting it up-front is what
+    // made the tab "sangat rawan gagal": `visible` is `pager.currentPage == MUSIC`, and
+    // currentPage flips the moment a swipe crosses half-way — and animateScrollToPage
+    // SWEEPS THROUGH the intermediate pages. So jumping Chat → Rooms, or dragging
+    // toward Music and letting it spring back, made this effect start, burn the latch,
+    // and then get cancelled mid-request. On the next real visit the guard returned
+    // immediately: no data, and `loading` stuck true forever, which the UI renders as a
+    // permanent spinner with no retry button (the loading branch wins over failed).
+    //
+    // Latching on success instead means a cancelled or failed attempt simply doesn't
+    // count, and opening the tab tries again.
     var browseLoaded by remember { mutableStateOf(false) }
     LaunchedEffect(visible) {
         if (!visible || browseLoaded) return@LaunchedEffect
-        browseLoaded = true
-        runCatching { MusicClient.browse() }
-            .onSuccess { browse = it; failed = it.isEmpty }
+        val result = runCatching { MusicClient.browse() }
+        // runCatching swallows CancellationException too. A cancelled effect must not
+        // report failure or clear `loading` — it must leave everything untouched so the
+        // next visit retries cleanly.
+        (result.exceptionOrNull() as? kotlinx.coroutines.CancellationException)?.let { throw it }
+        result
+            .onSuccess {
+                browse = it
+                failed = it.isEmpty
+                // An empty catalogue is Deezer throttling us, not a real answer — don't
+                // latch, so simply reopening the tab retries.
+                browseLoaded = !it.isEmpty
+            }
             .onFailure { failed = true }
         // Community catalogue is a bonus rail — its absence must not fail the tab.
         runCatching { com.example.syntra.net.SyntraClient.getMusicFeed() }
@@ -315,7 +336,15 @@ fun MusicScreen(
                 )
                 failed -> MusicError { scope.launch {
                     loading = true; failed = false
-                    runCatching { MusicClient.browse() }.onSuccess { browse = it; failed = it.isEmpty }.onFailure { failed = true }
+                    runCatching { MusicClient.browse() }
+                        .onSuccess {
+                            browse = it
+                            failed = it.isEmpty
+                            // Latch here too, or a successful manual retry still leaves
+                            // the automatic loader armed to refetch on the next visit.
+                            browseLoaded = !it.isEmpty
+                        }
+                        .onFailure { failed = true }
                     loading = false
                 } }
                 else -> MusicBrowseBody(

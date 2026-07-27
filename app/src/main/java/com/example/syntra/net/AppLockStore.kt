@@ -100,6 +100,24 @@ object AppLock {
     private const val GRACE_MS = 1500L
     private var backgroundedAt = 0L
 
+    /**
+     * Set while the app itself is showing a SYSTEM dialog — a runtime permission
+     * request, a file picker, the biometric prompt.
+     *
+     * Those stop the activity exactly like the user leaving, but they are not the user
+     * leaving, and [GRACE_MS] cannot tell the difference: 1.5s is shorter than anyone
+     * takes to read a permission dialog, so granting mic access re-locked the app. That
+     * was not merely annoying — it dropped MainTabs out of the composition, which tore
+     * down the live call inside it. A flag is used rather than a longer window because
+     * the answer must not depend on how fast the user reads.
+     */
+    @Volatile private var awaitingSystemDialog = false
+
+    /** Call immediately BEFORE launching a permission request / picker / biometric prompt. */
+    fun expectSystemDialog() {
+        awaitingSystemDialog = true
+    }
+
     fun onBackground() {
         backgroundedAt = SystemClock.elapsedRealtime()
     }
@@ -107,6 +125,13 @@ object AppLock {
     fun onForeground(context: Context) {
         if (!AppLockStore.isEnabled(context)) {
             unlocked = true
+            awaitingSystemDialog = false
+            return
+        }
+        // Returning from our own system dialog: keep whatever state we had, however
+        // long it took. Consumed here so a later real background stint still locks.
+        if (awaitingSystemDialog) {
+            awaitingSystemDialog = false
             return
         }
         // Cold start (no recorded background time) stays locked; a quick round-trip

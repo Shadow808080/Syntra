@@ -133,7 +133,13 @@ object CallEngine {
             is RoomEvent.TrackUnpublished -> {
                 if (event.participant == event.room.localParticipant) refreshLocalVideo()
             }
-            is RoomEvent.Disconnected -> connected = false
+            is RoomEvent.Disconnected -> {
+                // Logged with its reason: a media session that drops right after the
+                // handshake is indistinguishable on screen from a call the far side
+                // hung up, and that ambiguity is why this bug survived two fixes.
+                android.util.Log.w("SyntraCall", "livekit Disconnected: ${event.error?.message ?: "no error"}")
+                connected = false
+            }
             else -> Unit
         }
     }

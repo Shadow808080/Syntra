@@ -76,6 +76,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.NetUser
+import com.example.syntra.net.BlockActions
 import com.example.syntra.net.BlockStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.NexusAccent
@@ -418,10 +419,14 @@ fun ProfileUserScreen(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
                         ) {
-                            scope.launch { runCatching { SyntraClient.blockUser(username) } }
-                            BlockStore.add(context, username, user?.id)
-                            Toast.makeText(context, "$name diblokir.", Toast.LENGTH_SHORT).show()
-                            onBack()
+                            scope.launch {
+                                if (BlockActions.block(context, username, user?.id)) {
+                                    Toast.makeText(context, "$name diblokir.", Toast.LENGTH_SHORT).show()
+                                    onBack()
+                                } else {
+                                    BlockActions.reportFailure(context, blocking = true)
+                                }
+                            }
                         }
                         .padding(horizontal = 20.dp, vertical = 15.dp),
                     verticalAlignment = Alignment.CenterVertically,

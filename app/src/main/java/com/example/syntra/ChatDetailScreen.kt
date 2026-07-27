@@ -66,6 +66,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -123,6 +124,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -135,7 +137,9 @@ import com.example.syntra.net.ApiException
 import com.example.syntra.net.NetMessage
 import com.example.syntra.net.NetPresence
 import com.example.syntra.net.SocketListener
+import com.example.syntra.net.BlockActions
 import com.example.syntra.net.BlockStore
+import com.example.syntra.net.BlockedByStore
 import com.example.syntra.net.HiddenMessageStore
 import com.example.syntra.net.MessageCache
 import com.example.syntra.net.PinStore
@@ -191,6 +195,14 @@ private data class Message(
     val storyReplyUrl: String? = null,
     /** Id of the message this one replies to (WhatsApp-style quote), if any. */
     val replyToId: String? = null,
+    /**
+     * The send failed and will not retry itself.
+     *
+     * Distinct from "still sending": a message whose request errored used to keep the
+     * clock icon forever, so a message that never left the device looked exactly like
+     * one in flight. This drives a red "gagal terkirim · ketuk untuk coba lagi".
+     */
+    val failed: Boolean = false,
 )
 
 /** Marker prefix for a story reply: "STORYREPLY<0x1>url<0x1>text". */
@@ -486,6 +498,8 @@ fun ChatDetailScreen(
     var showAttach by remember { mutableStateOf(false) }
     // Whether I have blocked the person in this chat. Drives the composer: blocked
     // means no send bar at all, plus a one-tap way back out.
+    // True while an unblock request is in flight — drives the spinner in the bar.
+    var unblocking by remember(conversation.id) { mutableStateOf(false) }
     var peerBlocked by remember(conversation.id) {
         mutableStateOf(
             BlockStore.isBlocked(
@@ -493,6 +507,22 @@ fun ChatDetailScreen(
                 username = conversation.counterpartUsername,
                 userId = conversation.counterpartId,
             ),
+        )
+    }
+    // They blocked ME. Compose state, so the realtime event repaints this instantly.
+    val blockedByPeer = BlockedByStore.isBlockedBy(
+        context,
+        username = conversation.counterpartUsername,
+        userId = conversation.counterpartId,
+    )
+    // Re-read whenever the screen resumes. Blocking or unblocking can happen on the
+    // profile page reached FROM here, and without this the chat kept the stale answer
+    // until it was closed and reopened — "sudah dibuka tapi masih terblokir".
+    LaunchedEffect(showProfile) {
+        peerBlocked = BlockStore.isBlocked(
+            context,
+            username = conversation.counterpartUsername,
+            userId = conversation.counterpartId,
         )
     }
     var uploading by remember { mutableStateOf(false) }
@@ -1017,6 +1047,51 @@ fun ChatDetailScreen(
         }
     }
 
+    /**
+     * Puts an already-optimistically-rendered message on the wire.
+     *
+     * Replies must go over REST because the socket frame carries no reply_to_id. Plain
+     * text prefers the socket, but FALLS BACK to REST when the socket isn't open —
+     * previously the frame was dropped in silence and the bubble kept a "sending" clock
+     * forever, which is the bug behind messages that never arrive after a network blip.
+     *
+     * Either way a failure marks the bubble [Message.failed] instead of leaving it
+     * pending, so the state on screen matches what actually happened.
+     */
+    fun deliverText(text: String, ref: String, replyId: String?) {
+        fun markFailed() {
+            val i = messages.indexOfFirst { it.id == ref }
+            if (i >= 0) messages[i] = messages[i].copy(failed = true)
+        }
+        // Clear any previous failure mark (this may be a retry).
+        messages.indexOfFirst { it.id == ref }.let { i ->
+            if (i >= 0 && messages[i].failed) messages[i] = messages[i].copy(failed = false)
+        }
+        if (replyId == null && SyntraClient.messageSend(conversation.id, text, ref)) {
+            // The frame went out, but the socket gives no delivery guarantee: if no ack
+            // or broadcast replaces this row, it is still unsent. Without this the
+            // clock was permanent whenever an ack was lost.
+            scope.launch {
+                delay(12_000)
+                if (messages.any { it.id == ref }) markFailed()
+            }
+            return
+        }
+        scope.launch {
+            runCatching { SyntraClient.sendMessageRest(conversation.id, text, replyToId = replyId) }
+                .onSuccess { sent ->
+                    val i = messages.indexOfFirst { it.id == ref }
+                    if (i >= 0) {
+                        // Guard against the broadcast beating this ack: dropping
+                        // the optimistic row avoids a duplicate LazyColumn key.
+                        if (messages.any { it.id == sent.id }) messages.removeAt(i)
+                        else messages[i] = sent.toUi()
+                    }
+                }
+                .onFailure { markFailed() }
+        }
+    }
+
     fun send() {
         val text = input.trim()
         if (text.isEmpty()) return
@@ -1055,24 +1130,7 @@ fun ChatDetailScreen(
         typingActive = false
         if (ApiConfig.ENABLED) {
             SyntraClient.typingStop(conversation.id)
-            if (replyId != null) {
-                // Replies go over REST so the reply_to_id is carried; swap the
-                // optimistic bubble for the authoritative one on success.
-                scope.launch {
-                    runCatching { SyntraClient.sendMessageRest(conversation.id, text, replyToId = replyId) }
-                        .onSuccess { sent ->
-                            val i = messages.indexOfFirst { it.id == ref }
-                            if (i >= 0) {
-                                // Guard against the broadcast beating this ack: dropping
-                                // the optimistic row avoids a duplicate LazyColumn key.
-                                if (messages.any { it.id == sent.id }) messages.removeAt(i)
-                                else messages[i] = sent.toUi()
-                            }
-                        }
-                }
-            } else {
-                SyntraClient.messageSend(conversation.id, text, ref)
-            }
+            deliverText(text, ref, replyId)
         }
     }
 
@@ -1102,18 +1160,42 @@ fun ChatDetailScreen(
     ) {
         DetailTopBar(
             convo = conversation,
-            peerTyping = peerTyping,
-            peerOnline = peerOnline,
-            peerAvatar = peerAvatar,
+            // A blocked person is not "online" and is not "typing" to you. Leaking
+            // their presence contradicts the block just as much as letting a message
+            // through — and it kept the header alive while the composer said blocked.
+            // Either direction hides their details. Someone who blocked me must not
+            // keep showing me their real name, photo or "online" — that is precisely
+            // the "kek gada gunanya" case: from their side the block did nothing.
+            peerTyping = peerTyping && !peerBlocked && !blockedByPeer,
+            peerOnline = peerOnline && !peerBlocked && !blockedByPeer,
+            peerAvatar = if (peerBlocked || blockedByPeer) null else peerAvatar,
+            peerBlocked = peerBlocked,
+            peerBlockedMe = blockedByPeer,
             onBack = onBack,
             onLongPressAvatar = { confirmClear = true },
             onOpenProfile = { if (conversation.isGroup) showGroupSettings = true else showProfile = true },
-            onVoiceCall = { startCall(video = false) },
-            onVideoCall = { startCall(video = true) },
+            // Calling someone you blocked makes no sense; the buttons go away rather
+            // than failing after the fact.
+            onVoiceCall = { if (!peerBlocked && !blockedByPeer) startCall(video = false) },
+            onVideoCall = { if (!peerBlocked && !blockedByPeer) startCall(video = true) },
             onMenuAction = { action ->
                 when (action) {
                     "Laporkan" -> showReport = true
                     "Blokir" -> confirmBlock = true
+                    "Buka blokir" -> {
+                        val u = conversation.counterpartUsername
+                        if (u.isNullOrBlank()) {
+                            Toast.makeText(context, "Tidak bisa membuka blokir dari sini.", Toast.LENGTH_SHORT).show()
+                        } else if (!unblocking) {
+                            unblocking = true
+                            scope.launch {
+                                val ok = BlockActions.unblock(context, u, conversation.counterpartId)
+                                unblocking = false
+                                if (ok) peerBlocked = false
+                                else BlockActions.reportFailure(context, blocking = false)
+                            }
+                        }
+                    }
                     "Bersihkan obrolan" -> confirmClear = true
                     "Grup Baru" -> onNewGroup()
                     "Tema obrolan" -> showChatTheme = true
@@ -1240,6 +1322,9 @@ fun ChatDetailScreen(
                     onHideTranslation = { translations.remove(msg.id) },
                     quoted = msg.replyToId?.let { rid -> messages.firstOrNull { it.id == rid } },
                     state = when {
+                        // Failure outranks everything: a message that never left the
+                        // device must not keep showing an in-flight clock.
+                        msg.failed -> DeliveryState.FAILED
                         msg.id.startsWith(LOCAL_ID_PREFIX) -> DeliveryState.SENDING
                         // READ (blue) is separate and driven ONLY by the peer's read
                         // mark — never by online status. UUIDv7 sorts by time, so a
@@ -1404,14 +1489,25 @@ fun ChatDetailScreen(
 
         // Blocked: the composer is replaced entirely. Leaving it in place and failing
         // the send would let someone type a message that quietly goes nowhere.
+        if (blockedByPeer) {
+            BlockedByPeerBar()
+            return@Column
+        }
         if (peerBlocked) {
             BlockedComposerBar(
+                busy = unblocking,
                 onUnblock = {
                     val u = conversation.counterpartUsername
-                    peerBlocked = false
-                    BlockStore.remove(context, u, conversation.counterpartId)
-                    if (!u.isNullOrBlank()) {
-                        SyntraClient.fireAndForget { SyntraClient.unblockUser(u) }
+                    if (u.isNullOrBlank()) {
+                        Toast.makeText(context, "Tidak bisa membuka blokir dari sini.", Toast.LENGTH_SHORT).show()
+                    } else if (!unblocking) {
+                        unblocking = true
+                        scope.launch {
+                            val ok = BlockActions.unblock(context, u, conversation.counterpartId)
+                            unblocking = false
+                            if (ok) peerBlocked = false
+                            else BlockActions.reportFailure(context, blocking = false)
+                        }
                     }
                 },
             )
@@ -1684,16 +1780,21 @@ fun ChatDetailScreen(
             onConfirm = {
                 confirmBlock = false
                 val username = conversation.counterpartUsername
-                if (ApiConfig.ENABLED && !username.isNullOrBlank()) {
-                    scope.launch { runCatching { SyntraClient.blockUser(username) } }
-                }
-                // Recorded by username AND id — the old code keyed the block by the
-                // person's DISPLAY NAME, which is not an identity: it changes when they
-                // rename, and it never matched the id a reel or a search result carries.
-                BlockStore.add(context, username, conversation.counterpartId)
                 peerBlocked = true
-                Toast.makeText(context, "${conversation.name} diblokir.", Toast.LENGTH_SHORT).show()
-                onBack()
+                scope.launch {
+                    // One shared implementation with the home list — see BlockActions.
+                    val ok = BlockActions.block(context, username, conversation.counterpartId)
+                    if (ok) {
+                        Toast.makeText(context, "${conversation.name} diblokir.", Toast.LENGTH_SHORT).show()
+                        onBack()
+                    } else {
+                        // Stay on the screen when it failed. Closing first (what the old
+                        // code did) meant a failed block looked exactly like a successful
+                        // one — the chat vanished either way.
+                        peerBlocked = false
+                        BlockActions.reportFailure(context, blocking = true)
+                    }
+                }
             },
         )
     }
@@ -2002,6 +2103,8 @@ private fun DetailTopBar(
     peerTyping: Boolean = false,
     peerOnline: Boolean = false,
     peerAvatar: String? = null,
+    peerBlocked: Boolean = false,
+    peerBlockedMe: Boolean = false,
     onBack: () -> Unit = {},
     onLongPressAvatar: () -> Unit = {},
     onOpenProfile: () -> Unit = {},
@@ -2010,6 +2113,12 @@ private fun DetailTopBar(
     onMenuAction: (String) -> Unit = {},
 ) {
     val status = when {
+        // Says the state plainly instead of a stale "last seen recently", which read
+        // as though the block hadn't applied.
+        // Deliberately NOT "kamu diblokir" — the neutral line matches what every other
+        // surface shows them, and does not turn the header into an accusation.
+        peerBlockedMe -> "Tidak tersedia"
+        peerBlocked -> "Diblokir"
         peerTyping -> "typing…"
         peerOnline || convo.presence == Presence.ONLINE -> "online"
         convo.presence == Presence.TYPING -> "typing…"
@@ -2062,7 +2171,9 @@ private fun DetailTopBar(
                 .padding(end = 6.dp),
         ) {
             Text(
-                text = convo.name,
+                // "Pengguna" once either block applies — the name is identifying
+                // information, and it was the most obviously-wrong thing still on screen.
+                text = if (peerBlockedMe) "Pengguna" else convo.name,
                 color = NexusTextPrimary,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -2077,11 +2188,15 @@ private fun DetailTopBar(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        IconButtonBox(onClick = onVideoCall) {
-            Icon(Icons.Filled.Videocam, "Video call", tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
-        }
-        IconButtonBox(onClick = onVoiceCall) {
-            Icon(Icons.Filled.Call, "Call", tint = NexusTextPrimary, modifier = Modifier.size(20.dp))
+        // Call buttons are REMOVED, not greyed: a disabled control still invites a tap
+        // and then does nothing, which is how the block kept looking broken.
+        if (!peerBlocked && !peerBlockedMe) {
+            IconButtonBox(onClick = onVideoCall) {
+                Icon(Icons.Filled.Videocam, "Video call", tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
+            }
+            IconButtonBox(onClick = onVoiceCall) {
+                Icon(Icons.Filled.Call, "Call", tint = NexusTextPrimary, modifier = Modifier.size(20.dp))
+            }
         }
         Box {
             var menuOpen by remember { mutableStateOf(false) }
@@ -2104,7 +2219,10 @@ private fun DetailTopBar(
                 } else {
                     listOf(
                         "Laporkan" to false,
-                        "Blokir" to true,
+                        // Follows the real state. It was hardcoded "Blokir", so after
+                        // blocking someone the menu still offered to block them again —
+                        // and there was no way to undo it from here at all.
+                        (if (peerBlocked) "Buka blokir" else "Blokir") to !peerBlocked,
                         "Bersihkan obrolan" to false,
                         "Grup Baru" to false,
                         "Tema obrolan" to false,
@@ -2736,8 +2854,37 @@ private fun EmptyChatPrompt(name: String, onWave: () -> Unit) {
  * was made from their profile, but a profile you can no longer open is a poor place to
  * put the only undo.
  */
+/**
+ * Shown to the person who HAS BEEN blocked. No unblock button: it is not theirs to undo.
+ *
+ * Deliberately says "tidak bisa" rather than "kamu diblokir oleh X". The composer has to
+ * go — leaving it would let them type a message the server will refuse — but the wording
+ * stays neutral and gives the blocker no channel back.
+ */
 @Composable
-private fun BlockedComposerBar(onUnblock: () -> Unit) {
+private fun BlockedByPeerBar() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NexusSurface)
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(horizontal = 20.dp, vertical = 18.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Block, null, tint = NexusTextSecondary, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "Kamu tidak bisa mengirim pesan ke pengguna ini",
+            color = NexusTextSecondary,
+            fontSize = 13.sp,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun BlockedComposerBar(busy: Boolean, onUnblock: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -2761,19 +2908,45 @@ private fun BlockedComposerBar(onUnblock: () -> Unit) {
             )
         }
         Spacer(Modifier.height(4.dp))
-        Text(
-            text = "Buka blokir",
-            color = NexusAccentSoft,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold,
+        // Unblocking waits on the server before it can report anything, and on a slow
+        // connection that is a visibly long silence. The label becomes a spinner for
+        // the whole request so it is obvious something is running — and so a second
+        // tap can't fire a second unblock.
+        Box(
             modifier = Modifier
                 .clickable(
+                    enabled = !busy,
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
                     onClick = onUnblock,
                 )
                 .padding(horizontal = 12.dp, vertical = 8.dp),
-        )
+            contentAlignment = Alignment.Center,
+        ) {
+            if (busy) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        color = NexusAccentSoft,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Membuka blokir…",
+                        color = NexusAccentSoft,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            } else {
+                Text(
+                    text = "Buka blokir",
+                    color = NexusAccentSoft,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
     }
 }
 
@@ -3345,11 +3518,12 @@ private fun formatMillis(ms: Int): String {
 /**
  * Where a sent message got to:
  *  - SENDING   : still local, no server ack yet (clock)
+ *  - FAILED    : the request errored; it is NOT retrying on its own (red warning)
  *  - SENT      : stored on the server, not yet on the peer's device (1 tick)
  *  - DELIVERED : the peer's device confirmed receipt via message.delivered (2 grey ticks)
  *  - READ      : the peer opened the chat and read it (2 blue ticks)
  */
-private enum class DeliveryState { SENDING, SENT, DELIVERED, READ }
+private enum class DeliveryState { SENDING, SENT, DELIVERED, READ, FAILED }
 
 @Composable
 private fun DeliveryTicks(state: DeliveryState, base: Color) {
@@ -3359,6 +3533,12 @@ private fun DeliveryTicks(state: DeliveryState, base: Color) {
             contentDescription = "Mengirim",
             tint = base.copy(alpha = 0.6f),
             modifier = Modifier.size(11.dp),
+        )
+        DeliveryState.FAILED -> Icon(
+            imageVector = Icons.Filled.ErrorOutline,
+            contentDescription = "Gagal terkirim — ketuk untuk coba lagi",
+            tint = Color(0xFFFF5D5D),
+            modifier = Modifier.size(12.dp),
         )
         DeliveryState.SENT -> Icon(
             imageVector = Icons.Filled.Done,

@@ -73,6 +73,7 @@ import androidx.core.content.ContextCompat
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.VideoFrameDecoder
+import com.example.syntra.net.AppLock
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
@@ -186,7 +187,10 @@ fun AddStatusScreen(
     val cameraLauncher = rememberCameraCapture { bitmap -> onCaptureBitmap(bitmap) }
 
     LaunchedEffect(Unit) {
-        if (!hasPermission) permissionLauncher.launch(galleryPermissions())
+        if (!hasPermission) {
+            AppLock.expectSystemDialog()
+            permissionLauncher.launch(galleryPermissions())
+        }
     }
     LaunchedEffect(hasPermission) {
         if (hasPermission) media = queryGallery(context)
@@ -298,7 +302,10 @@ fun AddStatusScreen(
             Spacer(Modifier.height(12.dp))
 
             if (!hasPermission) {
-                PermissionPrompt(onGrant = { permissionLauncher.launch(galleryPermissions()) })
+                PermissionPrompt(onGrant = {
+                    AppLock.expectSystemDialog()
+                    permissionLauncher.launch(galleryPermissions())
+                })
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(3),
@@ -309,7 +316,10 @@ fun AddStatusScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    item { CameraTile(onClick = { cameraLauncher.launch() }) }
+                    item { CameraTile(onClick = {
+                        AppLock.expectSystemDialog()
+                        cameraLauncher.launch()
+                    }) }
                     items(media) { gItem ->
                         GalleryTile(gItem, imageLoader) { onSelectUri(gItem.uri) }
                     }
