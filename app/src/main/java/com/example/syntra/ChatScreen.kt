@@ -523,7 +523,31 @@ fun ChatScreen(
     // Index of the story currently open in the full-screen viewer (null = closed).
     var openedStory by remember { mutableStateOf<Int?>(null) }
     // Conversation currently open in the detail screen (null = on the list).
-    var openedChat by remember { mutableStateOf<Conversation?>(null) }
+    // On a fresh appearance (cold start / after unlocking) we open the last chat
+    // right away from its stored snapshot — the detail screen is on screen from the
+    // first frame, so the list never flashes underneath it (WhatsApp-like).
+    val resumeCtx = LocalContext.current
+    var openedChat by remember {
+        val resume = if (ChatResume.pending && ChatNavRequest.conversationId == null) {
+            com.example.syntra.net.LastChatStore.get(resumeCtx)?.let { r ->
+                Conversation(
+                    id = r.id,
+                    name = r.name.ifBlank { "(tanpa nama)" },
+                    message = "",
+                    time = "",
+                    counterpartId = r.counterpartId,
+                    counterpartUsername = r.counterpartUsername,
+                    avatarUrl = r.avatarUrl,
+                    isGroup = r.isGroup,
+                )
+            }
+        } else {
+            null
+        }
+        mutableStateOf(resume)
+    }
+    // Consume the resume request once, after this appearance has used it.
+    LaunchedEffect(Unit) { ChatResume.pending = false }
     // Live data only. Sample chats are used solely when there is no backend to talk to;
     // the story row is never seeded — it shows exactly what GET /stories returns.
     val chats = remember {
@@ -591,35 +615,21 @@ fun ChatScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // Remember whichever conversation is open, so the next fresh start can reopen it.
+    // Remember whichever conversation is open (its snapshot), so the next fresh
+    // start can reopen it instantly. Not cleared on back, so it always points at the
+    // most recently viewed chat.
     LaunchedEffect(openedChat?.id) {
-        openedChat?.id?.let { com.example.syntra.net.LastChatStore.set(context, it) }
-    }
-    // Resume the last-open conversation when the screen appears fresh (cold start or
-    // after unlocking with the PIN) — but not on a plain tab switch. `ChatResume.pending`
-    // is only set on a real background/cold start, and we act at most once per appearance.
-    var resumeHandled by remember { mutableStateOf(false) }
-    LaunchedEffect(chats.size, ChatResume.pending) {
-        if (resumeHandled || !ChatResume.pending) return@LaunchedEffect
-        // A notification deep-link takes priority — let it open its own chat.
-        if (ChatNavRequest.conversationId != null) return@LaunchedEffect
-        val last = com.example.syntra.net.LastChatStore.get(context)
-        if (openedChat != null || last == null) {
-            resumeHandled = true
-            ChatResume.pending = false
-            return@LaunchedEffect
+        openedChat?.let { c ->
+            com.example.syntra.net.LastChatStore.set(
+                context,
+                id = c.id,
+                name = c.name,
+                isGroup = c.isGroup,
+                counterpartId = c.counterpartId,
+                counterpartUsername = c.counterpartUsername,
+                avatarUrl = c.avatarUrl,
+            )
         }
-        // Wait until the list has loaded at least once before deciding.
-        if (chats.isEmpty()) return@LaunchedEffect
-        val hit = chats.firstOrNull { it.id == last }
-        if (hit != null) {
-            openedChat = hit
-        } else {
-            // That conversation is gone (left/deleted) — forget it.
-            com.example.syntra.net.LastChatStore.clear(context)
-        }
-        resumeHandled = true
-        ChatResume.pending = false
     }
 
     // Collage: pick several photos, compose them into one portrait bitmap, then send
