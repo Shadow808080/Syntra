@@ -778,9 +778,17 @@ private fun ReelPage(
             onEnded = onVideoEnded,
         )
 
-        // Tap layer toggles pause — but only over the upper video area. The
-        // bottom strip (caption, username, action rail) is left out so tapping
-        // those never pauses the video. Long-press opens the playback settings.
+        // Tap layer over the upper video area only. The bottom strip (caption,
+        // username, action rail) is left out so tapping those never pauses the video.
+        //   • single tap → play/pause
+        //   • double tap → like (never un-likes) + a heart bursts where you tapped
+        //   • long press → playback settings
+        // Read the latest like state/callback through updated-state so the gesture
+        // block (keyed on Unit, never rebuilt) never acts on a stale reel.
+        val likedNow by rememberUpdatedState(reel.isLiked)
+        val onLikeLatest by rememberUpdatedState(onLike)
+        var burstAt by remember { mutableStateOf<Offset?>(null) }
+        var burstKey by remember { mutableIntStateOf(0) }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -789,9 +797,18 @@ private fun ReelPage(
                     detectTapGestures(
                         onTap = { paused = !paused },
                         onLongPress = { onLongPress() },
+                        onDoubleTap = { offset ->
+                            // Always show the heart; only send a like when it isn't
+                            // liked yet, so a double-tap can never toggle a like off.
+                            if (!likedNow) onLikeLatest()
+                            burstAt = offset
+                            burstKey++
+                        },
                     )
                 },
-        )
+        ) {
+            burstAt?.let { pos -> LikeBurst(pos = pos, triggerKey = burstKey) }
+        }
 
         // Paused indicator.
         if (paused && active) {
@@ -863,6 +880,46 @@ private fun ReelPage(
             )
         }
     }
+}
+
+/**
+ * The heart that blooms where you double-tapped a reel, then fades away — the
+ * familiar "double-tap to like" flourish. Re-runs its animation whenever
+ * [triggerKey] changes, so a second tap restarts the burst even at the same spot.
+ */
+@Composable
+private fun LikeBurst(pos: Offset, triggerKey: Int) {
+    val density = LocalDensity.current
+    val heart = 116.dp
+    val scale = remember { androidx.compose.animation.core.Animatable(0f) }
+    val alpha = remember { androidx.compose.animation.core.Animatable(0f) }
+    val rot = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(triggerKey) {
+        // Tilt each pop a touch, alternating sides, so repeat taps feel lively.
+        rot.snapTo(if (triggerKey % 2 == 0) -10f else 10f)
+        alpha.snapTo(1f)
+        scale.snapTo(0.2f)
+        // Pop in, hold briefly, then drift up a little as it fades out.
+        scale.animateTo(1f, tween(230, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        delay(320)
+        launch { scale.animateTo(1.22f, tween(260)) }
+        alpha.animateTo(0f, tween(260))
+    }
+    val sizePx = with(density) { heart.toPx() }
+    Icon(
+        imageVector = Icons.Filled.Favorite,
+        contentDescription = null,
+        tint = Color(0xFFFF3040),
+        modifier = Modifier
+            .offset { IntOffset((pos.x - sizePx / 2f).roundToInt(), (pos.y - sizePx / 2f).roundToInt()) }
+            .size(heart)
+            .graphicsLayer {
+                scaleX = scale.value
+                scaleY = scale.value
+                this.alpha = alpha.value
+                rotationZ = rot.value
+            },
+    )
 }
 
 /**
