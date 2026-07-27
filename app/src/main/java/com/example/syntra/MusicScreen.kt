@@ -631,12 +631,28 @@ private fun MusicBrowseBody(
         // anymore: the add-from-storage banner IS the entry point (its "+" sits at the
         // start), and it stays put whether or not the user has added tracks yet.
         item { LocalMusicEmpty(onAddLocal) }
-        items(localTracks, key = { "local_${it.id}" }) { t ->
-            LocalTrackRow(
-                track = t,
-                onClick = { onPlay(t, localTracks) },
-                onRemove = { onRemoveLocal(t) },
-            )
+        // Lagu dari penyimpanan dibungkus dalam satu kotak, tepat di bawah banner
+        // "Tambahkan lagu dari penyimpanan".
+        if (localTracks.isNotEmpty()) {
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 8.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(NexusSurface)
+                        .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
+                        .padding(vertical = 4.dp),
+                ) {
+                    localTracks.forEach { t ->
+                        LocalTrackRow(
+                            track = t,
+                            onClick = { onPlay(t, localTracks) },
+                            onRemove = { onRemoveLocal(t) },
+                        )
+                    }
+                }
+            }
         }
 
         // Community uploads — public tracks other people added from their devices.
@@ -1109,7 +1125,7 @@ private fun LocalTrackRow(track: MusicTrack, onClick: () -> Unit, onRemove: () -
         modifier = Modifier
             .fillMaxWidth()
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
-            .padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
