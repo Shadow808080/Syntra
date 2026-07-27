@@ -509,14 +509,17 @@ private fun SectionHeader(text: String) {
 
 @Composable
 private fun SettingsGroup(content: @Composable () -> Unit) {
-    // Plain: no card fill, no outline. The section headers and the dividers between
-    // rows already say where one group ends and the next begins, so the box around
-    // them was drawing a boundary that was never in question — and stacking three
-    // shades of near-black on a dark theme just makes the page look busy.
+    // Each section is its own boxed card (surface fill + outline + rounded corners), so
+    // "Akun", "Privasi", dst. jadi kotak terpisah yang jelas. Baris di dalamnya sudah
+    // punya padding sendiri, jadi kartu ini cukup memberi bingkai.
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 16.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(NexusSurface)
+            .border(1.dp, NexusStroke, RoundedCornerShape(18.dp))
+            .padding(vertical = 4.dp),
     ) {
         content()
     }
