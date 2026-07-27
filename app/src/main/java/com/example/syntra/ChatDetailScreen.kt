@@ -448,6 +448,12 @@ fun ChatDetailScreen(
     // Per-conversation chat background: a built-in URL, a local content:// uri, or null.
     var wallpaper by remember(conversation) { mutableStateOf(ChatWallpaperStore.get(context, conversation.id)) }
     var showProfile by remember(conversation) { mutableStateOf(false) }
+    // Group actions: settings/members screen, add-members sheet, leave confirmation.
+    var showGroupSettings by remember(conversation) { mutableStateOf(false) }
+    var showAddMembers by remember(conversation) { mutableStateOf(false) }
+    var confirmLeave by remember(conversation) { mutableStateOf(false) }
+    // Bumped after adding members so the open group-settings screen reloads its list.
+    var groupReload by remember(conversation) { mutableIntStateOf(0) }
     var chatTheme by remember(conversation) { mutableStateOf(ChatThemeStore.get(context, conversation.id)) }
 
     fun startCall(video: Boolean) {
@@ -1111,7 +1117,7 @@ fun ChatDetailScreen(
             peerAvatar = peerAvatar,
             onBack = onBack,
             onLongPressAvatar = { confirmClear = true },
-            onOpenProfile = { showProfile = true },
+            onOpenProfile = { if (conversation.isGroup) showGroupSettings = true else showProfile = true },
             onVoiceCall = { startCall(video = false) },
             onVideoCall = { startCall(video = true) },
             onMenuAction = { action ->
@@ -1122,6 +1128,9 @@ fun ChatDetailScreen(
                     "Grup Baru" -> onNewGroup()
                     "Tema obrolan" -> showChatTheme = true
                     "Latar obrolan" -> showWallpaper = true
+                    "Tambah anggota" -> showAddMembers = true
+                    "Info grup" -> showGroupSettings = true
+                    "Keluar dari grup" -> confirmLeave = true
                 }
             },
         )
@@ -1633,23 +1642,30 @@ fun ChatDetailScreen(
             onDismiss = { showReport = false },
             onSubmit = { reason ->
                 showReport = false
-                val target = conversation.counterpartId
-                if (ApiConfig.ENABLED && target != null) {
-                    scope.launch {
+                if (!ApiConfig.ENABLED) {
+                    Toast.makeText(context, "Laporan dicatat, tapi server belum aktif.", Toast.LENGTH_LONG).show()
+                    return@ReportDialog
+                }
+                scope.launch {
+                    // A group has no single counterpart, so the report is filed against
+                    // the group owner with the group name noted in the reason.
+                    val result = if (conversation.isGroup) {
+                        runCatching {
+                            val owner = SyntraClient.getMembers(conversation.id).firstOrNull { it.role == "owner" }
+                                ?: error("Pemilik grup tidak ditemukan")
+                            SyntraClient.reportUser(owner.userId, "[Grup: ${conversation.name}] $reason")
+                        }
+                    } else {
+                        val target = conversation.counterpartId
+                        if (target == null) {
+                            Toast.makeText(context, "Identitas pengguna belum tersedia dari server.", Toast.LENGTH_LONG).show()
+                            return@launch
+                        }
                         runCatching { SyntraClient.reportUser(target, reason) }
-                            .onSuccess {
-                                Toast.makeText(context, "Laporan terkirim. Terima kasih.", Toast.LENGTH_LONG).show()
-                            }
-                            .onFailure {
-                                Toast.makeText(context, "Gagal melapor: ${it.message}", Toast.LENGTH_SHORT).show()
-                            }
                     }
-                } else {
-                    Toast.makeText(
-                        context,
-                        "Laporan dicatat, tapi identitas pengguna belum tersedia dari server.",
-                        Toast.LENGTH_LONG,
-                    ).show()
+                    result
+                        .onSuccess { Toast.makeText(context, "Laporan terkirim. Terima kasih.", Toast.LENGTH_LONG).show() }
+                        .onFailure { Toast.makeText(context, "Gagal melapor: ${it.message}", Toast.LENGTH_SHORT).show() }
                 }
             },
         )
@@ -1770,6 +1786,50 @@ fun ChatDetailScreen(
         } else {
             showProfile = false
         }
+    }
+
+    // Group info / settings — members, add, kick, leave.
+    if (showGroupSettings) {
+        GroupSettingsScreen(
+            conversation = conversation,
+            reloadKey = groupReload,
+            onClose = { showGroupSettings = false },
+            onAddMembers = { showAddMembers = true },
+            onLeave = { showGroupSettings = false; confirmLeave = true },
+        )
+    }
+
+    if (showAddMembers) {
+        AddMembersSheet(
+            conversationId = conversation.id,
+            onDismiss = { showAddMembers = false },
+            onAdded = {
+                showAddMembers = false
+                groupReload++ // refresh the members list if settings is open
+            },
+        )
+    }
+
+    if (confirmLeave) {
+        ConfirmActionDialog(
+            title = "Keluar dari \"${conversation.name}\"?",
+            message = "Kamu tidak akan lagi menerima pesan dari grup ini.",
+            confirmText = "Keluar",
+            onDismiss = { confirmLeave = false },
+            onConfirm = {
+                confirmLeave = false
+                scope.launch {
+                    val ok = !ApiConfig.ENABLED ||
+                        runCatching { SyntraClient.leaveGroup(conversation.id) }.isSuccess
+                    if (ok) {
+                        Toast.makeText(context, "Kamu keluar dari grup.", Toast.LENGTH_SHORT).show()
+                        onBack()
+                    } else {
+                        Toast.makeText(context, "Gagal keluar dari grup. Coba lagi.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+        )
     }
 
     // The call itself is rendered by CallHost at the app root, not here — so it
@@ -2026,14 +2086,29 @@ private fun DetailTopBar(
                 Icon(Icons.Filled.MoreVert, "More", tint = NexusTextPrimary, modifier = Modifier.size(22.dp))
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                listOf(
-                    "Laporkan" to false,
-                    "Blokir" to true,
-                    "Bersihkan obrolan" to false,
-                    "Grup Baru" to false,
-                    "Tema obrolan" to false,
-                    "Latar obrolan" to false,
-                ).forEach { (label, danger) ->
+                // A group gets its own actions (add members / leave); a direct chat
+                // keeps block + new-group. Both share clear / report / theming.
+                val items = if (convo.isGroup) {
+                    listOf(
+                        "Tambah anggota" to false,
+                        "Info grup" to false,
+                        "Tema obrolan" to false,
+                        "Latar obrolan" to false,
+                        "Bersihkan obrolan" to false,
+                        "Laporkan" to false,
+                        "Keluar dari grup" to true,
+                    )
+                } else {
+                    listOf(
+                        "Laporkan" to false,
+                        "Blokir" to true,
+                        "Bersihkan obrolan" to false,
+                        "Grup Baru" to false,
+                        "Tema obrolan" to false,
+                        "Latar obrolan" to false,
+                    )
+                }
+                items.forEach { (label, danger) ->
                     DropdownMenuItem(
                         text = {
                             Text(label, color = if (danger) Color(0xFFFF5D5D) else NexusTextPrimary)

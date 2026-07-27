@@ -235,6 +235,9 @@ data class Conversation(
     val lastMessageId: String? = null,
     // Real profile photo of the counterpart / group, when the server knows one.
     val avatarUrl: String? = null,
+    // True for group conversations — drives the group-specific overflow menu and
+    // the group settings screen (members, add, kick, leave).
+    val isGroup: Boolean = false,
 )
 
 // Stable placeholder gradients, picked from the id hash (align. doc §6).
@@ -344,6 +347,7 @@ private fun NetConversation.toUi() = Conversation(
     // Only a real URL is usable; a bare media id stays null and falls back to
     // the letter tile until the photo is resolved (see resolveAvatars).
     avatarUrl = avatarMediaId?.takeIf { it.startsWith("http") },
+    isGroup = type == "group",
 )
 
 /**
@@ -1364,7 +1368,7 @@ fun ChatScreen(
                 onClose = { showNewGroup = false },
                 onCreated = { id, name ->
                     showNewGroup = false
-                    val convo = Conversation(id = id, name = name, message = "", time = "")
+                    val convo = Conversation(id = id, name = name, message = "", time = "", isGroup = true)
                     chats.add(0, convo)
                     openedChat = convo
                 },

@@ -16,6 +16,15 @@ data class NetUser(
     val isSelf: Boolean = false,
 )
 
+/** A member of a group conversation, with their [role] (owner|admin|member). */
+data class NetMember(
+    val userId: String,
+    val username: String,
+    val displayName: String,
+    val avatarUrl: String? = null,
+    val role: String = "member",
+)
+
 /** One person who visited your profile. [avatarUrl] is a ready-to-use image URL. */
 data class NetVisitor(
     val userId: String,

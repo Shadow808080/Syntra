@@ -438,6 +438,36 @@ object SyntraClient {
         return (postData("/api/v1/conversations", payload) as JSONObject).getString("id")
     }
 
+    /** Leave a group. Ownership is handed on server-side. `POST .../leave`. */
+    suspend fun leaveGroup(conversationId: String) {
+        postData("/api/v1/conversations/$conversationId/leave", JSONObject())
+    }
+
+    /** Members of a group with their roles. `GET .../members`. */
+    suspend fun getMembers(conversationId: String): List<NetMember> =
+        (getData("/api/v1/conversations/$conversationId/members") as JSONArray).mapObjects {
+            NetMember(
+                userId = it.optString("user_id"),
+                username = it.optString("username"),
+                displayName = it.optString("display_name").ifBlank { it.optString("username") },
+                avatarUrl = it.optString("avatar_url").takeIf { u -> u.startsWith("http") },
+                role = it.optString("role", "member"),
+            )
+        }
+
+    /** Add members to a group (admin/owner only). `POST .../members`. */
+    suspend fun addMembers(conversationId: String, memberIds: List<String>) {
+        postData(
+            "/api/v1/conversations/$conversationId/members",
+            JSONObject().put("member_ids", JSONArray(memberIds)),
+        )
+    }
+
+    /** Remove (kick) a member from a group (admin/owner only). `DELETE .../members/{id}`. */
+    suspend fun removeMember(conversationId: String, userId: String) {
+        delete("/api/v1/conversations/$conversationId/members/$userId")
+    }
+
     suspend fun getStories(): List<NetStoryGroup> =
         (getData("/api/v1/stories") as JSONArray).mapObjects { it.toStoryGroup() }
 
