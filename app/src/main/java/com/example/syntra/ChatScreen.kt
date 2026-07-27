@@ -274,9 +274,16 @@ private fun newLocalId(): String = "local-${System.currentTimeMillis()}"
 /** Decode a picked gallery image into an [ImageBitmap] for use as a story. */
 private fun loadStoryBitmap(context: Context, uri: Uri): ImageBitmap? =
     runCatching {
-        context.contentResolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream)?.asImageBitmap()
-        }
+        // Downsample so a full-resolution photo can't decode to a bitmap too large for
+        // the Canvas (which crashes the app with "trying to draw too large bitmap").
+        val cr = context.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val maxDim = 2560
+        var sample = 1
+        while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts)?.asImageBitmap() }
     }.getOrNull()
 
 /** Grab the first frame of a video to use as its story thumbnail. */

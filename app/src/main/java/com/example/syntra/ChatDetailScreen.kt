@@ -251,6 +251,49 @@ private fun maxOfNullable(a: String?, b: String?): String? = when {
     else -> b
 }
 
+/**
+ * Decodes a picked image DOWNSAMPLED so it can never blow past the hardware Canvas
+ * limit. A full-resolution phone photo (e.g. 7000×7000) decodes to a ~190 MB bitmap
+ * that Compose then tries to draw — Android throws "trying to draw too large bitmap"
+ * and the app crashes. We read the bounds first, pick a power-of-two sample size that
+ * keeps the long side ≤ [maxDim], then hard-scale down as a final safety net.
+ */
+private fun decodeSampledBitmap(
+    context: Context,
+    uri: android.net.Uri,
+    maxDim: Int = 2560,
+): android.graphics.Bitmap? = runCatching {
+    val cr = context.contentResolver
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+    val w = bounds.outWidth
+    val h = bounds.outHeight
+    if (w <= 0 || h <= 0) return@runCatching null
+
+    var sample = 1
+    while (w / sample > maxDim || h / sample > maxDim) sample *= 2
+
+    val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+    val decoded = cr.openInputStream(uri)?.use {
+        android.graphics.BitmapFactory.decodeStream(it, null, opts)
+    } ?: return@runCatching null
+
+    val longSide = maxOf(decoded.width, decoded.height)
+    if (longSide > maxDim) {
+        val scale = maxDim.toFloat() / longSide
+        val scaled = android.graphics.Bitmap.createScaledBitmap(
+            decoded,
+            (decoded.width * scale).toInt().coerceAtLeast(1),
+            (decoded.height * scale).toInt().coerceAtLeast(1),
+            true,
+        )
+        if (scaled !== decoded) decoded.recycle()
+        scaled
+    } else {
+        decoded
+    }
+}.getOrNull()
+
 /** Backend message -> bubble. `fromMe` is derived client-side (alignment doc §6). */
 private fun NetMessage.toUi(): Message {
     val attachment = attachments.firstOrNull()
@@ -1027,13 +1070,10 @@ fun ChatDetailScreen(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
         if (uri != null) scope.launch {
-            // Decode to a bitmap and hand off to the edit screen; nothing is sent
-            // until the user confirms there.
-            val bmp = withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it) }
-                }.getOrNull()
-            }
+            // Decode DOWNSAMPLED off the main thread and hand off to the edit screen;
+            // nothing is sent until the user confirms there. Full-res photos would decode
+            // to a bitmap too large for the Canvas and crash the app on draw.
+            val bmp = withContext(Dispatchers.IO) { decodeSampledBitmap(context, uri) }
             if (bmp != null) pendingImage = bmp
             else Toast.makeText(context, "Tidak bisa membuka gambar.", Toast.LENGTH_SHORT).show()
         }
