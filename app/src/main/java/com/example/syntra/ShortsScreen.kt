@@ -859,8 +859,9 @@ private fun ReelPage(
     val scope = rememberCoroutineScope()
     // Tap-to-pause, per reel. Reset when the reel scrolls off so coming back plays.
     var paused by remember { mutableStateOf(false) }
-    // Scrolling to another reel resets pause AND leaves "layar bersih" (clean screen).
-    LaunchedEffect(active) { if (!active) { paused = false; com.example.syntra.net.CleanScreen.on = false } }
+    // Scrolling to another reel resets pause. "Layar bersih" (clean screen) is NOT
+    // reset here — once on, it stays on across every reel until a tap brings it back.
+    LaunchedEffect(active) { if (!active) paused = false }
 
     // Pinch-to-zoom: two fingers scale the video up to 4×; lifting them springs it
     // back. Reset when the reel scrolls off so it never comes back mid-zoom.
