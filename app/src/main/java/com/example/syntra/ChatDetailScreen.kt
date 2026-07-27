@@ -1197,7 +1197,13 @@ fun ChatDetailScreen(
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            // Keep the message list invisible until it has landed at the bottom, so a
+            // long chat never flashes at the top and then jumps down — it just appears
+            // already scrolled to the latest message. An empty chat (nothing to land
+            // on) stays visible so its prompt/skeleton still shows.
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = if (messages.isEmpty() || landed) 1f else 0f },
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
