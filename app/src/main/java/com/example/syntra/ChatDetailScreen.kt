@@ -94,6 +94,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -3277,7 +3278,7 @@ private fun MessageBubble(
                         fontSize = 68.sp,
                         lineHeight = 74.sp,
                     )
-                    media != null && media.isAudioUrl() -> AudioBubble(media, textColor)
+                    media != null && media.isAudioUrl() -> AudioBubble(media, textColor, msg.at, msg.id)
                     // Not gated on media: a view-once message ALWAYS renders its bubble,
                     // so it can never collapse into an empty/among-nothing row.
                     msg.viewOnce -> ViewOnceBubble(
@@ -3429,6 +3430,38 @@ object VoiceBus {
     var active by mutableStateOf<Any?>(null)
 
     /**
+     * Every composed voice bubble registers here with its place in the timeline and a
+     * "start playing" callback. On completion the bus hands off to the NEXT voice note —
+     * WhatsApp-style continuous playback, so a reply arrives right after yours without a
+     * second tap. Ordering is by send time, with the message id breaking ties.
+     */
+    private class Entry(val at: Long, val id: String, val play: () -> Unit)
+    private val entries = HashMap<Any, Entry>()
+
+    fun register(token: Any, at: Long, id: String, play: () -> Unit) {
+        entries[token] = Entry(at, id, play)
+    }
+
+    fun unregister(token: Any) {
+        entries.remove(token)
+        if (active === token) active = null
+    }
+
+    /**
+     * A clip finished: release the bus and auto-play the next voice note in the
+     * conversation, if one is currently on screen. Only advances to a later message, so
+     * it can never loop.
+     */
+    fun onCompleted(token: Any) {
+        active = null
+        val cur = entries[token] ?: return
+        val next = entries.values
+            .filter { it.at > cur.at || (it.at == cur.at && it.id > cur.id) }
+            .minWithOrNull(compareBy({ it.at }, { it.id }))
+        next?.play?.invoke()
+    }
+
+    /**
      * Stop whatever voice note is playing. Clearing the active token makes every
      * bubble's "someone else took the bus" effect pause itself — used when the app
      * goes to the background so a voice note doesn't keep playing.
@@ -3438,7 +3471,7 @@ object VoiceBus {
 
 /** Voice note bubble with a play/pause button. */
 @Composable
-private fun AudioBubble(url: String, tint: Color) {
+private fun AudioBubble(url: String, tint: Color, at: Long, id: String) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // Unique identity for this bubble instance, used to arbitrate the single-play bus.
@@ -3472,18 +3505,13 @@ private fun AudioBubble(url: String, tint: Color) {
         }
     }
 
-    DisposableEffect(url) {
-        onDispose {
-            if (VoiceBus.active === token) VoiceBus.active = null
-            runCatching { player.release() }
-        }
-    }
-
-    fun toggle() {
+    // Start (or resume) THIS clip. Split out of the tap handler so the voice bus can
+    // call it to auto-play this note after the previous one finishes.
+    fun startPlayback() {
         runCatching {
             when {
                 loading -> Unit // still buffering — ignore extra taps
-                playing -> { player.pause(); playing = false }
+                playing -> Unit // already playing
                 prepared -> { com.example.syntra.net.MusicPlayer.pauseForExternalAudio(); VoiceBus.active = token; player.start(); playing = true }
                 else -> {
                     // First play: prepare OFF the main thread (prepareAsync) so the UI
@@ -3516,6 +3544,8 @@ private fun AudioBubble(url: String, tint: Color) {
                                 playing = false
                                 progress = 0f
                                 runCatching { mp.seekTo(0) }
+                                // Hand the bus to the next voice note in the conversation.
+                                VoiceBus.onCompleted(token)
                             }
                             player.setOnErrorListener { mp, _, _ ->
                                 loading = false; playing = false; prepared = false
@@ -3536,6 +3566,21 @@ private fun AudioBubble(url: String, tint: Color) {
         }.onFailure {
             loading = false
             Toast.makeText(context, "Tidak bisa memutar suara.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun toggle() {
+        if (playing) { runCatching { player.pause() }; playing = false } else startPlayback()
+    }
+
+    // Register on the voice bus so a finished clip can auto-play the NEXT voice note.
+    // rememberUpdatedState keeps the callback pointing at the freshest state.
+    val playLatest = rememberUpdatedState<() -> Unit> { startPlayback() }
+    DisposableEffect(url, at, id) {
+        VoiceBus.register(token, at, id) { playLatest.value.invoke() }
+        onDispose {
+            VoiceBus.unregister(token)
+            runCatching { player.release() }
         }
     }
 

@@ -1892,10 +1892,12 @@ private fun StoryAuroraBackground(modifier: Modifier = Modifier) {
     // Aurora-borealis spectrum derived from the theme accent — not one flat blue. The
     // hue spread (green ↔ teal ↔ violet) is what gives it the "northern lights" feel
     // while still following whatever accent the user's theme supplies.
-    val cA = NexusAccentSoft
-    val cB = shiftHue(NexusAccent, 62f)
-    val cC = shiftHue(NexusAccent, 140f)
-    val cD = shiftHue(NexusAccent, -48f)
+    // Frosted-glass tints: each spectrum colour is pulled toward white so the aurora
+    // reads as translucent, milky "glass" rather than saturated neon.
+    val cA = glassify(NexusAccentSoft)
+    val cB = glassify(shiftHue(NexusAccent, 62f))
+    val cC = glassify(shiftHue(NexusAccent, 140f))
+    val cD = glassify(shiftHue(NexusAccent, -48f))
 
     Canvas(modifier = modifier) {
         val w = size.width
@@ -1925,28 +1927,37 @@ private fun StoryAuroraBackground(modifier: Modifier = Modifier) {
             Brush.verticalGradient(listOf(Color.Transparent, base.copy(alpha = a.coerceIn(0f, 1f)), Color.Transparent))
 
         // Four woven ribbons across the spectrum; each breathes on its own shimmer phase.
+        // Alphas and amplitudes are pushed up so the aurora reads boldly, not as a hint.
         val s1 = 0.5f + 0.5f * kotlin.math.sin(shimmer)
         val s2 = 0.5f + 0.5f * kotlin.math.sin(shimmer + 2.1f)
         val s3 = 0.5f + 0.5f * kotlin.math.sin(shimmer + 4.2f)
-        drawPath(ribbon(h * 0.40f, h * 0.17f, 1.4f, p1, drift, h * 0.50f), glow(cA, 0.16f + 0.10f * s1))
-        drawPath(ribbon(h * 0.58f, h * 0.21f, 1.1f, p2, -drift, h * 0.55f), glow(cB, 0.12f + 0.09f * s2))
-        drawPath(ribbon(h * 0.50f, h * 0.18f, 1.7f, p3, drift * 0.6f, h * 0.42f), glow(cC, 0.12f + 0.09f * s3))
-        drawPath(ribbon(h * 0.46f, h * 0.14f, 2.2f, p4, -drift * 0.4f, h * 0.36f), glow(cD, 0.10f + 0.08f * s1))
+        drawPath(ribbon(h * 0.38f, h * 0.24f, 1.4f, p1, drift, h * 0.58f), glow(cA, 0.30f + 0.16f * s1))
+        drawPath(ribbon(h * 0.60f, h * 0.28f, 1.1f, p2, -drift, h * 0.62f), glow(cB, 0.24f + 0.15f * s2))
+        drawPath(ribbon(h * 0.50f, h * 0.25f, 1.7f, p3, drift * 0.6f, h * 0.50f), glow(cC, 0.24f + 0.15f * s3))
+        drawPath(ribbon(h * 0.45f, h * 0.20f, 2.2f, p4, -drift * 0.4f, h * 0.44f), glow(cD, 0.20f + 0.13f * s1))
+
+        // Frosted-glass sheen: a soft translucent white wash breathing over the top, the
+        // giveaway of a glassmorphism surface.
+        drawRect(
+            brush = Brush.verticalGradient(
+                listOf(Color.White.copy(alpha = 0.05f + 0.05f * s2), Color.Transparent),
+            ),
+        )
 
         // A scatter of slow-drifting light specks — the sparkle of a real aurora.
         val palette = listOf(cA, cB, cC, cD)
-        val specks = 7
+        val specks = 9
         for (k in 0 until specks) {
             val seed = k * 1.6180339f
             val x = w * ((seed + drift * (0.6f + 0.15f * k)) % 1f)
-            val bob = kotlin.math.sin(p2 + seed * twoPi) * h * 0.16f
-            val y = h * (0.30f + 0.40f * ((seed * 2.3f) % 1f)) + bob
+            val bob = kotlin.math.sin(p2 + seed * twoPi) * h * 0.18f
+            val y = h * (0.28f + 0.44f * ((seed * 2.3f) % 1f)) + bob
             val twk = 0.5f + 0.5f * kotlin.math.sin(shimmer + seed * 3f)
-            val r = (2f + 2f * ((seed * 1.7f) % 1f)).dp.toPx()
+            val r = (2.5f + 2.5f * ((seed * 1.7f) % 1f)).dp.toPx()
             val col = palette[k % palette.size]
             drawCircle(
                 brush = Brush.radialGradient(
-                    listOf(col.copy(alpha = 0.5f * twk), Color.Transparent),
+                    listOf(col.copy(alpha = 0.7f * twk), Color.Transparent),
                     center = Offset(x, y),
                     radius = r * 3f,
                 ),
@@ -1956,6 +1967,14 @@ private fun StoryAuroraBackground(modifier: Modifier = Modifier) {
         }
     }
 }
+
+/** Frosts a colour toward white for a translucent glassmorphism tint. */
+private fun glassify(c: Color): Color = Color(
+    red = c.red * 0.5f + 0.5f,
+    green = c.green * 0.5f + 0.5f,
+    blue = c.blue * 0.5f + 0.5f,
+    alpha = 1f,
+)
 
 /** Rotates a colour's hue, keeping saturation and value — used to derive the aurora's
  *  secondary ribbon tints from whatever accent the theme supplies. */
