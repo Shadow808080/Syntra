@@ -47,6 +47,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -137,6 +138,9 @@ private sealed interface MusicDetail {
     data class Playlist(val item: MusicPlaylist) : MusicDetail
     data class Album(val item: MusicAlbum) : MusicDetail
     data class Artist(val item: MusicArtist) : MusicDetail
+
+    /** The user's own device-storage songs, shown as an album-style page. */
+    data class Local(val tracks: List<MusicTrack>) : MusicDetail
 }
 
 /**
@@ -431,6 +435,7 @@ fun MusicScreen(
                     onOpenPlaylist = { detail = MusicDetail.Playlist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
+                    onOpenLocal = { detail = MusicDetail.Local(localTracks) },
                     // An artist chip drops you into search for that name — the liked
                     // list only knows the artist's name, not the catalogue id needed
                     // to open their page directly.
@@ -448,6 +453,14 @@ fun MusicScreen(
                 detail = d,
                 onBack = { detail = null },
                 onPlay = play,
+                onRemoveLocal = { t ->
+                    scope.launch {
+                        val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            com.example.syntra.net.LocalMusicStore.remove(context, t.id)
+                        }
+                        localTracks.clear(); localTracks.addAll(updated)
+                    }
+                },
             )
         }
 
@@ -592,6 +605,7 @@ private fun MusicBrowseBody(
     onOpenAlbum: (MusicAlbum) -> Unit,
     onOpenArtist: (MusicArtist) -> Unit,
     onSearchArtist: (String) -> Unit = {},
+    onOpenLocal: () -> Unit = {},
 ) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { LikedMusicStore.ensure(context) }
@@ -631,28 +645,11 @@ private fun MusicBrowseBody(
         // anymore: the add-from-storage banner IS the entry point (its "+" sits at the
         // start), and it stays put whether or not the user has added tracks yet.
         item { LocalMusicEmpty(onAddLocal) }
-        // Lagu dari penyimpanan dibungkus dalam satu kotak, tepat di bawah banner
-        // "Tambahkan lagu dari penyimpanan".
+        // Lagu dari penyimpanan tampil sebagai satu kartu bergaya album, tepat di bawah
+        // banner "Tambahkan lagu dari penyimpanan". Mengetuknya membuka halaman daftar
+        // lagu lokal (header + Putar + daftar lengkap).
         if (localTracks.isNotEmpty()) {
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 8.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(NexusSurface)
-                        .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
-                        .padding(vertical = 4.dp),
-                ) {
-                    localTracks.forEach { t ->
-                        LocalTrackRow(
-                            track = t,
-                            onClick = { onPlay(t, localTracks) },
-                            onRemove = { onRemoveLocal(t) },
-                        )
-                    }
-                }
-            }
+            item { LocalLibraryCard(tracks = localTracks, onOpen = onOpenLocal) }
         }
 
         // Community uploads — public tracks other people added from their devices.
@@ -972,11 +969,17 @@ private fun MusicDetailScreen(
     detail: MusicDetail,
     onBack: () -> Unit,
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
+    onRemoveLocal: (MusicTrack) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val tracks = remember(detail) { mutableStateListOf<MusicTrack>() }
     var loading by remember(detail) { mutableStateOf(true) }
+
+    // Device songs are already in hand (live list) — no network fetch, and their rows
+    // keep the remove button. Everything else fetches its tracks below.
+    val localList = (detail as? MusicDetail.Local)?.tracks
+    val shown: List<MusicTrack> = localList ?: tracks
 
     val title: String
     val subtitle: String
@@ -986,15 +989,23 @@ private fun MusicDetailScreen(
         is MusicDetail.Playlist -> { title = detail.item.title; subtitle = detail.item.subtitle; artwork = detail.item.pictureUrl; round = false }
         is MusicDetail.Album -> { title = detail.item.title; subtitle = detail.item.artist; artwork = detail.item.artworkUrl; round = false }
         is MusicDetail.Artist -> { title = detail.item.name; subtitle = "Artis"; artwork = detail.item.pictureUrl; round = true }
+        is MusicDetail.Local -> {
+            title = "Lagu di perangkat"
+            subtitle = "${detail.tracks.size} lagu tersimpan di perangkat ini"
+            artwork = detail.tracks.firstOrNull()?.artworkUrl
+            round = false
+        }
     }
 
     LaunchedEffect(detail) {
+        if (localList != null) { loading = false; return@LaunchedEffect }
         loading = true
         val list = runCatching {
             when (detail) {
                 is MusicDetail.Playlist -> MusicClient.playlistTracks(detail.item.id)
                 is MusicDetail.Album -> MusicClient.albumTracks(detail.item.id)
                 is MusicDetail.Artist -> MusicClient.artistTopTracks(detail.item.id)
+                is MusicDetail.Local -> emptyList()
             }
         }.getOrDefault(emptyList())
         tracks.clear(); tracks.addAll(list)
@@ -1048,7 +1059,7 @@ private fun MusicDetailScreen(
                                 .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
                                 .clickable(
                                     indication = null, interactionSource = remember { MutableInteractionSource() },
-                                ) { tracks.firstOrNull()?.let { onPlay(it, tracks.toList()) } }
+                                ) { shown.firstOrNull()?.let { onPlay(it, shown.toList()) } }
                                 .padding(horizontal = 32.dp, vertical = 12.dp),
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1066,8 +1077,17 @@ private fun MusicDetailScreen(
                         CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
                     }
                 }
+            } else if (localList != null) {
+                // Device songs: playable rows that keep the remove (×) button.
+                items(shown, key = { it.id }) { t ->
+                    LocalTrackRow(
+                        track = t,
+                        onClick = { onPlay(t, shown.toList()) },
+                        onRemove = { onRemoveLocal(t) },
+                    )
+                }
             } else {
-                items(tracks, key = { it.id }) { t -> TrackRow(t) { onPlay(t, tracks.toList()) } }
+                items(shown, key = { it.id }) { t -> TrackRow(t) { onPlay(t, shown.toList()) } }
             }
         }
     }
@@ -1114,6 +1134,42 @@ private fun LocalMusicEmpty(onAdd: () -> Unit) {
             Spacer(Modifier.height(2.dp))
             Text("Putar file musik yang tersimpan di perangkatmu", color = NexusTextSecondary, fontSize = 12.sp)
         }
+    }
+}
+
+/**
+ * The device library as one album-style card. Tapping it opens the full local list
+ * (header art + "Putar" + every track), like an album page.
+ */
+@Composable
+private fun LocalLibraryCard(tracks: List<MusicTrack>, onOpen: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(NexusSurface)
+            .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onOpen)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ArtworkImage(
+            url = rememberTrackArt(tracks.firstOrNull()),
+            modifier = Modifier.size(52.dp).clip(RoundedCornerShape(10.dp)),
+        )
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Lagu di perangkat", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(2.dp))
+            Text("${tracks.size} lagu tersimpan", color = NexusTextSecondary, fontSize = 12.sp)
+        }
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = NexusTextSecondary,
+            modifier = Modifier.size(22.dp),
+        )
     }
 }
 
