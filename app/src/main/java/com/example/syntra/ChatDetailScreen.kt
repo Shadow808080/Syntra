@@ -513,38 +513,17 @@ fun ChatDetailScreen(
         if (!granted) Toast.makeText(context, "Izin mikrofon ditolak.", Toast.LENGTH_SHORT).show()
     }
 
-    // First landing: jump straight to the first unread message (or the very last
-    // when all are read), with no visible scroll from the top. Each message is one
-    // lazy item now (the date chip renders inside it), so message i == lazy index i.
-    var landed by remember(conversation) { mutableStateOf(false) }
-    // "Settled" = the initial two-phase load (cache → server refresh) is done. Until
-    // then every auto-scroll is INSTANT, so replacing the list with the server page
-    // never animates a visible scroll from the top down to the newest message.
-    var settled by remember(conversation) { mutableStateOf(false) }
-    LaunchedEffect(messages.isNotEmpty()) {
-        if (messages.isNotEmpty() && !landed) {
-            val firstUnread = (messages.size - conversation.unread).coerceIn(0, messages.lastIndex)
-            val target = if (conversation.unread > 0) firstUnread else messages.lastIndex
-            listState.scrollToItem(target)
-            landed = true
-        }
-        // No backend to refresh from → the list we have is final, so mark it settled.
-        if (!ApiConfig.ENABLED) settled = true
-    }
-
-    // Keep the newest message in view. Before the chat has settled this is instant
-    // (so the initial server refresh doesn't animate); after that, my own sent
-    // messages and incoming ones (only when already near the bottom) smooth-scroll.
+    // The message list uses reverseLayout: index 0 is the NEWEST message and is drawn
+    // at the bottom, so the chat opens already anchored at the latest message with no
+    // scroll to animate — however long the history is, there is never a top-to-bottom
+    // sweep on open. We only follow NEW messages: my own always, incoming ones only
+    // when already near the bottom, so reading older history isn't yanked.
     LaunchedEffect(messages.size) {
-        if (!landed || messages.isEmpty()) return@LaunchedEffect
-        val lastIndex = messages.lastIndex
+        if (messages.isEmpty()) return@LaunchedEffect
         val mineIsNewest = messages.lastOrNull()?.fromMe == true
-        val visibleLast = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (!settled) {
-            // Snap, don't animate, while the chat is still loading its history.
-            if (mineIsNewest || visibleLast >= lastIndex - 2) listState.scrollToItem(lastIndex)
-        } else if (mineIsNewest || visibleLast >= lastIndex - 2) {
-            listState.animateScrollToItem(lastIndex)
+        val nearBottom = listState.firstVisibleItemIndex <= 1
+        if (mineIsNewest || nearBottom) {
+            runCatching { listState.animateScrollToItem(0) }
         }
     }
 
@@ -604,16 +583,16 @@ fun ChatDetailScreen(
                     Toast.makeText(context, "Gagal memuat pesan: ${it.message}", Toast.LENGTH_SHORT).show()
                 }
             }
-            // Initial load done (whether the refresh succeeded or not): from here on
-            // live messages may smooth-scroll.
-            settled = true
         }
 
-        // Scroll-to-top → load the previous day/page of history, with a skeleton.
+        // Scroll toward the OLDEST message → load the previous day/page of history,
+        // with a skeleton. In reverseLayout the oldest messages are at the HIGHEST
+        // indices (the top), so "reached the top" means the last visible index is
+        // approaching messages.size - 1.
         LaunchedEffect(listState) {
-            snapshotFlow { listState.firstVisibleItemIndex }
-                .collect { first ->
-                    if (first <= 1 && hasMore && !loadingOlder && oldestId != null && messages.isNotEmpty()) {
+            snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+                .collect { lastVisible ->
+                    if (lastVisible >= messages.size - 2 && hasMore && !loadingOlder && oldestId != null && messages.isNotEmpty()) {
                         loadingOlder = true
                         val cursor = oldestId
                         runCatching { SyntraClient.getMessages(conversation.id, before = cursor) }
@@ -624,18 +603,13 @@ fun ChatDetailScreen(
                                     val ordered = older.reversed().filterNot { HiddenMessageStore.isHidden(context, it.id) }.map { it.toUi() } // oldest-first
                                     val existing = messages.map { it.id }.toSet()
                                     val toAdd = ordered.filter { it.id !in existing }
+                                    // Prepending to the oldest-first list appends to the
+                                    // END of the reversed view (the top), so the visible
+                                    // items keep their reversed index — no anchor needed.
                                     messages.addAll(0, toAdd)
                                     oldestId = older.minByOrNull { it.id }?.id ?: oldestId
-                                    // Hide the skeleton FIRST so index math is clean, then
-                                    // anchor to the previously-first message (now at lazy
-                                    // index toAdd.size) so the view doesn't jump.
-                                    loadingOlder = false
-                                    if (toAdd.isNotEmpty()) {
-                                        runCatching { listState.scrollToItem(toAdd.size) }
-                                    }
-                                } else {
-                                    loadingOlder = false
                                 }
+                                loadingOlder = false
                             }
                             .onFailure { loadingOlder = false }
                     }
@@ -1165,7 +1139,11 @@ fun ChatDetailScreen(
                         ) {
                             val i = messages.indexOfFirst { it.id == pid }
                             if (i >= 0) scope.launch {
-                                listState.animateScrollToItem((i + if (loadingOlder) 1 else 0).coerceAtLeast(0))
+                                // reverseLayout: the lazy index is measured from the
+                                // newest end, so a message at oldest-first index i sits
+                                // at reversed index (size - 1 - i).
+                                val target = (messages.size - 1 - i).coerceAtLeast(0)
+                                listState.animateScrollToItem(target)
                             }
                         }
                         .padding(horizontal = 14.dp, vertical = 8.dp),
@@ -1209,38 +1187,24 @@ fun ChatDetailScreen(
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
             state = listState,
-            // Keep the message list invisible until it has landed at the bottom, so a
-            // long chat never flashes at the top and then jumps down — it just appears
-            // already scrolled to the latest message. An empty chat (nothing to land
-            // on) stays visible so its prompt/skeleton still shows.
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer { alpha = if (messages.isEmpty() || landed) 1f else 0f },
+            // reverseLayout: index 0 is drawn at the BOTTOM. The chat therefore opens
+            // pinned to the newest message — no scroll, no top-to-bottom sweep however
+            // long the history is.
+            reverseLayout = true,
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            // Skeleton while an older page loads (scroll-to-top). Sits above the
-            // history so it reads as "loading earlier messages".
-            if (loadingOlder) {
-                item(key = "skeleton") { MessagesSkeleton() }
-            }
-            // A brand-new conversation. An empty thread with a blinking cursor is the
-            // hardest message to write, so give people the easiest possible first move
-            // — one tap that says hello — plus a quiet word about being kind.
-            if (messages.isEmpty() && !loadingOlder) {
-                item(key = "empty-chat") {
-                    EmptyChatPrompt(
-                        name = conversation.name.substringBefore(' '),
-                        onWave = { sendSticker("👋") },
-                    )
-                }
-            }
-            // Messages grouped by calendar day, each group preceded by a date chip
-            // ("Hari ini" / "Kemarin" / "Senin" / "12 Juli 2026"). The chip is keyed by
-            // the day so a new day inserts a fresh header as history scrolls in.
-            itemsIndexed(messages, key = { _, m -> m.id }) { index, msg ->
-                val prev = messages.getOrNull(index - 1)
-                if (prev == null || dayKey(prev.at) != dayKey(msg.at)) {
+            // Feed the list newest-first (a reversed view of the oldest-first
+            // `messages`), so reversed index 0 == newest == bottom.
+            val ordered = messages.asReversed()
+            itemsIndexed(ordered, key = { _, m -> m.id }) { index, msg ->
+                // Date chip heads each day. The next item in the data (index + 1) is
+                // the OLDER message; when it's a different day — or this is the very
+                // oldest message — we're at the top of a day group, so the chip is
+                // drawn above the bubble.
+                val older = ordered.getOrNull(index + 1)
+                if (older == null || dayKey(older.at) != dayKey(msg.at)) {
                     DateChip(dayLabel(msg.at))
                 }
                 MessageBubble(
@@ -1290,14 +1254,31 @@ fun ChatDetailScreen(
                     },
                 )
             }
+            // Declared AFTER the messages so they get the highest indices and land at
+            // the very top: the "loading earlier" skeleton, and the empty-chat prompt.
+            if (loadingOlder) {
+                item(key = "skeleton") { MessagesSkeleton() }
+            }
+            if (messages.isEmpty() && !loadingOlder) {
+                item(key = "empty-chat") {
+                    // Fill the viewport and top-align, so reverseLayout doesn't leave
+                    // the prompt hugging the bottom of the screen.
+                    Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.TopCenter) {
+                        EmptyChatPrompt(
+                            name = conversation.name.substringBefore(' '),
+                            onWave = { sendSticker("👋") },
+                        )
+                    }
+                }
+            }
         }
 
-            // Jump-to-bottom button — appears once you scroll up away from the
-            // newest message. Tapping it animates back to the last message.
+            // Jump-to-bottom button — appears once you scroll up away from the newest
+            // message. In reverseLayout the newest is index 0, so "scrolled up" means
+            // the first visible index is past 0; tapping animates back to it.
             val showJump by remember {
                 derivedStateOf {
-                    val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                    messages.isNotEmpty() && last < messages.size - 1
+                    messages.isNotEmpty() && listState.firstVisibleItemIndex > 0
                 }
             }
             androidx.compose.animation.AnimatedVisibility(
@@ -1314,7 +1295,7 @@ fun ChatDetailScreen(
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
-                        ) { scope.launch { listState.animateScrollToItem(messages.lastIndex.coerceAtLeast(0)) } },
+                        ) { scope.launch { listState.animateScrollToItem(0) } },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
