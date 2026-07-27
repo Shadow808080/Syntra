@@ -1087,6 +1087,11 @@ object SyntraClient {
     /** Deletes one of my own uploaded tracks (owner only). */
     suspend fun deleteMusic(trackId: String) = delete("/api/v1/music/$trackId")
 
+    /** Renames one of my own uploaded tracks (owner only). */
+    suspend fun updateMusicTitle(trackId: String, title: String) {
+        patchData("/api/v1/music/$trackId", JSONObject().put("title", title))
+    }
+
     // -----------------------------------------------------------------------
     // WebSocket (api.md §9)
     // -----------------------------------------------------------------------
@@ -1418,6 +1423,7 @@ private fun JSONObject.toCommunityTrack(): MusicTrack? {
         artworkUrl = optString("cover_url", "").ifBlank { null },
         previewUrl = url,
         durationSec = (optLong("duration_ms", 0) / 1000).toInt(),
+        authorId = optString("author_id", ""),
     )
 }
 

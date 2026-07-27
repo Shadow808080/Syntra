@@ -20,6 +20,8 @@ data class MusicTrack(
     val previewUrl: String = "",
     /** Full track length in seconds (the preview itself is ~30s). */
     val durationSec: Int = 0,
+    /** Uploader's user id, for community tracks. Empty for catalogue/local tracks. */
+    val authorId: String = "",
 )
 
 /** An album cover + title, for browse rails and search. */

@@ -114,7 +114,10 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.random.Random
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -945,7 +948,11 @@ private fun ReelPage(
                     )
                 },
         ) {
-            burstAt?.let { pos -> LikeBurst(pos = pos, triggerKey = burstKey) }
+            burstAt?.let { pos ->
+                // A shower of little hearts flies out, with the big heart popping on top.
+                HeartFlurry(pos = pos, triggerKey = burstKey)
+                LikeBurst(pos = pos, triggerKey = burstKey)
+            }
         }
 
         // Paused indicator.
@@ -1062,6 +1069,74 @@ private fun LikeBurst(pos: Offset, triggerKey: Int) {
                 rotationZ = rot.value
             },
     )
+}
+
+/** One little heart in the double-tap shower: a direction, distance, size and tint. */
+private data class HeartParticle(
+    val angle: Float,
+    val distancePx: Float,
+    val sizeDp: androidx.compose.ui.unit.Dp,
+    val rotation: Float,
+    val startDelay: Float,
+    val tint: Color,
+)
+
+/**
+ * A shower of small hearts that fan outward (mostly upward) from the double-tap point
+ * and fade as they fly — TikTok-style "tap-tap" flurry. Re-emits whenever [triggerKey]
+ * changes, so every double-tap sends a fresh burst.
+ */
+@Composable
+private fun HeartFlurry(pos: Offset, triggerKey: Int) {
+    if (triggerKey == 0) return
+    val density = LocalDensity.current
+    val tints = listOf(Color(0xFFFF3040), Color(0xFFFF5C8A), Color(0xFFFF2D55), Color(0xFFFF7AA8))
+    // Fresh randomised particles each tap; stable across recompositions within a burst.
+    val particles = remember(triggerKey) {
+        List(14) {
+            // Spread in a fan pointing up: -90° is straight up, ±70° to the sides.
+            val deg = -90f + (Random.nextFloat() * 140f - 70f)
+            HeartParticle(
+                angle = Math.toRadians(deg.toDouble()).toFloat(),
+                distancePx = with(density) { (70 + Random.nextInt(140)).dp.toPx() },
+                sizeDp = (14 + Random.nextInt(26)).dp,
+                rotation = (Random.nextInt(80) - 40).toFloat(),
+                startDelay = Random.nextFloat() * 0.22f,
+                tint = tints[Random.nextInt(tints.size)],
+            )
+        }
+    }
+    val progress = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(triggerKey) {
+        progress.snapTo(0f)
+        progress.animateTo(1f, tween(1000, easing = LinearEasing))
+    }
+    particles.forEach { p ->
+        val local = ((progress.value - p.startDelay) / (1f - p.startDelay)).coerceIn(0f, 1f)
+        if (local <= 0f) return@forEach
+        // Ease-out distance so they shoot fast then settle.
+        val eased = 1f - (1f - local) * (1f - local)
+        val dist = p.distancePx * eased
+        val x = pos.x + cos(p.angle) * dist
+        val y = pos.y + sin(p.angle) * dist
+        val a = if (local < 0.15f) local / 0.15f else 1f - (local - 0.15f) / 0.85f
+        val scale = (0.4f + local * 0.8f).coerceAtMost(1.15f)
+        val sizePx = with(density) { p.sizeDp.toPx() }
+        Icon(
+            imageVector = Icons.Filled.Favorite,
+            contentDescription = null,
+            tint = p.tint,
+            modifier = Modifier
+                .offset { IntOffset((x - sizePx / 2f).roundToInt(), (y - sizePx / 2f).roundToInt()) }
+                .size(p.sizeDp)
+                .graphicsLayer {
+                    this.alpha = a.coerceIn(0f, 1f)
+                    scaleX = scale
+                    scaleY = scale
+                    rotationZ = p.rotation
+                },
+        )
+    }
 }
 
 /**

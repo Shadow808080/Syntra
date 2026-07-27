@@ -426,6 +426,31 @@ fun MusicScreen(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                         )
                     },
+                    onDeleteCommunity = { t ->
+                        scope.launch {
+                            val ok = runCatching { com.example.syntra.net.SyntraClient.deleteMusic(t.id) }.isSuccess
+                            if (ok) {
+                                communityTracks.removeAll { it.id == t.id }
+                                Toast.makeText(context, "Lagu dihapus.", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Gagal menghapus lagu.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    onEditCommunityTitle = { t, newTitle ->
+                        val clean = newTitle.trim()
+                        if (clean.isNotBlank()) scope.launch {
+                            val ok = runCatching {
+                                com.example.syntra.net.SyntraClient.updateMusicTitle(t.id, clean)
+                            }.isSuccess
+                            if (ok) {
+                                val i = communityTracks.indexOfFirst { it.id == t.id }
+                                if (i >= 0) communityTracks[i] = communityTracks[i].copy(title = clean)
+                            } else {
+                                Toast.makeText(context, "Gagal mengubah judul.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
                     onPlay = play,
                     onAddLocal = { pickAudio.launch(arrayOf("audio/*")) },
                     onRemoveLocal = { t ->
@@ -461,23 +486,6 @@ fun MusicScreen(
                     scope.launch {
                         val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                             com.example.syntra.net.LocalMusicStore.remove(context, t.id)
-                        }
-                        localTracks.clear(); localTracks.addAll(updated)
-                    }
-                },
-                // Reuse the same cover-picker used by community tracks: the result is
-                // stored per-track in TrackArtStore and repaints automatically.
-                onPickCover = { t ->
-                    artTarget = t.id
-                    AppLock.expectSystemDialog()
-                    pickArt.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
-                },
-                onEditTitle = { t, newTitle ->
-                    scope.launch {
-                        val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            com.example.syntra.net.LocalMusicStore.setTitle(context, t.id, newTitle)
                         }
                         localTracks.clear(); localTracks.addAll(updated)
                     }
@@ -619,6 +627,8 @@ private fun MusicBrowseBody(
     localTracks: List<MusicTrack>,
     communityTracks: List<MusicTrack>,
     onSetCommunityArt: (MusicTrack) -> Unit = {},
+    onDeleteCommunity: (MusicTrack) -> Unit = {},
+    onEditCommunityTitle: (MusicTrack, String) -> Unit = { _, _ -> },
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
     onAddLocal: () -> Unit,
     onRemoveLocal: (MusicTrack) -> Unit,
@@ -631,6 +641,9 @@ private fun MusicBrowseBody(
     val context = LocalContext.current
     LaunchedEffect(Unit) { LikedMusicStore.ensure(context) }
     val liked = LikedMusicStore.tracks
+    // Community long-press menu + rename dialog.
+    var communityMenuFor by remember { mutableStateOf<MusicTrack?>(null) }
+    var communityRenameFor by remember { mutableStateOf<MusicTrack?>(null) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -682,8 +695,8 @@ private fun MusicBrowseBody(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     items(communityTracks, key = { "community_${it.id}" }) { t ->
-                        // Long-press sets your own cover for this upload.
-                        TrackCard(t, onSetArt = { onSetCommunityArt(t) }) {
+                        // Long-press opens the menu (ubah cover / edit judul / hapus).
+                        TrackCard(t, onSetArt = { communityMenuFor = t }) {
                             onPlay(t, communityTracks)
                         }
                     }
@@ -743,6 +756,25 @@ private fun MusicBrowseBody(
                 }
             }
         }
+    }
+
+    // Community track long-press menu + rename dialog.
+    communityMenuFor?.let { t ->
+        MusicTrackMenu(
+            track = t,
+            owned = t.authorId.isNotBlank() && t.authorId == com.example.syntra.net.SyntraClient.myUserId,
+            onChangeCover = { communityMenuFor = null; onSetCommunityArt(t) },
+            onRename = { communityMenuFor = null; communityRenameFor = t },
+            onDelete = { communityMenuFor = null; onDeleteCommunity(t) },
+            onDismiss = { communityMenuFor = null },
+        )
+    }
+    communityRenameFor?.let { t ->
+        EditTitleDialog(
+            initial = t.title,
+            onConfirm = { newTitle -> onEditCommunityTitle(t, newTitle); communityRenameFor = null },
+            onDismiss = { communityRenameFor = null },
+        )
     }
 }
 
@@ -991,16 +1023,11 @@ private fun MusicDetailScreen(
     onBack: () -> Unit,
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
     onRemoveLocal: (MusicTrack) -> Unit = {},
-    onPickCover: (MusicTrack) -> Unit = {},
-    onEditTitle: (MusicTrack, String) -> Unit = { _, _ -> },
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val tracks = remember(detail) { mutableStateListOf<MusicTrack>() }
     var loading by remember(detail) { mutableStateOf(true) }
-    // Long-press menu + rename dialog for a device song (Local page only).
-    var menuFor by remember { mutableStateOf<MusicTrack?>(null) }
-    var renameFor by remember { mutableStateOf<MusicTrack?>(null) }
 
     // Device songs are already in hand (live list) — no network fetch, and their rows
     // keep the remove button. Everything else fetches its tracks below.
@@ -1110,7 +1137,6 @@ private fun MusicDetailScreen(
                         track = t,
                         onClick = { onPlay(t, shown.toList()) },
                         onRemove = { onRemoveLocal(t) },
-                        onLongPress = { menuFor = t },
                     )
                 }
             } else {
@@ -1118,31 +1144,13 @@ private fun MusicDetailScreen(
             }
         }
     }
-
-    // Long-press menu for a device song: change cover, rename, delete.
-    menuFor?.let { t ->
-        LocalTrackMenu(
-            track = t,
-            onChangeCover = { menuFor = null; onPickCover(t) },
-            onRename = { menuFor = null; renameFor = t },
-            onDelete = { menuFor = null; onRemoveLocal(t) },
-            onDismiss = { menuFor = null },
-        )
-    }
-
-    renameFor?.let { t ->
-        EditTitleDialog(
-            initial = t.title,
-            onConfirm = { newTitle -> onEditTitle(t, newTitle); renameFor = null },
-            onDismiss = { renameFor = null },
-        )
-    }
 }
 
-/** Long-press sheet for a device song. */
+/** Long-press sheet for a community track: change cover, rename (owner), delete (owner). */
 @Composable
-private fun LocalTrackMenu(
+private fun MusicTrackMenu(
     track: MusicTrack,
+    owned: Boolean,
     onChangeCover: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
@@ -1165,8 +1173,11 @@ private fun LocalTrackMenu(
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 10.dp),
             )
             MusicMenuRow(Icons.Filled.Image, "Ubah cover musik", onChangeCover)
-            MusicMenuRow(Icons.Filled.Edit, "Edit judul musik", onRename)
-            MusicMenuRow(Icons.Filled.Delete, "Hapus musik", onDelete, danger = true)
+            // Edit judul & hapus hanya untuk lagu milik sendiri (backend menolak yang lain).
+            if (owned) {
+                MusicMenuRow(Icons.Filled.Edit, "Edit judul musik", onRename)
+                MusicMenuRow(Icons.Filled.Delete, "Hapus musik", onDelete, danger = true)
+            }
             Spacer(Modifier.height(6.dp))
         }
     }
@@ -1323,24 +1334,18 @@ private fun LocalLibraryCard(tracks: List<MusicTrack>, onOpen: () -> Unit) {
     }
 }
 
-/** A device-music row: artwork · title/artist · remove. Long-press opens its menu. */
+/** A device-music row: artwork · title/artist · remove. Read-only (from file), just plays. */
 @Composable
 private fun LocalTrackRow(
     track: MusicTrack,
     onClick: () -> Unit,
     onRemove: () -> Unit,
-    onLongPress: () -> Unit = {},
 ) {
     val isCurrent = MusicPlayer.current?.id == track.id
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .combinedClickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = onClick,
-                onLongClick = onLongPress,
-            )
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
             .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
