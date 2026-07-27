@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,10 +34,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +52,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import androidx.compose.ui.platform.LocalContext
+import com.example.syntra.net.BlockStore
 import com.example.syntra.net.NetUser
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.NexusAccent
@@ -62,19 +67,40 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/** How many rows appear at once, and how many more each scroll-to-bottom reveals. */
+private const val DISCOVER_PAGE = 10
+
+/**
+ * Ceiling for the *suggestions* list (empty query). Suggestions are a browse surface —
+ * nobody scrolls a thousand strangers — so it stops. A real SEARCH has no ceiling:
+ * if you typed a name you are looking for someone specific and cutting the list off
+ * could hide them.
+ */
+private const val DISCOVER_SUGGESTION_MAX = 100
+
 /**
  * Find-people screen. Empty query shows suggestions (popular users) so it's
  * never blank. Tapping a result opens their profile; the follow button follows
  * inline. This is how a fresh account builds a following and starts seeing
  * other people's stories.
+ *
+ * Rows appear [DISCOVER_PAGE] at a time and extend as you scroll. The paging is done
+ * on the client because the search endpoint takes no limit/offset — so this bounds
+ * what is COMPOSED, not what is fetched.
  */
 @Composable
 fun DiscoverScreen(onClose: () -> Unit, onOpenProfile: (String) -> Unit) {
     BackHandler(onBack = onClose)
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
     val results = remember { mutableStateListOf<NetUser>() }
+    // How many of [results] are currently on screen. Rendering every user the server
+    // returned meant building hundreds of rows (each with its own avatar request) for
+    // a list nobody scrolls to the end of — slow to appear and wasteful on data.
+    var shown by remember { mutableIntStateOf(DISCOVER_PAGE) }
+    val listState = rememberLazyListState()
 
     // Debounced search: re-query 300ms after the last keystroke.
     LaunchedEffect(query) {
@@ -82,12 +108,31 @@ fun DiscoverScreen(onClose: () -> Unit, onOpenProfile: (String) -> Unit) {
         delay(300)
         try {
             val list = SyntraClient.searchUsers(query.trim())
-            results.clear(); results.addAll(list)
+            results.clear()
+            // Blocked people are removed from search entirely — being able to look
+            // someone up after blocking them defeats the point of blocking.
+            val allowed = list.filterNot {
+                BlockStore.isBlocked(context, username = it.username, userId = it.id)
+            }
+            // Suggestions are capped; typed searches are not.
+            results.addAll(if (query.isBlank()) allowed.take(DISCOVER_SUGGESTION_MAX) else allowed)
+            shown = DISCOVER_PAGE // a new query always starts from the first page
         } catch (c: CancellationException) {
             throw c
         } catch (_: Exception) {
         }
         loading = false
+    }
+
+    // Reveal the next 10 when the last visible row is near the end of what's rendered.
+    LaunchedEffect(listState, results.size) {
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        }.collect { lastVisible ->
+            if (lastVisible >= shown - 3 && shown < results.size) {
+                shown = (shown + DISCOVER_PAGE).coerceAtMost(results.size)
+            }
+        }
     }
 
     Column(Modifier.fillMaxSize().background(NexusBackground)) {
@@ -153,14 +198,31 @@ fun DiscoverScreen(onClose: () -> Unit, onOpenProfile: (String) -> Unit) {
                 Text("Tidak ada hasil", color = NexusTextSecondary, fontSize = 14.sp)
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(results, key = { it.id }) { user ->
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                val page = results.take(shown)
+                items(page, key = { it.id }) { user ->
                     UserRow(
                         user = user,
                         onOpen = { if (user.username.isNotBlank()) onOpenProfile(user.username) },
                         onFollow = { scope.launch { runCatching { SyntraClient.follow(user.username) } } },
                         onUnfollow = { scope.launch { runCatching { SyntraClient.unfollow(user.username) } } },
                     )
+                }
+                // A quiet footer while the next batch appears, so reaching the bottom
+                // never looks like the end of the list when it isn't.
+                if (shown < results.size) {
+                    item(key = "more") {
+                        Box(
+                            Modifier.fillMaxWidth().padding(vertical = 18.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(
+                                color = NexusAccentSoft,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
                 }
             }
         }

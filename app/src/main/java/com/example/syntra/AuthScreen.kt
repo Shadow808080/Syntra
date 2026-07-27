@@ -156,7 +156,7 @@ private fun WelcomePane(onLogin: () -> Unit, onRegister: () -> Unit) {
         Spacer(Modifier.height(30.dp))
         Text(
             text = "Syntra",
-            style = TextStyle(brush = Brush.horizontalGradient(listOf(Color(0xFFB79CFF), Color(0xFF6E8BFF)))),
+            style = TextStyle(brush = Brush.horizontalGradient(listOf(Color(0xFF7FB4FF), Color(0xFF6E8BFF)))),
             fontSize = 40.sp,
             fontWeight = FontWeight.ExtraBold,
         )
@@ -571,7 +571,7 @@ private fun StepIndicator(current: Int, total: Int) {
 fun AuthSplash() {
     // 2×2 tiles. Each starts offset + faded, then eases into place in sequence.
     val tileColors = listOf(
-        Color(0xFFB79CFF), Color(0xFF8E9DFF),
+        Color(0xFF7FB4FF), Color(0xFF5C9BFF),
         Color(0xFF6E8BFF), Color(0xFF3B68F5),
     )
     // Final positions relative to centre (in dp), and the scattered start offsets.
@@ -647,7 +647,7 @@ fun AuthSplash() {
             ) {
                 Text(
                     text = "Syntra",
-                    style = TextStyle(brush = Brush.horizontalGradient(listOf(Color(0xFFB79CFF), Color(0xFF6E8BFF)))),
+                    style = TextStyle(brush = Brush.horizontalGradient(listOf(Color(0xFF7FB4FF), Color(0xFF6E8BFF)))),
                     fontSize = 30.sp,
                     fontWeight = FontWeight.ExtraBold,
                 )

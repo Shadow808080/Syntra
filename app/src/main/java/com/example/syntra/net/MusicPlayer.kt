@@ -181,7 +181,17 @@ object MusicPlayer {
                 // A local file the user picked from device storage.
                 mp.setDataSource(appCtx, android.net.Uri.parse(src))
             } else {
-                mp.setDataSource(src)
+                // Play the on-disk copy when we already have one, and warm the cache
+                // otherwise. Music was the last thing still re-downloading itself on
+                // every single play — replaying a track you like cost the full stream
+                // each time, and each replay started with a buffering pause.
+                val local = VideoCache.cachedFile(appCtx, src)
+                if (local != null) {
+                    mp.setDataSource(local.absolutePath)
+                } else {
+                    mp.setDataSource(src)
+                    VideoCache.prefetch(appCtx, src)
+                }
             }
             mp.setOnPreparedListener { p ->
                 preparing = false

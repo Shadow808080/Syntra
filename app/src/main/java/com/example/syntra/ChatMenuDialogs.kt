@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,11 +28,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.syntra.ui.theme.DangerFill
+import com.example.syntra.ui.theme.NexusAccent
+import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 
@@ -73,7 +79,7 @@ fun ChatThemeDialog(current: ChatTheme, onDismiss: () -> Unit, onPick: (ChatThem
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text("Tema obrolan", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -193,7 +199,7 @@ fun ChatWallpaperDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text("Latar obrolan", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -206,44 +212,33 @@ fun ChatWallpaperDialog(
             )
             Spacer(Modifier.height(18.dp))
 
-            // Tiles: "no wallpaper", the built-in set, then "from gallery" — all the
-            // same square shape so the grid reads as one row of choices.
-            val tiles: List<ChatWallpaper?> = listOf(null) + chatWallpapers + listOf(GALLERY_TILE)
+            // Your own photo comes FIRST and looks nothing like the rest — a wide card
+            // with an accent wash and its own explanation. Buried at the end as a plain
+            // grey square it was indistinguishable from a wallpaper nobody had loaded
+            // yet, so people never found it.
+            GalleryWallpaperCard(
+                // A gallery pick is the only wallpaper that isn't one of our URLs, so
+                // "not http" is exactly "this chat is using your own photo".
+                selected = current != null && !current.startsWith("http"),
+                onClick = onPickLocal,
+            )
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "Koleksi Syntra",
+                color = NexusTextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            // Tiles: "no wallpaper" then the built-in set — all the same square shape,
+            // so the grid reads as one uniform set of choices.
+            val tiles: List<ChatWallpaper?> = listOf(null) + chatWallpapers
             tiles.chunked(3).forEach { row ->
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     row.forEach { wp ->
-                        if (wp === GALLERY_TILE) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable(
-                                        indication = null,
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        onClick = onPickLocal,
-                                    ),
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(96.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(Color(0xFF2A2A34)),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Icon(
-                                        Icons.Filled.Add, null,
-                                        tint = NexusTextPrimary, modifier = Modifier.size(26.dp),
-                                    )
-                                }
-                                Spacer(Modifier.height(6.dp))
-                                Text("Galeri", color = NexusTextSecondary, fontSize = 11.sp)
-                            }
-                            return@forEach
-                        }
                         val model = wp?.url
                         val selected = current == model
                         Column(
@@ -260,7 +255,7 @@ fun ChatWallpaperDialog(
                                     .fillMaxWidth()
                                     .height(96.dp)
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0xFF12121A))
+                                    .background(NexusSurface)
                                     .then(
                                         if (selected) Modifier.border(2.5.dp, Color.White, RoundedCornerShape(12.dp))
                                         else Modifier,
@@ -295,8 +290,62 @@ fun ChatWallpaperDialog(
     }
 }
 
-/** Sentinel tile that opens the device gallery instead of selecting a wallpaper. */
-private val GALLERY_TILE = ChatWallpaper("Galeri", "")
+/**
+ * The "use my own photo" entry of the wallpaper picker.
+ *
+ * A wide card rather than a grid square, with an accent gradient and a subtitle — it
+ * is the one option that does something different (opens the system picker), so it is
+ * allowed to look different.
+ */
+@Composable
+private fun GalleryWallpaperCard(selected: Boolean, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                Brush.horizontalGradient(
+                    listOf(NexusAccent.copy(alpha = 0.30f), NexusAccent.copy(alpha = 0.10f)),
+                ),
+            )
+            .border(
+                if (selected) 2.dp else 1.dp,
+                if (selected) Color.White else NexusAccent.copy(alpha = 0.45f),
+                RoundedCornerShape(16.dp),
+            )
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 14.dp, vertical = 13.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.White.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.PhotoLibrary, null,
+                tint = Color.White, modifier = Modifier.size(22.dp),
+            )
+        }
+        Spacer(Modifier.width(13.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Dari galeri", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(2.dp))
+            Text("Pakai fotomu sendiri sebagai latar", color = NexusTextSecondary, fontSize = 11.sp)
+        }
+        Icon(
+            if (selected) Icons.Filled.Done else Icons.Filled.Add, null,
+            tint = if (selected) Color.White else NexusTextSecondary,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Report + generic confirm
@@ -309,7 +358,7 @@ fun ReportDialog(name: String, onDismiss: () -> Unit, onSubmit: (String) -> Unit
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(vertical = 20.dp),
         ) {
             Text(
@@ -369,7 +418,7 @@ fun ConfirmActionDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text(title, color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -393,7 +442,7 @@ fun ConfirmActionDialog(
                 Spacer(Modifier.width(6.dp))
                 Box(
                     modifier = Modifier
-                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .background(DangerFill, RoundedCornerShape(50))
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },

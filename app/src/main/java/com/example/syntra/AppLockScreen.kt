@@ -60,6 +60,7 @@ import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlin.math.roundToInt
@@ -227,6 +228,11 @@ fun AppLockSettingsScreen(onClose: () -> Unit) {
     val bioAvailable = remember { BiometricAuth.canAuthenticate(context) }
     // When non-null we're inside the set/change-PIN flow.
     var settingPin by remember { mutableStateOf(false) }
+    // What we're re-authenticating FOR, or null when not verifying. Turning the lock
+    // off — or removing the fingerprint from it — is exactly the action someone who
+    // grabbed an unlocked phone would take, so it has to cost the same proof as
+    // getting in does.
+    var verifyFor by remember { mutableStateOf<LockAction?>(null) }
 
     if (settingPin) {
         PinSetupFlow(
@@ -235,6 +241,28 @@ fun AppLockSettingsScreen(onClose: () -> Unit) {
                 AppLockStore.setPin(context, newPin)
                 enabled = true
                 settingPin = false
+            },
+        )
+        return
+    }
+
+    verifyFor?.let { action ->
+        VerifyLockFlow(
+            action = action,
+            onCancel = { verifyFor = null },
+            onVerified = {
+                when (action) {
+                    LockAction.DISABLE -> {
+                        AppLockStore.disable(context)
+                        enabled = false
+                        bioEnabled = false
+                    }
+                    LockAction.REMOVE_BIOMETRIC -> {
+                        bioEnabled = false
+                        AppLockStore.setBiometricEnabled(context, false)
+                    }
+                }
+                verifyFor = null
             },
         )
         return
@@ -313,20 +341,167 @@ fun AppLockSettingsScreen(onClose: () -> Unit) {
                         },
                         checked = bioEnabled && bioAvailable,
                         enabled = bioAvailable,
-                        onChange = {
-                            bioEnabled = it
-                            AppLockStore.setBiometricEnabled(context, it)
+                        onChange = { wanted ->
+                            if (wanted) {
+                                // Turning it ON only ever ADDS a way in, so it needs no
+                                // proof beyond already being here.
+                                bioEnabled = true
+                                AppLockStore.setBiometricEnabled(context, true)
+                            } else {
+                                // Turning it off WEAKENS the lock — verify first.
+                                verifyFor = LockAction.REMOVE_BIOMETRIC
+                            }
                         },
                     )
                 }
                 Spacer(Modifier.height(20.dp))
                 PrimaryButton("Matikan kunci aplikasi", destructive = true) {
-                    AppLockStore.disable(context)
-                    enabled = false
-                    bioEnabled = false
+                    verifyFor = LockAction.DISABLE
                 }
             }
         }
+    }
+}
+
+/** What a re-authentication is being demanded for. */
+private enum class LockAction { DISABLE, REMOVE_BIOMETRIC }
+
+/**
+ * Proves it is still you before the lock is weakened.
+ *
+ * Offers the fingerprint first when it is enabled (that is what the user set up), and
+ * always keeps the PIN pad underneath as the fallback — a finger can fail to read, and
+ * being unable to turn your own lock off would be its own kind of lockout.
+ *
+ * This is the same challenge as the unlock gate, and deliberately so: without it,
+ * anyone holding the phone while it was already open could simply switch the lock off
+ * and keep it open forever.
+ */
+@Composable
+private fun VerifyLockFlow(
+    action: LockAction,
+    onCancel: () -> Unit,
+    onVerified: () -> Unit,
+) {
+    BackHandler(onBack = onCancel)
+    val context = LocalContext.current
+    val activity = remember { context.findFragmentActivity() }
+    val biometricOn = remember {
+        AppLockStore.biometricEnabled(context) && BiometricAuth.canAuthenticate(context)
+    }
+
+    var pin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf(false) }
+    val shake = remember { Animatable(0f) }
+
+    fun triggerBiometric() {
+        val act = activity ?: return
+        BiometricAuth.authenticate(
+            activity = act,
+            subtitle = when (action) {
+                LockAction.DISABLE -> "Verifikasi untuk mematikan kunci"
+                LockAction.REMOVE_BIOMETRIC -> "Verifikasi untuk mematikan sidik jari"
+            },
+            onSuccess = onVerified,
+            onCancel = { /* fall through to the PIN pad */ },
+        )
+    }
+
+    LaunchedEffect(Unit) { if (biometricOn) triggerBiometric() }
+
+    LaunchedEffect(pin) {
+        if (pin.length == PIN_LENGTH) {
+            if (AppLockStore.verifyPin(context, pin)) {
+                onVerified()
+            } else {
+                error = true
+                shake.snapTo(0f)
+                shake.animateTo(1f, androidx.compose.animation.core.tween(360))
+                pin = ""
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(NexusBackground)
+            .windowInsetsPadding(WindowInsets.statusBars),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onCancel,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack, "Batal",
+                    tint = NexusTextPrimary, modifier = Modifier.size(22.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Box(
+            modifier = Modifier
+                .size(76.dp)
+                .background(NexusAccent.copy(alpha = 0.14f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                if (biometricOn) Icons.Filled.Fingerprint else Icons.Filled.Lock,
+                null,
+                tint = NexusAccentSoft,
+                modifier = Modifier.size(34.dp),
+            )
+        }
+        Spacer(Modifier.height(20.dp))
+        Text(
+            text = when (action) {
+                LockAction.DISABLE -> "Matikan kunci aplikasi"
+                LockAction.REMOVE_BIOMETRIC -> "Matikan sidik jari"
+            },
+            color = NexusTextPrimary,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = when {
+                error -> "PIN salah, coba lagi"
+                biometricOn -> "Verifikasi sidik jari, atau masukkan PIN"
+                else -> "Masukkan PIN untuk melanjutkan"
+            },
+            color = if (error) Color(0xFFFF6B6B) else NexusTextSecondary,
+            fontSize = 13.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 32.dp),
+        )
+        Spacer(Modifier.height(28.dp))
+
+        val shakePx = (shake.value * 2 * Math.PI * 3).let { kotlin.math.sin(it) } * 12
+        PinDots(
+            filled = pin.length,
+            modifier = Modifier.offset { IntOffset(shakePx.roundToInt(), 0) },
+        )
+
+        Spacer(Modifier.weight(1f))
+
+        NumericKeypad(
+            onDigit = { if (pin.length < PIN_LENGTH) { error = false; pin += it } },
+            onBackspace = { if (pin.isNotEmpty()) pin = pin.dropLast(1) },
+            showBiometric = biometricOn,
+            onBiometric = { triggerBiometric() },
+        )
+        Spacer(Modifier.height(28.dp))
     }
 }
 
@@ -589,7 +764,7 @@ private fun ToggleLockRow(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = NexusAccent,
                 uncheckedThumbColor = NexusTextSecondary,
-                uncheckedTrackColor = Color(0xFF2A2A32),
+                uncheckedTrackColor = NexusSurfaceElevated,
                 uncheckedBorderColor = NexusStroke,
             ),
         )

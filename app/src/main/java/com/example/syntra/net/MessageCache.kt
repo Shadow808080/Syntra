@@ -15,20 +15,36 @@ import org.json.JSONObject
  * simple de-dupe + sort, and the store is bounded so it never grows without limit.
  */
 object MessageCache {
-    private const val PREFS = "syntra_msg_cache"
-    private const val MAX_PER_CONVO = 500 // plenty of scrollback; oldest trimmed
+    private const val LEGACY_PREFS = "syntra_msg_cache"
+    private const val MAX_PER_CONVO = 200 // plenty of scrollback; oldest trimmed
 
-    private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    /**
+     * Parsed messages for the conversation(s) in play, so re-reading during a chat
+     * doesn't re-parse JSON. Deliberately tiny — a user is in one conversation at a
+     * time, and holding every chat they've ever opened is what made the old
+     * SharedPreferences version so heavy.
+     */
+    private const val MEMO_SIZE = 3
+    private val memo = object : LinkedHashMap<String, List<NetMessage>>(4, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<NetMessage>>) =
+            size > MEMO_SIZE
+    }
+
+    private fun key(conversationId: String) = "messages:$conversationId"
 
     /** Cached messages for [conversationId], oldest-first. Empty if nothing cached. */
+    @Synchronized
     fun load(context: Context, conversationId: String): List<NetMessage> {
-        val raw = prefs(context).getString(conversationId, null) ?: return emptyList()
-        return runCatching {
+        memo[conversationId]?.let { return it }
+        migrateLegacy(context)
+        val raw = DiskJsonCache.read(context, key(conversationId)) ?: return emptyList()
+        val parsed = runCatching {
             val arr = JSONArray(raw)
             (0 until arr.length()).map { i -> fromJson(arr.getJSONObject(i)) }
                 .sortedBy { it.id } // UUIDv7 → chronological
         }.getOrDefault(emptyList())
+        memo[conversationId] = parsed
+        return parsed
     }
 
     /**
@@ -36,6 +52,7 @@ object MessageCache {
      * trim to [MAX_PER_CONVO], and persist. Returns nothing — callers read via [load]
      * or keep their own in-memory list.
      */
+    @Synchronized
     fun merge(context: Context, conversationId: String, incoming: List<NetMessage>) {
         if (incoming.isEmpty()) return
         val byId = LinkedHashMap<String, NetMessage>()
@@ -48,16 +65,71 @@ object MessageCache {
         save(context, conversationId, merged)
     }
 
+    /**
+     * Drops every cached message for one conversation.
+     *
+     * Needed by "bersihkan obrolan" and "hapus percakapan": clearing the server side
+     * alone is not enough, because this cache is what paints the thread on the next
+     * open — leave it behind and the messages reappear instantly, which is exactly how
+     * both features looked broken.
+     */
+    @Synchronized
+    fun clearConversation(context: Context, conversationId: String) {
+        memo.remove(conversationId)
+        DiskJsonCache.remove(context, key(conversationId))
+    }
+
     /** Remove a single message from the cache (deleted-for-everyone). */
+    @Synchronized
     fun remove(context: Context, conversationId: String, messageId: String) {
         val kept = load(context, conversationId).filterNot { it.id == messageId }
         save(context, conversationId, kept)
     }
 
+    /**
+     * Drop the in-memory copies. The bytes themselves live in [DiskJsonCache], which
+     * the Settings screen clears wholesale — this just makes sure nothing stale is
+     * still being served from RAM afterwards.
+     */
+    @Synchronized
+    fun clear(context: Context) {
+        memo.clear()
+        runCatching { context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE).edit().clear().apply() }
+    }
+
     private fun save(context: Context, conversationId: String, messages: List<NetMessage>) {
+        memo[conversationId] = messages
         val arr = JSONArray()
         messages.forEach { arr.put(toJson(it)) }
-        prefs(context).edit().putString(conversationId, arr.toString()).apply()
+        DiskJsonCache.write(context, key(conversationId), arr.toString())
+    }
+
+    @Volatile private var migrated = false
+
+    /**
+     * One-shot move of everything off the old SharedPreferences store, the first time
+     * any conversation is read in this process.
+     *
+     * It is done in one pass and the prefs file is then emptied, precisely because
+     * touching it at all forces Android to parse the whole thing into memory. Pay that
+     * once, on an upgrade, and never again — a per-conversation migration would keep
+     * the old file (and its resident cost) alive for as long as unread chats remained.
+     */
+    private fun migrateLegacy(context: Context) {
+        if (migrated) return
+        migrated = true
+        runCatching {
+            val prefs = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
+            val all = prefs.all
+            if (all.isEmpty()) return
+            for ((convoId, value) in all) {
+                val raw = value as? String ?: continue
+                if (DiskJsonCache.read(context, key(convoId)) == null) {
+                    DiskJsonCache.write(context, key(convoId), raw)
+                }
+            }
+            prefs.edit().clear().apply()
+        }
     }
 
     private fun toJson(m: NetMessage) = JSONObject().apply {

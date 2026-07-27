@@ -10,6 +10,14 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -71,6 +79,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.MediaAutoDownload
+import com.example.syntra.net.BlockStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.AppTheme
 import com.example.syntra.ui.theme.NexusAccent
@@ -78,6 +87,7 @@ import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import com.google.zxing.BarcodeFormat
@@ -204,13 +214,12 @@ private fun AutoDownloadRow(label: String, checked: Boolean, onChange: (Boolean)
 
 @Composable
 private fun Card(content: @Composable () -> Unit) {
+    // Plain, to match SettingsGroup — spacing and headings carry the grouping, so the
+    // fill and outline were decoration that only added visual noise.
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .background(NexusSurface, RoundedCornerShape(18.dp))
-            .border(1.dp, NexusStroke, RoundedCornerShape(18.dp))
-            .padding(16.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
     ) { content() }
 }
 
@@ -235,7 +244,7 @@ private fun PrimaryAction(text: String, enabled: Boolean = true, onClick: () -> 
                 brush = if (enabled) {
                     Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent))
                 } else {
-                    Brush.horizontalGradient(listOf(Color(0xFF2A2A32), Color(0xFF2A2A32)))
+                    Brush.horizontalGradient(listOf(NexusSurfaceElevated, NexusSurfaceElevated))
                 },
                 shape = RoundedCornerShape(25.dp),
             )
@@ -473,7 +482,7 @@ private fun ProfileField(label: String, value: String, placeholder: String, onCh
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+            .background(NexusSurfaceElevated, RoundedCornerShape(12.dp))
             .border(1.dp, NexusStroke, RoundedCornerShape(12.dp))
             .padding(horizontal = 14.dp, vertical = 13.dp),
     ) {
@@ -522,7 +531,7 @@ private fun ConfirmDiscardDialog(onKeepEditing: () -> Unit, onDiscard: () -> Uni
                     modifier = Modifier
                         .weight(1f).height(46.dp)
                         .clip(RoundedCornerShape(23.dp))
-                        .background(Color.White.copy(alpha = 0.06f))
+                        .background(NexusSurfaceElevated)
                         .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDiscard),
                     contentAlignment = Alignment.Center,
                 ) { Text("Buang", color = Color(0xFFFF6B6B), fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
@@ -736,6 +745,15 @@ fun BlockedContactsScreen(onClose: () -> Unit) {
     val context = LocalContext.current
     val blocked = remember { mutableStateOf(BlockStore.all(context).toList()) }
 
+    // Pull the authoritative list, so a block made on another device shows up here —
+    // and so unblocking there stops being enforced here.
+    LaunchedEffect(Unit) {
+        runCatching { SyntraClient.getBlocked() }.onSuccess { list ->
+            BlockStore.sync(context, list)
+            blocked.value = BlockStore.all(context).toList()
+        }
+    }
+
     SettingsSubScreen("Kontak diblokir", onClose) {
         if (blocked.value.isEmpty()) {
             Column(
@@ -791,7 +809,8 @@ fun BlockedContactsScreen(onClose: () -> Unit) {
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
                             ) {
-                                BlockStore.unblock(context, username)
+                                BlockStore.remove(context, username, null)
+                                SyntraClient.fireAndForget { SyntraClient.unblockUser(username) }
                                 blocked.value = BlockStore.all(context).toList()
                             },
                         )
@@ -799,25 +818,6 @@ fun BlockedContactsScreen(onClose: () -> Unit) {
                 }
             }
         }
-    }
-}
-
-/** Device-local block list. */
-object BlockStore {
-    private const val PREFS = "syntra_settings"
-    private const val KEY = "blocked_usernames"
-
-    fun all(context: Context): Set<String> =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getStringSet(KEY, emptySet()) ?: emptySet()
-
-    fun block(context: Context, username: String) = save(context, all(context) + username)
-
-    fun unblock(context: Context, username: String) = save(context, all(context) - username)
-
-    private fun save(context: Context, value: Set<String>) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putStringSet(KEY, value).apply()
     }
 }
 
@@ -829,7 +829,13 @@ object BlockStore {
 fun ThemeScreen(onClose: () -> Unit) {
     val context = LocalContext.current
     SettingsSubScreen("Tema", onClose) {
-        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+        LazyColumn(
+            // Android's own navigation bar overlaps the bottom of the list, and the
+            // colour picker is the LAST thing here — so without this the controls you
+            // most need to reach are the ones hidden under the system bar.
+            contentPadding = PaddingValues(top = 8.dp, bottom = 8.dp),
+            modifier = Modifier.navigationBarsPadding(),
+        ) {
             items(AppTheme.Choice.entries.toList()) { choice ->
                 val palette = AppTheme.paletteOf(choice)
                 val selected = AppTheme.current == choice
@@ -837,16 +843,30 @@ fun ThemeScreen(onClose: () -> Unit) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 6.dp)
-                        .background(NexusSurface, RoundedCornerShape(18.dp))
+                        // The outline stays HERE — on a theme picker it isn't
+                        // decoration, it's how you can tell which theme is active.
+                        // Only the unselected rows go plain.
+                        .background(
+                            if (selected) NexusSurface else Color.Transparent,
+                            RoundedCornerShape(18.dp),
+                        )
                         .border(
-                            width = if (selected) 2.dp else 1.dp,
-                            color = if (selected) NexusAccent else NexusStroke,
+                            width = if (selected) 2.dp else 0.dp,
+                            color = if (selected) NexusAccent else Color.Transparent,
                             shape = RoundedCornerShape(18.dp),
                         )
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
-                        ) { AppTheme.select(context, choice) }
+                        ) {
+                            // Picking Custom keeps whatever accent was chosen before;
+                            // the swatch row below is what changes it.
+                            if (choice == AppTheme.Choice.CUSTOM) {
+                                AppTheme.selectCustom(context, AppTheme.customAccent)
+                            } else {
+                                AppTheme.select(context, choice)
+                            }
+                        }
                         .padding(14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -896,8 +916,146 @@ fun ThemeScreen(onClose: () -> Unit) {
                         }
                     }
                 }
+
+                // The swatches belong to Custom, so they appear directly under it —
+                // a colour picker parked at the bottom of the list reads as unrelated
+                // to the row it actually controls.
+                if (choice == AppTheme.Choice.CUSTOM) {
+                    CustomAccentSwatches(
+                        current = AppTheme.customAccent,
+                        onPick = { AppTheme.selectCustom(context, it) },
+                    )
+                }
             }
         }
+    }
+}
+
+/**
+ * Accent picking for the Custom theme: quick swatches plus free choice.
+ *
+ * The swatches are shortcuts, not the whole offer — the two sliders below give any hue
+ * and any intensity. Saturation and brightness are CLAMPED to a readable band rather
+ * than exposed raw: an accent is a background for white text everywhere it appears,
+ * and letting someone pick near-white or near-black produces buttons whose labels
+ * vanish, with no obvious way back. Full hue freedom, guarded legibility.
+ */
+@Composable
+private fun CustomAccentSwatches(current: Color, onPick: (Color) -> Unit) {
+    val swatches = listOf(
+        Color(0xFF2E6BF0), Color(0xFF00A8CC), Color(0xFF14B8A6), Color(0xFF22A85B), Color(0xFFE0A11B),
+        Color(0xFFF2663C), Color(0xFFE9548C), Color(0xFF7C4DFF), Color(0xFF6C5CE7), Color(0xFF8A8F98),
+    )
+
+    // Decompose whatever is active so the sliders open where the user left them.
+    val hsv = remember(current) {
+        FloatArray(3).also { android.graphics.Color.colorToHSV(current.toArgb(), it) }
+    }
+    var hue by remember(current) { mutableStateOf(hsv[0]) }
+    var sat by remember(current) { mutableStateOf(hsv[1].coerceIn(0.35f, 1f)) }
+
+    fun build(h: Float, s: Float): Color =
+        Color(android.graphics.Color.HSVToColor(floatArrayOf(h, s.coerceIn(0.35f, 1f), 0.94f)))
+
+    Column(modifier = Modifier.padding(start = 30.dp, end = 20.dp, top = 2.dp, bottom = 18.dp)) {
+        Text("Warna cepat", color = NexusTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        swatches.chunked(5).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                row.forEach { colour ->
+                    val picked = colour.value == current.value
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(colour)
+                            .border(
+                                width = if (picked) 3.dp else 0.dp,
+                                color = if (picked) NexusTextPrimary else Color.Transparent,
+                                shape = CircleShape,
+                            )
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { onPick(colour) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (picked) {
+                            Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Warna bebas", color = NexusTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            // Live preview of the slider result, so the effect is visible before it is
+            // committed to the whole app.
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(build(hue, sat))
+                    .border(1.dp, NexusStroke, CircleShape),
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+
+        ColourSlider(
+            value = hue / 360f,
+            track = Brush.horizontalGradient(
+                (0..6).map { Color(android.graphics.Color.HSVToColor(floatArrayOf(it * 60f, 0.85f, 0.95f))) },
+            ),
+            onChange = { hue = it * 360f; onPick(build(hue, sat)) },
+        )
+        Spacer(Modifier.height(14.dp))
+        ColourSlider(
+            value = (sat - 0.35f) / 0.65f,
+            track = Brush.horizontalGradient(listOf(build(hue, 0.35f), build(hue, 1f))),
+            onChange = { sat = 0.35f + it * 0.65f; onPick(build(hue, sat)) },
+        )
+    }
+}
+
+/** A flat draggable track. Tapping jumps; dragging scrubs. */
+@Composable
+private fun ColourSlider(value: Float, track: Brush, onChange: (Float) -> Unit) {
+    var width by remember { mutableStateOf(1) }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(26.dp)
+            .onSizeChanged { width = it.width.coerceAtLeast(1) }
+            .clip(RoundedCornerShape(13.dp))
+            .background(track)
+            .border(1.dp, NexusStroke, RoundedCornerShape(13.dp))
+            .pointerInput(Unit) {
+                detectTapGestures { onChange((it.x / width).coerceIn(0f, 1f)) }
+            }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures { change, _ ->
+                    change.consume()
+                    onChange((change.position.x / width).coerceIn(0f, 1f))
+                }
+            },
+    ) {
+        // The thumb rides the track rather than sitting on a separate rail, so the
+        // control is one object and the whole bar is the hit target.
+        Box(
+            modifier = Modifier
+                .offset { IntOffset((value.coerceIn(0f, 1f) * width - 11.dp.toPx()).toInt(), 0) }
+                .padding(top = 3.dp)
+                .size(20.dp)
+                .clip(CircleShape)
+                .background(Color.White)
+                .border(2.dp, Color.Black.copy(alpha = 0.25f), CircleShape),
+        )
     }
 }
 
@@ -933,7 +1091,12 @@ fun StorageScreen(onClose: () -> Unit) {
             // their own below, separate from the throwaway "cache" figure.
             val videoBytes = com.example.syntra.net.ReelCache.sizeBytes(context) +
                 com.example.syntra.net.VideoCache.sizeBytes(context)
-            val cacheBytes = dirSize(context.cacheDir) + dirSize(context.externalCacheDir)
+            // The JSON caches (messages, the Shorts feed, profiles) live in filesDir
+            // rather than cacheDir, so they were invisible here AND unreachable by
+            // "Bersihkan cache" — counted and cleared with the rest now, since every
+            // byte of it can be fetched again.
+            val cacheBytes = dirSize(context.cacheDir) + dirSize(context.externalCacheDir) +
+                com.example.syntra.net.DiskJsonCache.sizeBytes(context)
             videoSize = videoBytes
             cacheSize = cacheBytes
         }
@@ -954,8 +1117,9 @@ fun StorageScreen(onClose: () -> Unit) {
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Foto, thumbnail, dan berkas sementara. Bisa diambil ulang " +
-                        "dari server — aman dihapus kapan saja.",
+                    text = "Foto, thumbnail, salinan pesan & feed offline, dan berkas " +
+                        "sementara. Semua bisa diambil ulang dari server — aman " +
+                        "dihapus kapan saja.",
                     color = NexusTextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 17.sp,
@@ -972,6 +1136,11 @@ fun StorageScreen(onClose: () -> Unit) {
                         withContext(Dispatchers.IO) {
                             runCatching { context.cacheDir?.deleteRecursively() }
                             runCatching { context.externalCacheDir?.deleteRecursively() }
+                            com.example.syntra.net.DiskJsonCache.clear(context)
+                            // Drop the parsed copies too, or the next chat opened would
+                            // still be served from RAM after the files are gone.
+                            com.example.syntra.net.MessageCache.clear(context)
+                            com.example.syntra.net.ShortsFeedCache.clear(context)
                         }
                         measure()
                         clearing = false

@@ -15,6 +15,13 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // The UI is Indonesian with an English fallback. Every AndroidX/Compose
+        // artifact ships ~80 translations we never show; keeping two drops the rest
+        // of them out of resources.arsc.
+        androidResources {
+            localeFilters += listOf("in", "en")
+        }
     }
 
     buildTypes {
@@ -35,12 +42,59 @@ android {
             )
         }
     }
+    // A device only ever needs ONE ABI, but the old build shipped all four in one
+    // "universal" APK — so an arm64 phone downloaded the x86, x86_64 AND armeabi-v7a
+    // copies of LiveKit's WebRTC blob and opened none of them. That alone was 30 MB
+    // of the 46. One APK per ABI instead; Play does the same automatically for a
+    // .aab, this is the equivalent for APKs handed out directly.
+    //
+    // 32-bit x86 is dropped outright (nothing but very old emulators); x86_64 stays
+    // only so the development emulator keeps working — no phone ever downloads it.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            isUniversalApk = false
+        }
+    }
+
+    packaging {
+        resources {
+            // Build metadata that ships inside dependency jars and is dead weight in
+            // an APK — protobuf schemas pulled in by WebRTC, licence texts, Kotlin
+            // module descriptors, and the coroutines debug hook.
+            //
+            // NOT excluded: `kotlin/**`. It holds kotlin_builtins, which anything
+            // using kotlin-reflect reads at runtime — worth ~10 KB and a release-only
+            // crash if some dependency turns out to need it.
+            excludes += listOf(
+                "**/*.proto",
+                "META-INF/*.version",
+                "META-INF/**/LICENSE.txt",
+                "META-INF/**/NOTICE.txt",
+                "META-INF/*.kotlin_module",
+                "DebugProbesKt.bin",
+            )
+        }
+        // The .so files are already compressed inside the APK; leaving them
+        // uncompressed costs download size but saves disk after install. Compressed
+        // is the right trade for a 40 MB native blob on a cheap phone.
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
     buildFeatures {
         compose = true
+        // Off by default in AGP 9, but spelled out: no BuildConfig class, no unused
+        // resource classes for libraries we don't read them from.
+        buildConfig = false
+        resValues = false
     }
 }
 

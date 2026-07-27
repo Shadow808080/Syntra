@@ -38,8 +38,8 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Policy
-import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Icon
@@ -67,13 +67,16 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
+import com.example.syntra.net.BlockStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.AppTheme
+import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.launch
@@ -114,7 +117,7 @@ object SettingsStore {
     const val AUTO_DL_VOICE = "auto_dl_voice"
 }
 
-private enum class SettingsPage { PROFILE, QR, SECURITY, APP_LOCK, BLOCKED, THEME, STORAGE, AUTO_DOWNLOAD }
+private enum class SettingsPage { PROFILE, SECURITY, APP_LOCK, BLOCKED, THEME, STORAGE, AUTO_DOWNLOAD, PRIVACY_POLICY, TERMS }
 
 @Composable
 fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
@@ -137,7 +140,6 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
     open?.let { page ->
         when (page) {
             SettingsPage.PROFILE -> ProfileSettingsScreen { open = null }
-            SettingsPage.QR -> QrCodeScreen { open = null }
             SettingsPage.SECURITY -> SecurityScreen(
                 onClose = { open = null },
                 onSignedOut = { open = null; onSignedOut() },
@@ -147,6 +149,8 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
             SettingsPage.THEME -> ThemeScreen { open = null }
             SettingsPage.STORAGE -> StorageScreen { open = null }
             SettingsPage.AUTO_DOWNLOAD -> AutoDownloadScreen { open = null }
+            SettingsPage.PRIVACY_POLICY -> PrivacyPolicyScreen { open = null }
+            SettingsPage.TERMS -> TermsScreen { open = null }
         }
         return
     }
@@ -211,10 +215,6 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                 SettingsGroup {
                     NavRow(Icons.Filled.Person, "Profil", "Ubah nama tampilan") {
                         open = SettingsPage.PROFILE
-                    }
-                    Divider()
-                    NavRow(Icons.Filled.QrCode2, "Kode QR saya", "Bagikan agar orang bisa menemukanmu") {
-                        open = SettingsPage.QR
                     }
                     Divider()
                     NavRow(Icons.Filled.Lock, "Keamanan", "Sesi aktif") {
@@ -337,7 +337,13 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                 SettingsGroup {
                     NavRow(Icons.Filled.Info, "Tentang Syntra", "Versi 1.0") { showAbout = true }
                     Divider()
-                    NavRow(Icons.Filled.Policy, "Kebijakan privasi", null) {}
+                    NavRow(Icons.Filled.Policy, "Kebijakan privasi", "Data apa yang kami simpan") {
+                        open = SettingsPage.PRIVACY_POLICY
+                    }
+                    Divider()
+                    NavRow(Icons.Filled.Gavel, "Ketentuan layanan", "Aturan memakai Syntra") {
+                        open = SettingsPage.TERMS
+                    }
                 }
             }
 
@@ -503,12 +509,14 @@ private fun SectionHeader(text: String) {
 
 @Composable
 private fun SettingsGroup(content: @Composable () -> Unit) {
+    // Plain: no card fill, no outline. The section headers and the dividers between
+    // rows already say where one group ends and the next begins, so the box around
+    // them was drawing a boundary that was never in question — and stacking three
+    // shades of near-black on a dark theme just makes the page look busy.
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .background(NexusSurface, RoundedCornerShape(18.dp))
-            .border(1.dp, NexusStroke, RoundedCornerShape(18.dp)),
+            .padding(horizontal = 16.dp),
     ) {
         content()
     }
@@ -586,7 +594,9 @@ private fun ToggleRow(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = NexusAccent,
                 uncheckedThumbColor = NexusTextSecondary,
-                uncheckedTrackColor = Color(0xFF2A2A32),
+                // Theme surface, not a fixed dark grey: on the light theme an off
+                // switch was a near-black pill on a white page.
+                uncheckedTrackColor = NexusSurfaceElevated,
                 uncheckedBorderColor = NexusStroke,
             ),
         )
@@ -606,7 +616,7 @@ private fun ConfirmDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text(title, color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -633,7 +643,10 @@ private fun ConfirmDialog(
                 Box(
                     modifier = Modifier
                         .background(
-                            if (dismissText == null) NexusAccent else Color(0xFF3A1620),
+                            // The destructive tint was a dark maroon that only works
+                            // on a dark page. A translucent red reads correctly on both
+                            // because it takes the colour underneath it.
+                            if (dismissText == null) NexusAccent else DangerFill,
                             RoundedCornerShape(50),
                         )
                         .clickable(

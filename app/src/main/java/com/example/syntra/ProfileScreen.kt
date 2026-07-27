@@ -50,6 +50,8 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.outlined.AccountCircle
+import androidx.compose.material.icons.outlined.AmpStories
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.CircularProgressIndicator
@@ -86,7 +88,10 @@ import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.NetStory
 import com.example.syntra.net.NetStoryGroup
 import com.example.syntra.net.NetReel
+import com.example.syntra.net.AvatarCache
+import com.example.syntra.net.BlockStore
 import com.example.syntra.net.NetUser
+import com.example.syntra.net.ProfileCache
 import com.example.syntra.net.NetVisitor
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
@@ -95,6 +100,7 @@ import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.CancellationException
@@ -123,16 +129,30 @@ fun ProfileScreen(
     // works no matter where the profile was opened from (Shorts, feed, etc.).
     var openChatConvo by remember(username) { mutableStateOf<Conversation?>(null) }
 
-    var user by remember(username) { mutableStateOf<NetUser?>(null) }
-    var loading by remember(username) { mutableStateOf(true) }
-    val shorts = remember(username) { mutableStateListOf<NetReel>() }
+    // Paint the last-known version of this profile immediately, then let load()
+    // replace it. Opening a profile used to be a full-screen spinner in front of
+    // several sequential requests — on a weak connection, tapping a name looked like
+    // the app had hung. `loading` is only true when there is genuinely nothing to draw.
+    // "me" for the own profile, which is opened with no username but is the one people
+    // open most often — it deserves the instant paint just as much.
+    val cacheKey = username ?: "me"
+    val cached = remember(username) { ProfileCache.read(context, cacheKey) }
+    var user by remember(username) { mutableStateOf(cached?.user) }
+    var loading by remember(username) { mutableStateOf(cached == null) }
+    val shorts = remember(username) {
+        mutableStateListOf<NetReel>().also { list -> cached?.let { list.addAll(it.reels) } }
+    }
     val saved = remember(username) { mutableStateListOf<NetReel>() }
     var tab by remember(username) { mutableStateOf(ProfileTab.SHORTS) }
     var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
     // When set, opens the full-screen swipeable reel viewer at this index.
     var viewerAt by remember { mutableStateOf<Int?>(null) }
     var following by remember(username) { mutableStateOf(false) }
-    var blocked by remember(username) { mutableStateOf(false) }
+    // Seeded from the local mirror — this used to start `false` every time, so a
+    // blocked person's profile opened as if nothing had happened.
+    var blocked by remember(username) {
+        mutableStateOf(BlockStore.isBlocked(context, username = username))
+    }
     // This person's active story (if any) — drives the avatar ring and the tap
     // behaviour (story vs. full-screen photo).
     var story by remember(username) { mutableStateOf<NetStoryGroup?>(null) }
@@ -225,15 +245,26 @@ fun ProfileScreen(
                 following = it.followStatus == "accepted" || it.followStatus == "pending"
                 if (coverUrlState == null) coverUrlState = it.coverUrl
             }
+            // distinctBy: the grid keys items by reel id, so one repeated id from the
+            // API takes the whole profile down with "Key … was already used".
             val myShorts = if (isMe) SyntraClient.getMyReels() else SyntraClient.getUserReels(username!!)
-            shorts.clear(); shorts.addAll(myShorts)
+            shorts.clear(); shorts.addAll(myShorts.distinctBy { it.id })
             if (isMe) {
                 val sv = SyntraClient.getSavedReels()
-                saved.clear(); saved.addAll(sv)
+                saved.clear(); saved.addAll(sv.distinctBy { it.id })
                 // Who viewed me — best effort, never blocks the profile.
                 runCatching { SyntraClient.getProfileVisitors() }.getOrNull()?.let { v ->
                     visitors.clear(); visitors.addAll(v.visitors); visitorTotal = v.total
                 }
+            }
+            // Remember this profile so the next open draws instantly.
+            user?.let { u ->
+                ProfileCache.write(context, cacheKey, u, shorts.toList())
+                // The profile endpoint is the ONE place that reliably returns a real
+                // avatar URL alongside both the id and the username, so it is the best
+                // teacher for the shared store — rooms and chat lists read it back.
+                AvatarCache.put(context, u.id, u.avatarMediaId)
+                AvatarCache.put(context, u.username, u.avatarMediaId)
             }
             // Find this person's story among the ones visible to me (followed + self).
             val uid = user?.id
@@ -265,6 +296,23 @@ fun ProfileScreen(
 
     androidx.compose.runtime.LaunchedEffect(username) {
         if (ApiConfig.ENABLED) load() else loading = false
+    }
+
+    // A blocked person's profile is a wall, not a page. No photo, no cover, no shorts,
+    // no counts — blocking someone and still browsing their profile makes the block
+    // meaningless. Unblocking is offered right here so it is never a trap.
+    if (blocked && !isMe) {
+        BlockedProfileWall(
+            name = username.orEmpty(),
+            onUnblock = {
+                val u = username ?: return@BlockedProfileWall
+                blocked = false
+                BlockStore.remove(context, u, user?.id)
+                scope.launch { runCatching { SyntraClient.unblockUser(u) } }
+            },
+            onClose = onClose,
+        )
+        return
     }
 
     Box(Modifier.fillMaxSize().background(NexusBackground)) {
@@ -340,9 +388,18 @@ fun ProfileScreen(
                             },
                             onToggleBlock = {
                                 val u = username ?: return@ProfileActions
-                                if (blocked) { blocked = false; scope.launch { runCatching { SyntraClient.unblockUser(u) } } }
-                                else {
-                                    blocked = true; following = false
+                                val uid = user?.id
+                                if (blocked) {
+                                    blocked = false
+                                    BlockStore.remove(context, u, uid)
+                                    scope.launch { runCatching { SyntraClient.unblockUser(u) } }
+                                } else {
+                                    blocked = true
+                                    following = false
+                                    // Record locally too, so search, reels and chat all
+                                    // honour the block immediately instead of waiting
+                                    // for a refetch that may never come.
+                                    BlockStore.add(context, u, uid)
                                     scope.launch { runCatching { SyntraClient.blockUser(u) } }
                                 }
                             },
@@ -1039,7 +1096,7 @@ private fun ProfileIconButton(icon: androidx.compose.ui.graphics.vector.ImageVec
         modifier = Modifier
             .size(44.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(Color.White.copy(alpha = 0.06f))
+            .background(NexusSurfaceElevated)
             .border(1.dp, NexusStroke, RoundedCornerShape(12.dp))
             .clickable(
                 indication = null,
@@ -1185,7 +1242,7 @@ private fun DeleteShortDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
                         .weight(1f)
                         .height(46.dp)
                         .clip(RoundedCornerShape(23.dp))
-                        .background(Color.White.copy(alpha = 0.06f))
+                        .background(NexusSurfaceElevated)
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
@@ -1215,23 +1272,80 @@ private fun DeleteShortDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
 // Avatar tap: choice sheet, photo viewer, story viewer
 // ---------------------------------------------------------------------------
 
-/** Shown when a person has BOTH a story and a profile photo — pick which to open. */
+/**
+ * Shown when a person has BOTH a story and a profile photo — pick which to open.
+ *
+ * Two plain rows, matching the attachment sheet in chat. The old version was a pair
+ * of coloured tiles fronted by a media-player "play" triangle, which reads as "start
+ * a video" rather than "there is a story here"; a ring is what a story looks like
+ * everywhere else in this app, so that's the icon.
+ */
 @Composable
 private fun AvatarChoiceSheet(onDismiss: () -> Unit, onStory: () -> Unit, onPhoto: () -> Unit) {
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(NexusSurface, RoundedCornerShape(22.dp))
-                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
-                .padding(20.dp),
+                .background(NexusSurface, RoundedCornerShape(20.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(20.dp))
+                .padding(vertical = 8.dp),
         ) {
-            Text("Buka", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                ChoiceTile(Icons.Filled.PlayArrow, "Story", NexusAccent, Modifier.weight(1f), onStory)
-                ChoiceTile(Icons.Filled.Photo, "Foto profil", Color.White.copy(alpha = 0.10f), Modifier.weight(1f), onPhoto)
-            }
+            Text(
+                "Buka",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 10.dp),
+            )
+            ChoiceRow(
+                icon = Icons.Outlined.AmpStories,
+                label = "Story",
+                detail = "Lihat story yang sedang aktif",
+                onClick = onStory,
+            )
+            ChoiceRow(
+                icon = Icons.Outlined.AccountCircle,
+                label = "Foto profil",
+                detail = "Lihat foto profil ukuran penuh",
+                onClick = onPhoto,
+            )
+            Spacer(Modifier.height(6.dp))
+        }
+    }
+}
+
+@Composable
+private fun ChoiceRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    detail: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(NexusSurfaceElevated),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, null, tint = NexusTextPrimary, modifier = Modifier.size(20.dp))
+        }
+        Spacer(Modifier.width(14.dp))
+        Column {
+            Text(label, color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(2.dp))
+            Text(detail, color = NexusTextSecondary, fontSize = 12.sp)
         }
     }
 }
@@ -1286,30 +1400,95 @@ private fun CoverOptionRow(
     }
 }
 
+
+/**
+ * What you see instead of a blocked person's profile.
+ *
+ * Deliberately shows nothing of theirs — not the avatar, not the cover, not a single
+ * count. Those are exactly the details a block is meant to put away.
+ */
 @Composable
-private fun ChoiceTile(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    bg: Color,
-    modifier: Modifier,
-    onClick: () -> Unit,
-) {
+private fun BlockedProfileWall(name: String, onUnblock: () -> Unit, onClose: () -> Unit) {
+    BackHandler(onBack = onClose)
     Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(bg)
-            .border(1.dp, NexusStroke, RoundedCornerShape(16.dp))
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = onClick,
-            )
-            .padding(vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .fillMaxSize()
+            .background(NexusBackground)
+            .windowInsetsPadding(WindowInsets.statusBars),
     ) {
-        Icon(icon, null, tint = Color.White, modifier = Modifier.size(28.dp))
-        Spacer(Modifier.height(8.dp))
-        Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onClose,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack, "Kembali",
+                tint = NexusTextPrimary, modifier = Modifier.size(22.dp),
+            )
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 36.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(CircleShape)
+                    .background(NexusSurfaceElevated),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Block, null,
+                    tint = NexusTextSecondary, modifier = Modifier.size(30.dp),
+                )
+            }
+            Spacer(Modifier.height(18.dp))
+            Text(
+                text = if (name.isBlank()) "Pengguna diblokir" else "@$name diblokir",
+                color = NexusTextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Kamu tidak bisa melihat profil, foto, atau Shorts mereka. " +
+                    "Mereka juga tidak bisa mengirimimu pesan.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(24.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(NexusSurfaceElevated)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onUnblock,
+                    )
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+            ) {
+                Text(
+                    "Buka blokir",
+                    color = NexusTextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
     }
 }
 

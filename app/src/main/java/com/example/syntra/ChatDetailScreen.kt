@@ -26,6 +26,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -59,6 +60,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
@@ -133,6 +135,8 @@ import com.example.syntra.net.ApiException
 import com.example.syntra.net.NetMessage
 import com.example.syntra.net.NetPresence
 import com.example.syntra.net.SocketListener
+import com.example.syntra.net.BlockStore
+import com.example.syntra.net.HiddenMessageStore
 import com.example.syntra.net.MessageCache
 import com.example.syntra.net.PinStore
 import com.example.syntra.net.Translate
@@ -141,6 +145,7 @@ import com.example.syntra.net.OutgoingMediaStore
 import com.example.syntra.net.ViewOnceStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
+import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
@@ -473,6 +478,17 @@ fun ChatDetailScreen(
     var showEmoji by remember { mutableStateOf(false) }
     var showGifSheet by remember { mutableStateOf(false) }
     var showAttach by remember { mutableStateOf(false) }
+    // Whether I have blocked the person in this chat. Drives the composer: blocked
+    // means no send bar at all, plus a one-tap way back out.
+    var peerBlocked by remember(conversation.id) {
+        mutableStateOf(
+            BlockStore.isBlocked(
+                context,
+                username = conversation.counterpartUsername,
+                userId = conversation.counterpartId,
+            ),
+        )
+    }
     var uploading by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
     var recordSeconds by remember { mutableStateOf(0) }
@@ -525,7 +541,7 @@ fun ChatDetailScreen(
             val cached = MessageCache.load(context, conversation.id) // oldest-first
             if (cached.isNotEmpty()) {
                 messages.clear()
-                messages.addAll(cached.map { it.toUi() })
+                messages.addAll(cached.filterNot { HiddenMessageStore.isHidden(context, it.id) }.map { it.toUi() })
                 oldestId = cached.firstOrNull()?.id
             }
             runCatching {
@@ -543,7 +559,7 @@ fun ChatDetailScreen(
                     // (keeps older cached messages that the newest page didn't include).
                     val full = MessageCache.load(context, conversation.id)
                     messages.clear()
-                    messages.addAll(full.map { it.toUi() })
+                    messages.addAll(full.filterNot { HiddenMessageStore.isHidden(context, it.id) }.map { it.toUi() })
                     oldestId = full.firstOrNull()?.id
                     history.lastOrNull()?.let { SyntraClient.messageRead(conversation.id, it.id) }
                 }
@@ -587,7 +603,7 @@ fun ChatDetailScreen(
                                 if (older.isEmpty() || older.size < MESSAGE_PAGE_SIZE) hasMore = false
                                 if (older.isNotEmpty()) {
                                     MessageCache.merge(context, conversation.id, older)
-                                    val ordered = older.reversed().map { it.toUi() } // oldest-first
+                                    val ordered = older.reversed().filterNot { HiddenMessageStore.isHidden(context, it.id) }.map { it.toUi() } // oldest-first
                                     val existing = messages.map { it.id }.toSet()
                                     val toAdd = ordered.filter { it.id !in existing }
                                     messages.addAll(0, toAdd)
@@ -654,6 +670,9 @@ fun ChatDetailScreen(
                             return
                         }
                     }
+                    // Locally deleted ("hapus untuk saya") stays deleted, even if the
+                    // server re-broadcasts it.
+                    if (HiddenMessageStore.isHidden(context, message.id)) return
                     // A freshly broadcast message is never a deletion — the delete
                     // tombstone only ever comes from the message.deleted event or from
                     // loaded history, so guard against a stray is_deleted here.
@@ -762,7 +781,7 @@ fun ChatDetailScreen(
                     scope.launch {
                         runCatching { SyntraClient.getMessages(conversation.id) }.onSuccess { list ->
                             messages.clear()
-                            messages.addAll(list.reversed().map { it.toUi() })
+                            messages.addAll(list.reversed().filterNot { HiddenMessageStore.isHidden(context, it.id) }.map { it.toUi() })
                         }
                     }
                 }
@@ -793,7 +812,7 @@ fun ChatDetailScreen(
                             SyntraClient.subscribe(listOf("conversation:${conversation.id}"))
                             val history = SyntraClient.getMessages(conversation.id).reversed()
                             messages.clear()
-                            messages.addAll(history.map { it.toUi() })
+                            messages.addAll(history.filterNot { HiddenMessageStore.isHidden(context, it.id) }.map { it.toUi() })
                         }
                     }
                 }
@@ -1178,6 +1197,17 @@ fun ChatDetailScreen(
             if (loadingOlder) {
                 item(key = "skeleton") { MessagesSkeleton() }
             }
+            // A brand-new conversation. An empty thread with a blinking cursor is the
+            // hardest message to write, so give people the easiest possible first move
+            // — one tap that says hello — plus a quiet word about being kind.
+            if (messages.isEmpty() && !loadingOlder) {
+                item(key = "empty-chat") {
+                    EmptyChatPrompt(
+                        name = conversation.name.substringBefore(' '),
+                        onWave = { sendSticker("👋") },
+                    )
+                }
+            }
             // Messages grouped by calendar day, each group preceded by a date chip
             // ("Hari ini" / "Kemarin" / "Senin" / "12 Juli 2026"). The chip is keyed by
             // the day so a new day inserts a fresh header as history scrolls in.
@@ -1195,28 +1225,21 @@ fun ChatDetailScreen(
                     onReply = { replyingTo = msg },
                     // Spent from THIS side's point of view: for a received photo that's
                     // my own open; for one I sent it's the recipient having opened it
-                    // (learned live). So the sender is never locked out of their own photo.
+                    // (learned live), which is all the sender ever gets to know.
                     viewOnceOpened = msg.viewOnce && ViewOnceStore.isSpent(context, msg.id, msg.fromMe),
-                    onOpenViewOnce = {
-                        if (!msg.fromMe) {
-                            // Recipient side: consume the single view, and tell the sender
-                            // so their bubble flips to "sudah dibuka" too.
-                            if (!ViewOnceStore.isOpened(context, msg.id)) {
-                                ViewOnceStore.markOpened(context, msg.id)
-                                SyntraClient.fireAndForget {
-                                    SyntraClient.reactToMessage(msg.id, VIEW_ONCE_OPENED_MARK)
-                                }
+                    // Only reached from the recipient's side — the bubble has already
+                    // put the photo on disk, so [src] is a local path that opens at once.
+                    onOpenViewOnce = { src ->
+                        // Consume the single view, and tell the sender so their bubble
+                        // flips to "sudah dibuka" too.
+                        if (!ViewOnceStore.isOpened(context, msg.id)) {
+                            ViewOnceStore.markOpened(context, msg.id)
+                            SyntraClient.fireAndForget {
+                                SyntraClient.reactToMessage(msg.id, VIEW_ONCE_OPENED_MARK)
                             }
                         }
-                        // Same fallback as the bubble: my own saved copy when the server
-                        // gave no attachment, so the sender can always review their photo.
-                        val src = msg.media ?: if (msg.fromMe) OutgoingMediaStore.get(context, msg.id) else null
-                        if (src != null) {
-                            fullscreenCaption = msg.text
-                            fullscreenImage = src
-                        } else {
-                            Toast.makeText(context, "Media tidak tersedia.", Toast.LENGTH_SHORT).show()
-                        }
+                        fullscreenCaption = msg.text
+                        fullscreenImage = src
                     },
                     translation = translations[msg.id],
                     onHideTranslation = { translations.remove(msg.id) },
@@ -1365,6 +1388,22 @@ fun ChatDetailScreen(
                         ) { replyingTo = null },
                 )
             }
+        }
+
+        // Blocked: the composer is replaced entirely. Leaving it in place and failing
+        // the send would let someone type a message that quietly goes nowhere.
+        if (peerBlocked) {
+            BlockedComposerBar(
+                onUnblock = {
+                    val u = conversation.counterpartUsername
+                    peerBlocked = false
+                    BlockStore.remove(context, u, conversation.counterpartId)
+                    if (!u.isNullOrBlank()) {
+                        SyntraClient.fireAndForget { SyntraClient.unblockUser(u) }
+                    }
+                },
+            )
+            return@Column
         }
 
         MessageInputBar(
@@ -1517,7 +1556,13 @@ fun ChatDetailScreen(
             onDismiss = { pendingMessage = null },
             onDeleteForMe = {
                 pendingMessage = null
+                // Record the decision on this device BEFORE dropping it from the list.
+                // Without this the message came back on the next open, because the
+                // cache and the server still had it — a delete that undoes itself.
+                HiddenMessageStore.hide(context, msg.id)
+                MessageCache.remove(context, conversation.id, msg.id)
                 messages.remove(msg)
+                reactions.remove(msg.id)
             },
             onDeleteForEveryone = {
                 pendingMessage = null
@@ -1555,14 +1600,29 @@ fun ChatDetailScreen(
             onDismiss = { confirmClear = false },
             onConfirm = {
                 confirmClear = false
-                // Local only: the backend has no delete endpoint yet, so this clears
-                // the view on this device and says so plainly.
-                messages.clear()
-                Toast.makeText(
-                    context,
-                    "Pesan dihapus di perangkat ini saja.",
-                    Toast.LENGTH_LONG,
-                ).show()
+                // DELETE /conversations/{id}/messages exists and moves my
+                // `cleared_before_id` marker server-side. It was never called, so the
+                // history came back on the next sync — clearing looked like it worked
+                // only until you left the screen.
+                // AWAIT the server before clearing the view. As fireAndForget this
+                // emptied the thread, swallowed a 404, and the next sync pulled every
+                // message straight back — "cleared" that un-cleared itself.
+                scope.launch {
+                    val ok = !ApiConfig.ENABLED ||
+                        runCatching { SyntraClient.clearConversation(conversation.id) }.isSuccess
+                    if (ok) {
+                        messages.clear()
+                        reactions.clear()
+                        MessageCache.clearConversation(context, conversation.id)
+                        Toast.makeText(context, "Obrolan dibersihkan.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(
+                            context,
+                            "Gagal membersihkan obrolan. Coba lagi.",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }
             },
         )
     }
@@ -1608,8 +1668,11 @@ fun ChatDetailScreen(
                 if (ApiConfig.ENABLED && !username.isNullOrBlank()) {
                     scope.launch { runCatching { SyntraClient.blockUser(username) } }
                 }
-                // Hide locally regardless, so the block takes effect immediately.
-                BlockStore.block(context, conversation.name)
+                // Recorded by username AND id — the old code keyed the block by the
+                // person's DISPLAY NAME, which is not an identity: it changes when they
+                // rename, and it never matched the id a reel or a search result carries.
+                BlockStore.add(context, username, conversation.counterpartId)
+                peerBlocked = true
                 Toast.makeText(context, "${conversation.name} diblokir.", Toast.LENGTH_SHORT).show()
                 onBack()
             },
@@ -1736,7 +1799,7 @@ private fun MessageActionsDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(vertical = 18.dp),
         ) {
             // Quick-reaction row — hidden for a message that's already deleted.
@@ -1820,7 +1883,7 @@ private fun ClearChatDialog(name: String, onDismiss: () -> Unit, onConfirm: () -
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text("Hapus semua pesan?", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -1850,7 +1913,7 @@ private fun ClearChatDialog(name: String, onDismiss: () -> Unit, onConfirm: () -
                 Spacer(Modifier.width(6.dp))
                 Box(
                     modifier = Modifier
-                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .background(DangerFill, RoundedCornerShape(50))
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
@@ -2087,9 +2150,23 @@ private fun formatMediaSize(bytes: Long): String = when {
  */
 @Composable
 private fun rememberMediaSize(url: String?): String {
-    var size by remember(url) { mutableStateOf(mediaSizeCache[url] ?: "") }
+    val context = LocalContext.current
+    // `url` is null for the sides that must not fetch a size at all (a local file, or
+    // the sender's own view-once). ConcurrentHashMap throws on a null key, so the
+    // lookup has to be guarded rather than relying on `?:`.
+    var size by remember(url) { mutableStateOf(url?.let { mediaSizeCache[it] } ?: "") }
     LaunchedEffect(url) {
         if (url == null || !url.startsWith("http") || size.isNotEmpty()) return@LaunchedEffect
+        // Already on disk? Then the real file length is the answer — no network at all,
+        // and it still works offline.
+        VideoCache.cachedFile(context, url)?.let { f ->
+            val local = formatMediaSize(f.length())
+            if (local.isNotEmpty()) {
+                mediaSizeCache[url] = local
+                size = local
+                return@LaunchedEffect
+            }
+        }
         val text = withContext(Dispatchers.IO) {
             runCatching {
                 val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
@@ -2113,9 +2190,151 @@ private fun rememberMediaSize(url: String?): String {
 private val mediaSizeCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
 /**
+ * The frosted cover of an un-downloaded photo.
+ *
+ * It draws NOTHING of the real media — the bytes have not been fetched, which is the
+ * entire point of turning auto-download off. Instead a pair of slow drifting colour
+ * blobs sit behind a heavy scrim, so the tile is alive and unmistakably "there is
+ * something here" without leaking a single pixel of what it is. (The old cover loaded
+ * the full image and merely blurred it: [Modifier.blur] is a no-op below Android 12,
+ * so on most phones the photo was simply visible — and the data was spent anyway.)
+ */
+@Composable
+private fun FrostedCover(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "frost")
+    val drift by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2 * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(9000, easing = androidx.compose.animation.core.LinearEasing)),
+        label = "frost-drift",
+    )
+    Canvas(modifier = modifier) {
+        drawRect(NexusSurfaceElevated)
+        val r = size.minDimension * 0.75f
+        // Two blobs orbiting in opposite directions — soft, slow, and cheap.
+        listOf(
+            Offset(
+                size.width * (0.5f + 0.28f * kotlin.math.cos(drift)),
+                size.height * (0.4f + 0.22f * kotlin.math.sin(drift)),
+            ) to NexusAccent.copy(alpha = 0.30f),
+            Offset(
+                size.width * (0.5f - 0.26f * kotlin.math.cos(drift * 0.7f)),
+                size.height * (0.65f - 0.20f * kotlin.math.sin(drift * 0.7f)),
+            ) to NexusAccentSoft.copy(alpha = 0.24f),
+        ).forEach { (center, color) ->
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(color, Color.Transparent),
+                    center = center,
+                    radius = r,
+                ),
+                radius = r,
+                center = center,
+            )
+        }
+        // Scrim, so the blobs stay a texture rather than a light show.
+        drawRect(Color.Black.copy(alpha = 0.34f))
+    }
+}
+
+/**
+ * Tap-to-download cover for media that auto-download is switched off for.
+ *
+ * Shows what it will cost (its real size, from a HEAD request) beside a download
+ * glyph; while fetching, the glyph is replaced by a ring driven by REAL byte
+ * progress — not a timer — and a percentage.
+ */
+@Composable
+private fun LockedMediaCover(
+    sizeText: String,
+    label: String,
+    /** null = idle, else 0f..1f of bytes received. */
+    progress: Float?,
+    failed: Boolean,
+    modifier: Modifier = Modifier,
+    onTap: () -> Unit,
+) {
+    Box(
+        modifier = modifier.clickable(
+            indication = null,
+            interactionSource = remember { MutableInteractionSource() },
+            onClick = onTap,
+        ),
+        contentAlignment = Alignment.Center,
+    ) {
+        FrostedCover(Modifier.matchParentSize())
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .background(Color.Black.copy(alpha = 0.42f), CircleShape)
+                    .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (progress != null) {
+                    val frac by animateFloatAsState(
+                        targetValue = progress,
+                        animationSpec = tween(200),
+                        label = "dl-progress",
+                    )
+                    Canvas(Modifier.size(40.dp)) {
+                        val stroke = 3.dp.toPx()
+                        val arcSize = androidx.compose.ui.geometry.Size(
+                            size.width - stroke, size.height - stroke,
+                        )
+                        val topLeft = Offset(stroke / 2f, stroke / 2f)
+                        drawArc(
+                            color = Color.White.copy(alpha = 0.25f),
+                            startAngle = 0f, sweepAngle = 360f, useCenter = false,
+                            topLeft = topLeft, size = arcSize, style = Stroke(width = stroke),
+                        )
+                        drawArc(
+                            color = Color.White,
+                            startAngle = -90f, sweepAngle = 360f * frac, useCenter = false,
+                            topLeft = topLeft, size = arcSize,
+                            style = Stroke(width = stroke, cap = StrokeCap.Round),
+                        )
+                    }
+                    Text(
+                        text = "${(frac * 100).toInt()}%",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.Download,
+                        contentDescription = "Unduh",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = when {
+                    failed -> "Gagal — ketuk lagi"
+                    progress != null -> "Mengunduh…"
+                    sizeText.isNotBlank() -> "$label · $sizeText"
+                    else -> label
+                },
+                color = Color.White.copy(alpha = 0.92f),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+/**
  * A chat image that shows [MediaLoadingSkeleton] while it downloads and a quiet
  * retry-able notice if it fails. Every in-message image goes through here so the
  * download feedback is identical everywhere.
+ *
+ * When auto-download is off the media is genuinely NOT fetched — see [LockedMediaCover].
+ * A manual download writes the bytes to [VideoCache] (app data, not a scratch cache),
+ * and "is it downloaded?" is answered by asking the DISK, so leaving the chat and
+ * coming back keeps every photo you paid for already open.
  */
 @Composable
 private fun ChatMediaImage(
@@ -2131,43 +2350,72 @@ private fun ChatMediaImage(
     label: String = "Foto",
 ) {
     val context = LocalContext.current
-    // Remembered per media, so a manual download sticks while the chat is open.
-    var manual by remember(model) { mutableStateOf(false) }
-    val local = model is String && !model.startsWith("http")
-    if (!autoDownload && !manual && !local) {
-        // Not downloaded yet: show the media BLURRED behind its size, so you can see
-        // roughly what it is and what it will cost before choosing to fetch it.
-        val sizeText = rememberMediaSize(model as? String)
-        Box(
-            modifier = modifier
-                .background(NexusSurface)
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                ) { manual = true },
-            contentAlignment = Alignment.Center,
+    val scope = rememberCoroutineScope()
+    val url = model as? String
+    val remote = url != null && url.startsWith("http")
+
+    // Disk is the source of truth, re-read whenever this bubble enters composition —
+    // which is what makes a manual download survive navigating away and back.
+    var localFile by remember(model) {
+        mutableStateOf(if (remote) VideoCache.cachedFile(context, url!!) else null)
+    }
+    var progress by remember(model) { mutableStateOf<Float?>(null) }
+    var failed by remember(model) { mutableStateOf(false) }
+    // Drives the unveil: 0 = frosted, 1 = fully revealed. Starts revealed for media
+    // that was already there, so only a fresh download plays the animation.
+    val reveal = remember(model) { Animatable(1f) }
+
+    if (remote && !autoDownload && localFile == null) {
+        // Asked for only on the cover — a chat full of already-visible photos should
+        // not fire a HEAD request per bubble just to learn a size nobody will read.
+        LockedMediaCover(
+            sizeText = rememberMediaSize(url),
+            label = label,
+            progress = progress,
+            failed = failed,
+            modifier = modifier,
         ) {
-            AsyncImage(
-                model = model,
-                contentDescription = null,
-                contentScale = contentScale,
-                modifier = Modifier.matchParentSize().blur(22.dp),
-            )
-            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.35f)))
-            Text(
-                text = sizeText.ifBlank { label },
-                color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-            )
+            if (progress != null) return@LockedMediaCover
+            failed = false
+            progress = 0f
+            scope.launch {
+                val file = VideoCache.fetch(context, url!!) { p -> progress = p }
+                progress = null
+                if (file == null) {
+                    failed = true
+                } else {
+                    // Frost first, THEN swap in the image, so the unveil starts from a
+                    // fully hidden frame instead of flashing the photo.
+                    reveal.snapTo(0f)
+                    localFile = file
+                    reveal.animateTo(1f, tween(520))
+                }
+            }
         }
         return
     }
+
+    // Play from the local copy when we have one: instant, offline-safe, and it can
+    // never half-load the way a re-streamed URL can.
+    val source: Any? = localFile ?: model
+    val blurRadius = ((1f - reveal.value) * 26f).dp
     SubcomposeAsyncImage(
-        model = model,
+        model = source,
         contentDescription = contentDescription,
         contentScale = contentScale,
-        modifier = modifier,
+        modifier = modifier.then(
+            if (reveal.value < 1f) {
+                Modifier
+                    .graphicsLayer {
+                        val s = 1.06f - 0.06f * reveal.value
+                        scaleX = s
+                        scaleY = s
+                    }
+                    .blur(blurRadius)
+            } else {
+                Modifier
+            },
+        ),
         loading = { MediaLoadingSkeleton(Modifier.matchParentSize()) },
         error = {
             Box(Modifier.matchParentSize().background(NexusSurface), contentAlignment = Alignment.Center) {
@@ -2177,53 +2425,124 @@ private fun ChatMediaImage(
     )
 }
 
-/** A "sekali lihat" photo placeholder — tap to open once, then locked as "Dibuka". */
+/**
+ * A "sekali lihat" photo placeholder — tap to open once, then locked as "sudah dibuka".
+ *
+ * The fetch happens **here, inside the bubble** (never out in the full-screen viewer):
+ * the bubble shows the photo's weight the way a voice note does, a tap downloads it to
+ * disk with a real progress ring around the "1", and only once the bytes are on the
+ * phone does the viewer open — which is why the reveal can no longer fail halfway.
+ *
+ * The sender cannot open what they sent. A view-once photo is spent on the recipient's
+ * screen; letting the sender re-open it forever would make "sekali lihat" a promise
+ * only one side keeps. Their bubble stays informative (it flips to "sudah dibuka" when
+ * the recipient looks) but is inert.
+ */
 @Composable
 private fun ViewOnceBubble(
     opened: Boolean,
     textColor: Color,
-    onOpen: () -> Unit,
-    /**
-     * Whether tapping still opens the photo. True for the sender — they may re-view
-     * what they sent as often as they like, even after the recipient has opened it,
-     * so their bubble is NEVER a dead, disabled label.
-     */
-    canOpen: Boolean = false,
+    /** The photo to reveal — a remote URL, or a local path for an already-cached one. */
+    media: String?,
+    /** False for the sender: the bubble renders but never opens. */
+    canOpen: Boolean,
+    onOpen: (String) -> Unit,
 ) {
-    val tapModifier = Modifier.clickable(
-        indication = null,
-        interactionSource = remember { MutableInteractionSource() },
-        onClick = onOpen,
-    )
-    // Once opened there's no icon at all — just an italic "sudah dibuka". Still
-    // tappable for the sender.
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var progress by remember(media) { mutableStateOf<Float?>(null) }
+    var failed by remember(media) { mutableStateOf(false) }
+    val remote = media != null && media.startsWith("http")
+    // Read from disk on every entry, so a photo already fetched opens instantly.
+    var localFile by remember(media) {
+        mutableStateOf(if (remote) VideoCache.cachedFile(context, media!!) else null)
+    }
+    // Only the side that can actually open it needs to know what the fetch will cost.
+    val sizeText = rememberMediaSize(if (remote && canOpen) media else null)
+    val needsFetch = remote && localFile == null
+
+    // Once opened there's no icon at all — just an italic "sudah dibuka", inert on
+    // both sides: the single view is gone.
     if (opened) {
         Text(
             text = "sudah dibuka",
             color = textColor.copy(alpha = 0.6f),
             fontSize = 14.sp,
             fontStyle = FontStyle.Italic,
-            modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .then(if (canOpen) tapModifier else Modifier)
-                .padding(vertical = 6.dp, horizontal = 4.dp),
+            modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp),
         )
         return
     }
-    // Unopened: a small SOLID ring with the "1" centred, and "Foto" beside it.
+
+    fun tap() {
+        if (!canOpen || progress != null) return
+        val src = localFile?.absolutePath ?: media?.takeIf { !remote }
+        if (src != null) { onOpen(src); return }
+        val url = media ?: run {
+            // No attachment came back with the message — say so instead of a dead tap.
+            Toast.makeText(context, "Media tidak tersedia.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        failed = false
+        progress = 0f
+        scope.launch {
+            val file = VideoCache.fetch(context, url) { p -> progress = p }
+            progress = null
+            if (file == null) {
+                failed = true
+            } else {
+                localFile = file
+                onOpen(file.absolutePath)
+            }
+        }
+    }
+
+    // Unopened: a small SOLID ring with the "1" centred, and "Foto" beside it. The
+    // ring doubles as the download meter while the bytes come in.
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
-            .then(tapModifier)
+            .then(
+                if (canOpen) {
+                    Modifier.clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = { tap() },
+                    )
+                } else {
+                    Modifier
+                },
+            )
             .padding(vertical = 6.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            modifier = Modifier
-                .size(15.dp)
-                .border(1.dp, textColor.copy(alpha = 0.85f), CircleShape),
+            modifier = Modifier.size(17.dp),
             contentAlignment = Alignment.Center,
         ) {
+            val frac by animateFloatAsState(
+                targetValue = progress ?: 0f,
+                animationSpec = tween(180),
+                label = "vo-progress",
+            )
+            Canvas(Modifier.matchParentSize()) {
+                val stroke = 1.4.dp.toPx()
+                val arcSize = androidx.compose.ui.geometry.Size(size.width - stroke, size.height - stroke)
+                val topLeft = Offset(stroke / 2f, stroke / 2f)
+                drawArc(
+                    color = textColor.copy(alpha = if (progress != null) 0.25f else 0.85f),
+                    startAngle = 0f, sweepAngle = 360f, useCenter = false,
+                    topLeft = topLeft, size = arcSize, style = Stroke(width = stroke),
+                )
+                if (progress != null) {
+                    drawArc(
+                        color = textColor,
+                        startAngle = -90f, sweepAngle = 360f * frac, useCenter = false,
+                        topLeft = topLeft, size = arcSize,
+                        style = Stroke(width = stroke, cap = StrokeCap.Round),
+                    )
+                }
+            }
             Text(
                 "1",
                 color = textColor,
@@ -2238,6 +2557,145 @@ private fun ViewOnceBubble(
         }
         Spacer(Modifier.width(7.dp))
         Text("Foto", color = textColor, fontSize = 14.sp)
+        // Weight of the photo, exactly like a voice note shows its size before you
+        // spend the data. Becomes the live percentage while it downloads.
+        val trailing = when {
+            progress != null -> "${(progress!! * 100).toInt()}%"
+            failed -> "gagal, coba lagi"
+            canOpen && needsFetch && sizeText.isNotBlank() -> sizeText
+            else -> ""
+        }
+        if (trailing.isNotEmpty()) {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = trailing,
+                color = textColor.copy(alpha = 0.65f),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+    }
+}
+
+/**
+ * What a conversation with no messages yet shows: a waving hand that sends a 👋
+ * sticker, and two small lines of text.
+ *
+ * Deliberately almost nothing. An empty thread is a blank page someone has to fill,
+ * and a big illustrated card sitting in the space where their first message goes makes
+ * that harder, not easier. The hand waves on a loop so it reads as a greeting rather
+ * than decoration, and dips when pressed so the tap connects to the sticker that lands
+ * a moment later.
+ */
+@Composable
+private fun EmptyChatPrompt(name: String, onWave: () -> Unit) {
+    val transition = rememberInfiniteTransition(label = "wave")
+    val angle by transition.animateFloat(
+        initialValue = -14f,
+        targetValue = 14f,
+        animationSpec = infiniteRepeatable(
+            tween(620, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            RepeatMode.Reverse,
+        ),
+        label = "wave-angle",
+    )
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.88f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+        label = "wave-press",
+    )
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 40.dp, vertical = 36.dp),
+    ) {
+        // The hand alone — no ring, no card. It is the only thing here you can press,
+        // so it doesn't need a container to say so.
+        Text(
+            text = "👋",
+            fontSize = 40.sp,
+            modifier = Modifier
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    rotationZ = angle
+                    // Pivot at the wrist, not the centre, or it looks like it's spinning.
+                    transformOrigin = TransformOrigin(0.5f, 0.85f)
+                }
+                .clickable(
+                    indication = null,
+                    interactionSource = interaction,
+                    onClick = onWave,
+                ),
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = if (name.isBlank()) "Ketuk untuk menyapa" else "Ketuk untuk menyapa $name",
+            color = NexusTextSecondary,
+            fontSize = 12.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "Jaga obrolan tetap ramah, ya.",
+            color = NexusTextSecondary.copy(alpha = 0.65f),
+            fontSize = 11.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * Replaces the message composer when you have blocked the person in this chat.
+ *
+ * Says plainly that sending is off, and offers "Buka blokir" right here — the block
+ * was made from their profile, but a profile you can no longer open is a poor place to
+ * put the only undo.
+ */
+@Composable
+private fun BlockedComposerBar(onUnblock: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NexusSurface)
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.Block, null,
+                tint = NexusTextSecondary, modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "Kamu memblokir kontak ini",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "Buka blokir",
+            color = NexusAccentSoft,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onUnblock,
+                )
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        )
     }
 }
 
@@ -2273,7 +2731,7 @@ private fun MessageBubble(
     translation: String? = null,
     onHideTranslation: () -> Unit = {},
     viewOnceOpened: Boolean = false,
-    onOpenViewOnce: () -> Unit = {},
+    onOpenViewOnce: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     // Stickers float free — no bubble background behind a big emoji.
@@ -2310,6 +2768,16 @@ private fun MessageBubble(
             modifier = Modifier
                 .fillMaxWidth()
                 .offset { androidx.compose.ui.unit.IntOffset(swipeX.value.toInt(), 0) }
+                // Long-press anywhere along the message's LANE, not just on the bubble
+                // itself. A short message is a small target sitting in a full-width row,
+                // and pressing the empty space beside it -- which reads as part of the
+                // same message -- used to do nothing at all.
+                .combinedClickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = {},
+                    onLongClick = onLongPress,
+                )
                 .pointerInput(msg.id) {
                     detectHorizontalDragGestures(
                         onDragEnd = {
@@ -2434,9 +2902,11 @@ private fun MessageBubble(
                     msg.viewOnce -> ViewOnceBubble(
                         opened = viewOnceOpened,
                         textColor = textColor,
+                        media = media,
+                        // Only the recipient gets the single view. The sender's own
+                        // bubble is informative but inert.
+                        canOpen = !msg.fromMe,
                         onOpen = onOpenViewOnce,
-                        // My own view-once photo stays openable forever.
-                        canOpen = msg.fromMe,
                     )
                     media != null && media.substringBefore('?').endsWith(".gif", ignoreCase = true) ->
                         // GIF: show the WHOLE thing (contain), sized to its own aspect
@@ -2696,7 +3166,12 @@ private fun AudioBubble(url: String, tint: Color) {
         // instead of a play triangle — you know what it costs before you spend it. Once
         // played (or when auto-download is on) it becomes the normal transport button.
         val sizeText = rememberMediaSize(url)
-        val showSize = !prepared && !loading && !MediaAutoDownload.voice(context) && sizeText.isNotEmpty()
+        // Playing a clip once caches it ([VideoCache]); asking the DISK — not this
+        // composable's `prepared` flag — is what keeps the button a play triangle after
+        // you leave the chat and come back, instead of reverting to "not fetched yet".
+        val cached = remember(url) { VideoCache.isCached(context, url) }
+        val showSize = !prepared && !loading && !cached &&
+            !MediaAutoDownload.voice(context) && sizeText.isNotEmpty()
         Box(
             modifier = Modifier
                 .then(if (showSize) Modifier.widthIn(min = 56.dp).height(36.dp) else Modifier.size(36.dp))
@@ -2934,7 +3409,7 @@ private fun MessageInputBar(
                     scaleX = s
                     scaleY = s
                 }
-                .background(if (hasText) NexusAccent else Color(0xFF2A2A32), RoundedCornerShape(50))
+                .background(if (hasText) NexusAccent else NexusSurfaceElevated, RoundedCornerShape(50))
                 .then(
                     if (hasText) {
                         Modifier.clickable(

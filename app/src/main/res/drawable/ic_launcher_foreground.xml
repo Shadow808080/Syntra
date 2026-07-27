@@ -1,20 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Syntra mark — ONE shape.
+
+  WHY ONE. Every icon that survives a 48dp home-screen tile is a single silhouette:
+  WhatsApp is a bubble, Telegram a plane, TikTok a note. Earlier versions of this file
+  tried to show chat, shorts and rooms all at once; three glyphs inside 108 units
+  collapse into mush the moment the launcher scales them down, and no amount of
+  rebalancing fixes a brief that asks for three ideas in a space that holds one.
+
+  So the launcher gets the bubble — chat is the app's front door — and the other two
+  products keep their place in the SPLASH, where there is room to show all three
+  assembling. Same family, different jobs.
+
+  THE S. The bubble's tail does not stop at a point: it hooks back under the body in a
+  single sweep, so the silhouette's left edge falls, curves, and returns — an S you
+  find rather than one you are shown. Nothing here is a letterform; it is the outline
+  the bubble happens to leave.
+
+  Drawn as ONE closed path (no overlapping contours) — an earlier version kept the
+  tail as a separate wedge that overlapped the body, and under nonzero winding the
+  overlap cancelled and punched a hole clean through the bubble.
+
+  Sits inside 20..88 of the 108 viewport, clear of any adaptive-icon mask.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- White chat bubble with a bottom-left tail. -->
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M42,35 L66,35 A9,9 0 0 1 75,44 L75,52 A9,9 0 0 1 66,61 L54,61 L40,73 L48,61 L42,61 A9,9 0 0 1 33,52 L33,44 A9,9 0 0 1 42,35 Z" />
-    <!-- Three message lines. -->
-    <path
-        android:fillColor="#FF3B68F5"
-        android:pathData="M42,41.8 L64,41.8 A2.2,2.2 0 0 1 64,46.2 L42,46.2 A2.2,2.2 0 0 1 42,41.8 Z" />
-    <path
-        android:fillColor="#FF6E8BFF"
-        android:pathData="M42,47.8 L59,47.8 A2.2,2.2 0 0 1 59,52.2 L42,52.2 A2.2,2.2 0 0 1 42,47.8 Z" />
-    <path
-        android:fillColor="#FF9DB2FF"
-        android:pathData="M42,53.8 L54,53.8 A2.2,2.2 0 0 1 54,58.2 L42,58.2 A2.2,2.2 0 0 1 42,53.8 Z" />
+
+    <!-- PADDING. The artwork filled the mask edge to edge, so next to every other icon
+         on the home screen it looked oversized — launchers give their icons breathing
+         room and one that ignores it reads as broken, not bold. Scaling here rather
+         than rewriting coordinates keeps ONE bubble geometry shared with the splash. -->
+    <group android:pivotX="54" android:pivotY="54" android:scaleX="0.72" android:scaleY="0.72">
+
+    <!-- The bubble, with the tail hooking back under it to leave the S in the outline. -->
+    <path android:pathData="M38,22 L70,22 C79.4,22 87,29.6 87,39 L87,55 C87,64.4 79.4,72 70,72 L57,72 C50,72 44,76 40,82 C37.6,85.6 32,84.4 32.8,79.6 C33.6,75 35.4,72.4 38,70.6 C28.4,68.4 21,60.4 21,50 L21,39 C21,29.6 28.6,22 38,22 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear"
+                android:startX="21" android:startY="22" android:endX="87" android:endY="84">
+                <item android:color="#FFFFFFFF" android:offset="0.0" />
+                <item android:color="#FFDCE8FF" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Three dots. At 48dp this is the only interior detail that survives, and it is
+         what makes the silhouette say "message" rather than "blob". -->
+    <path android:fillColor="#FF1B49C9" android:pathData="M40.5,45 m-5.2,0 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0" />
+    <path android:fillColor="#FF2E6BF0" android:pathData="M54,45 m-5.2,0 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0" />
+    <path android:fillColor="#FF4D9BFF" android:pathData="M67.5,45 m-5.2,0 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0" />
+    </group>
 </vector>

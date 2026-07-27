@@ -35,10 +35,19 @@ object AppTheme {
         OCEAN("Ocean", "Biru laut yang tenang"),
         SUNSET("Sunset", "Hangat, jingga keunguan"),
         FOREST("Forest", "Hijau teduh"),
+        CUSTOM("Custom", "Pilih warna aksenmu sendiri"),
     }
 
     private const val PREFS = "syntra_settings"
     private const val KEY = "theme_choice"
+    private const val KEY_CUSTOM = "theme_custom_accent"
+
+    /**
+     * The user's own accent, for [Choice.CUSTOM]. Compose state, so picking a colour
+     * repaints immediately instead of waiting for a restart.
+     */
+    var customAccent by mutableStateOf(Color(0xFF2E6BF0))
+        private set
 
     var current by mutableStateOf(Choice.MIDNIGHT)
         private set
@@ -114,6 +123,7 @@ object AppTheme {
             online = Color(0xFF35C88A),
             isDark = true,
         )
+        Choice.CUSTOM -> customPalette(customAccent)
         Choice.FOREST -> Palette(
             background = Color(0xFF0E1712),
             surface = Color(0xFF14211A),
@@ -130,8 +140,54 @@ object AppTheme {
         )
     }
 
+    /**
+     * Builds a palette around an arbitrary accent, on the dark base.
+     *
+     * Only the accent family moves. Letting a user recolour surfaces and text is how
+     * you end up with unreadable combinations they cannot undo; the accent is the one
+     * colour that is decorative everywhere it appears, so it is the only one exposed.
+     * [accentSoft] is a lightened sibling, derived rather than picked, so the pair
+     * always has a sensible relationship.
+     */
+    private fun customPalette(accent: Color): Palette {
+        val soft = Color(
+            red = accent.red + (1f - accent.red) * 0.38f,
+            green = accent.green + (1f - accent.green) * 0.38f,
+            blue = accent.blue + (1f - accent.blue) * 0.38f,
+        )
+        return Palette(
+            background = Color(0xFF0B0B10),
+            surface = Color(0xFF14141B),
+            surfaceElevated = Color(0xFF1B1B24),
+            search = Color(0xFF101016),
+            stroke = Color(0xFF222230),
+            textPrimary = Color(0xFFF4F4F8),
+            textSecondary = Color(0xFF8A8A9A),
+            accent = accent,
+            accentSoft = soft,
+            ring = soft,
+            online = Color(0xFF23C55E),
+            isDark = true,
+        )
+    }
+
+    /** Store a new custom accent and switch to it. */
+    fun selectCustom(context: Context, accent: Color) {
+        customAccent = accent
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putLong(KEY_CUSTOM, accent.value.toLong())
+            .putString(KEY, Choice.CUSTOM.name)
+            .apply()
+        apply(Choice.CUSTOM)
+    }
+
     /** Reads the saved choice and paints it. Call once at start-up. */
     fun load(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // The accent has to be restored BEFORE apply(), or a CUSTOM theme repaints
+        // with the default blue on every launch.
+        val saved = prefs.getLong(KEY_CUSTOM, 0L)
+        if (saved != 0L) customAccent = Color(saved.toULong())
         val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
         // Default is Midnight (pure-black OLED) when the user hasn't picked a theme.
         val choice = Choice.entries.firstOrNull { it.name == name } ?: Choice.MIDNIGHT

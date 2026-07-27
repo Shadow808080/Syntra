@@ -76,6 +76,15 @@ object VideoCache {
         url
     }
 
+    /**
+     * True when [url] already has a complete local copy (or isn't remote at all, in
+     * which case there is nothing to download). This is what a chat bubble asks to
+     * know whether its media is "already on this phone" — and because the answer
+     * lives on disk, it survives leaving and re-entering the chat.
+     */
+    fun isCached(context: Context, url: String): Boolean =
+        !url.startsWith("http") || cachedFile(context, url) != null
+
     /** Warms the cache for [url] in the background. Silent & deduped. */
     fun prefetch(context: Context, url: String) {
         if (!url.startsWith("http")) return
@@ -90,7 +99,39 @@ object VideoCache {
         }
     }
 
-    private fun download(context: Context, url: String): Boolean {
+    /**
+     * Downloads [url] and returns its local file, or null when the fetch failed.
+     *
+     * This is the **manual download** path: unlike [prefetch] it awaits the result and
+     * reports real byte progress (0f..1f) through [onProgress], so a bubble can show
+     * an honest ring instead of a guessed ETA. Progress is only meaningful when the
+     * server sends a Content-Length; without one the callback simply never fires and
+     * the caller falls back to indeterminate feedback.
+     */
+    suspend fun fetch(
+        context: Context,
+        url: String,
+        onProgress: (Float) -> Unit = {},
+    ): File? = withContext(Dispatchers.IO) {
+        if (!url.startsWith("http")) return@withContext null
+        val app = context.applicationContext
+        cachedFile(app, url)?.let { return@withContext it }
+        val lock = locks.getOrPut(url) { Mutex() }
+        lock.withLock {
+            cachedFile(app, url)?.let { return@withLock it }
+            if (runCatching { download(app, url, onProgress) }.getOrDefault(false)) {
+                cachedFile(app, url)
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun download(
+        context: Context,
+        url: String,
+        onProgress: (Float) -> Unit = {},
+    ): Boolean {
         val target = File(dir(context), keyFor(url))
         val part = File(target.absolutePath + ".part")
         var conn: HttpURLConnection? = null
@@ -105,7 +146,27 @@ object VideoCache {
             }
             val expected = conn.contentLengthLong // -1 if unknown
             conn.inputStream.use { input ->
-                part.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
+                part.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var copied = 0L
+                    // Only report whole percentage points — a big file would otherwise
+                    // wake the UI hundreds of times for movement no one can see.
+                    var lastPercent = -1
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        copied += read
+                        if (expected > 0) {
+                            val frac = (copied.toFloat() / expected).coerceIn(0f, 1f)
+                            val percent = (frac * 100).toInt()
+                            if (percent != lastPercent) {
+                                lastPercent = percent
+                                onProgress(frac)
+                            }
+                        }
+                    }
+                }
             }
             // Reject a truncated download: a half-written file cached as complete is
             // exactly what made media fail with no error.

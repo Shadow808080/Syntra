@@ -93,6 +93,7 @@ import kotlin.math.roundToInt
 import com.example.syntra.net.AudioTrimmer
 import com.example.syntra.net.MusicAlbum
 import com.example.syntra.net.MusicArtist
+import com.example.syntra.net.LikedMusicStore
 import com.example.syntra.net.MusicBrowse
 import com.example.syntra.net.MusicClient
 import com.example.syntra.net.MusicPlayer
@@ -334,6 +335,10 @@ fun MusicScreen(
                     onOpenPlaylist = { detail = MusicDetail.Playlist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
+                    // An artist chip drops you into search for that name — the liked
+                    // list only knows the artist's name, not the catalogue id needed
+                    // to open their page directly.
+                    onSearchArtist = { name -> query = name; searching = true },
                 )
             }
         }
@@ -488,11 +493,42 @@ private fun MusicBrowseBody(
     onOpenPlaylist: (MusicPlaylist) -> Unit,
     onOpenAlbum: (MusicAlbum) -> Unit,
     onOpenArtist: (MusicArtist) -> Unit,
+    onSearchArtist: (String) -> Unit = {},
 ) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) { LikedMusicStore.ensure(context) }
+    val liked = LikedMusicStore.tracks
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 6.dp, bottom = 150.dp),
     ) {
+        // Quick access, right at the top: the music you already told us you like.
+        // Everything below this point is someone else's idea of what to play — this
+        // row is the only part of the screen that is yours, so it goes first.
+        if (liked.isNotEmpty()) {
+            item {
+                QuickAccessRow(
+                    liked = liked,
+                    artists = LikedMusicStore.topArtists(context),
+                    onPlayLiked = { onPlay(liked.first(), liked.toList()) },
+                    onShuffleLiked = { onPlay(liked.random(), liked.shuffled()) },
+                    onArtist = onSearchArtist,
+                )
+            }
+            item { SectionHeader("Lagu yang disukai") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(liked, key = { "liked_${it.id}" }) { t ->
+                        TrackCard(t) { onPlay(t, liked.toList()) }
+                    }
+                }
+            }
+        }
+
         // Device music — the user's own files, always first. No section header/title
         // anymore: the add-from-storage banner IS the entry point (its "+" sits at the
         // start), and it stays put whether or not the user has added tracks yet.
@@ -571,6 +607,134 @@ private fun MusicBrowseBody(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * The quick-access strip: two big actions over your liked songs, then a chip per
+ * artist you like most.
+ *
+ * Deliberately derived rather than curated — the app has no playlist feature, so the
+ * only honest categories are the ones your own likes describe. An artist chip searches
+ * for them, which is the fastest route back to "more of this".
+ */
+@Composable
+private fun QuickAccessRow(
+    liked: List<MusicTrack>,
+    artists: List<String>,
+    onPlayLiked: () -> Unit,
+    onShuffleLiked: () -> Unit,
+    onArtist: (String) -> Unit,
+) {
+    Column(modifier = Modifier.padding(top = 10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            QuickTile(
+                title = "Disukai",
+                subtitle = "${liked.size} lagu",
+                icon = Icons.Filled.Favorite,
+                accent = NexusAccent,
+                modifier = Modifier.weight(1f),
+                onClick = onPlayLiked,
+            )
+            QuickTile(
+                title = "Acak",
+                subtitle = "Dari lagu sukaanmu",
+                icon = Icons.Filled.Shuffle,
+                accent = ShortsTealMusic,
+                modifier = Modifier.weight(1f),
+                onClick = onShuffleLiked,
+            )
+        }
+        if (artists.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(artists, key = { "likedartist_$it" }) { name ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.White.copy(alpha = 0.07f))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { onArtist(name) }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.MusicNote, null,
+                            tint = NexusAccentSoft, modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            name,
+                            color = NexusTextPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private val ShortsTealMusic = Color(0xFF20D5C4)
+
+@Composable
+private fun QuickTile(
+    title: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .background(accent.copy(alpha = 0.9f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, null, tint = Color.White, modifier = Modifier.size(19.dp))
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                color = NexusTextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
+            Text(
+                subtitle,
+                color = NexusTextSecondary,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -1449,7 +1613,12 @@ fun NowPlayingScreen(onClose: () -> Unit) {
     if (track == null) { onClose(); return }
     BackHandler(onBack = onClose)
     val context = LocalContext.current
-    var liked by remember(track.id) { mutableStateOf(false) }
+    // Reads the real store, so the heart shows the truth when you come back to a track
+    // instead of resetting to empty — and so "Disukai" on the home has something in it.
+    // Loaded here too: now-playing can be reached from the mini-player without the
+    // music home ever having been opened.
+    LaunchedEffect(Unit) { LikedMusicStore.ensure(context) }
+    val liked = LikedMusicStore.tracks.any { it.id == track.id }
 
     LaunchedEffect(MusicPlayer.isPlaying, track.id) {
         while (MusicPlayer.isPlaying) { MusicPlayer.tick(); delay(200) }
@@ -1516,7 +1685,7 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                     icon = if (liked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                     size = 44.dp, iconSize = 26.dp,
                     tint = if (liked) NexusAccentSoft else Color.White,
-                ) { liked = !liked }
+                ) { LikedMusicStore.toggle(context, track) }
             }
             Spacer(Modifier.height(18.dp))
             NowPlayingSeekBar()

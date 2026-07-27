@@ -109,6 +109,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
@@ -136,7 +137,10 @@ import com.example.syntra.net.NetReel
 import com.example.syntra.net.NetReelComment
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
+import com.example.syntra.net.BlockStore
 import com.example.syntra.net.ReelCache
+import com.example.syntra.net.ShortsFeedCache
+import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
@@ -146,6 +150,8 @@ import com.example.syntra.ui.theme.NexusTextSecondary
 import com.example.syntra.ui.theme.SyntraTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -154,7 +160,7 @@ import kotlinx.coroutines.withContext
 // Shorts / Reels — a chronological, vertically-swiped video feed (docs/api.md).
 // ---------------------------------------------------------------------------
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
 fun ShortsScreen(
     modifier: Modifier = Modifier,
@@ -182,16 +188,27 @@ fun ShortsScreen(
         com.example.syntra.net.AppForeground.inShorts = visible
         onDispose { com.example.syntra.net.AppForeground.inShorts = false }
     }
-    // Seed from the in-memory feed cache so RE-ENTERING Shorts is instant — the list
-    // and scroll position survive the tab being disposed (the home stays light with
-    // beyondViewportPageCount=1, but Shorts no longer "reloads from scratch"). Videos
-    // themselves already come from VideoCache on disk; this just avoids the empty-list
-    // spinner + refetch every time you come back.
-    val reels = remember { mutableStateListOf<NetReel>().also { it.addAll(ShortsFeedCache.reels) } }
-    var loading by remember { mutableStateOf(ShortsFeedCache.reels.isEmpty()) }
-    // Persist the feed to the cache whenever it changes, so the next entry is seeded.
+    // Leaving Shorts entirely gives the pooled players back. Switching tabs does NOT
+    // come through here — the pages release their players to the pool on their own and
+    // an idle player holds no codec, so returning to the feed stays instant.
+    DisposableEffect(Unit) {
+        onDispose { com.example.syntra.net.ReelPlayerPool.releaseAll() }
+    }
+    // Seed from the feed cache so entering Shorts is instant — from memory on a tab
+    // switch, and from DISK on a cold start, which is the case that used to mean a
+    // spinner and a full round-trip before the first video existed. Videos themselves
+    // already come off disk via ReelCache; this is about the list.
+    val reels = remember {
+        ShortsFeedCache.warm(context)
+        mutableStateListOf<NetReel>().also { it.addAll(ShortsFeedCache.reels) }
+    }
+    var loading by remember { mutableStateOf(reels.isEmpty()) }
+    // Persist whenever the feed changes, so the next launch is seeded. Debounced: the
+    // list churns during a sync and there's no reason to rewrite the file each time.
     LaunchedEffect(Unit) {
-        snapshotFlow { reels.toList() }.collect { ShortsFeedCache.reels = it }
+        snapshotFlow { reels.toList() }
+            .debounce(500)
+            .collect { ShortsFeedCache.persist(context, it) }
     }
     var refreshing by remember { mutableStateOf(false) }
     var posting by remember { mutableStateOf(false) }
@@ -232,10 +249,18 @@ fun ShortsScreen(
     var showFollowing by remember { mutableStateOf(false) }
     val displayReels by remember {
         derivedStateOf {
+            // distinctBy is the last line of defence: the pager keys pages by reel id,
+            // and a single repeated id from the feed endpoint (paging overlap) crashes
+            // the whole screen with "Key … was already used". Never trust the list.
+            // Blocked creators are dropped here so their reels never reach the pager.
+            val base = reels.filterNot {
+                BlockStore.isBlocked(context, username = it.creatorUsername, userId = it.authorId)
+            }
             if (showFollowing) {
-                reels.filter { it.isFollowing && it.authorId != SyntraClient.myUserId }
+                base.filter { it.isFollowing && it.authorId != SyntraClient.myUserId }
+                    .distinctBy { it.id }
             } else {
-                reels.toList()
+                base.distinctBy { it.id }
             }
         }
     }
@@ -249,7 +274,7 @@ fun ShortsScreen(
         try {
             val list = SyntraClient.getReels()
             reels.clear()
-            reels.addAll(list)
+            reels.addAll(list.distinctBy { it.id })
         } catch (c: CancellationException) {
             // Switching tabs cancels this load mid-flight — that's normal, not a
             // failure. Re-throw so cancellation propagates; DON'T show a toast or
@@ -275,7 +300,7 @@ fun ShortsScreen(
         // differs, so counters updated live aren't clobbered.
         val currentPageId = displayReels.getOrNull(pager.currentPage)?.id
         reels.clear()
-        reels.addAll(fresh)
+        reels.addAll(fresh.distinctBy { it.id })
         // Re-anchor to the reel we were on, if it still exists.
         if (currentPageId != null) {
             val idx = reels.indexOfFirst { it.id == currentPageId }
@@ -374,6 +399,13 @@ fun ShortsScreen(
         onOverlayChange(pendingVideo != null || openProfileUser != null)
     }
 
+    // Is the feed the thing the user is actually looking at? A profile or a deep-linked
+    // reel is drawn OVER the still-composed pager, so without this the reel underneath
+    // kept playing — audible behind someone's profile — and, worse, kept its decoder
+    // while the overlay's own player wanted one. Cheap phones have very few decoders to
+    // go around, so nothing below the top surface is allowed to hold one.
+    val feedOnTop = visible && openProfileUser == null && deepLinkReel == null
+
     // The add-reels flow is its OWN full screen: trim → details. While it is up we
     // do NOT compose the feed at all — the reel video surface leaves the
     // composition entirely, so it can never bleed over or fight the preview.
@@ -462,10 +494,14 @@ fun ShortsScreen(
                     displayReels.getOrNull(pager.currentPage)?.let { r ->
                         SyntraClient.fireAndForget { SyntraClient.viewReel(r.id) }
                     }
-                    // Warm the next reel so it's already on disk (and free to
-                    // replay) by the time it scrolls into view.
-                    displayReels.getOrNull(pager.currentPage + 1)?.mediaUrl?.let {
-                        ReelCache.prefetch(context, it)
+                    // Warm the next two reels so they're already on disk (and free to
+                    // replay) by the time they scroll into view. Two, not one: a fast
+                    // scroller outruns a single-page lookahead, and the reel after next
+                    // is the one that would otherwise buffer from scratch.
+                    for (ahead in 1..2) {
+                        displayReels.getOrNull(pager.currentPage + ahead)?.mediaUrl?.let {
+                            ReelCache.prefetch(context, it)
+                        }
                     }
                 }
                 // Swipe down on the first reel to reload the feed.
@@ -483,16 +519,24 @@ fun ShortsScreen(
                     VerticalPager(
                         state = pager,
                         modifier = Modifier.fillMaxSize(),
-                        // Keeping neighbours composed meant three MediaPlayers
-                        // buffering video at once, which is what made the feed
-                        // feel heavy. Only the reel on screen holds a player.
-                        beyondViewportPageCount = 0,
+                        // The neighbour IS composed now, so its caption, avatar and
+                        // action rail are already measured when you swipe — that
+                        // layout pass was a visible hitch on a slow phone. What used
+                        // to make this expensive (a second video decoding alongside
+                        // the first) is handled by `prewarm` instead: only the current
+                        // page and the NEXT one hold a decoder, and only the current
+                        // one actually plays.
+                        beyondViewportPageCount = 1,
                     ) { page ->
                         val reel = displayReels.getOrNull(page) ?: return@VerticalPager
                         ReelPage(
                             reel = reel,
-                            // Play only the reel in view *and* only while the tab is shown.
-                            active = visible && page == pager.currentPage,
+                            // Play only the reel in view *and* only while the feed is
+                            // the top-most thing on screen.
+                            active = feedOnTop && page == pager.currentPage,
+                            // Prepare the one you're about to swipe onto, so it is
+                            // already showing its first frame when it arrives.
+                            prewarm = feedOnTop && page in pager.currentPage..(pager.currentPage + 1),
                             // Deleting reels lives in Settings › Profil now, not on the
                             // feed — so no delete affordance here.
                             onDelete = null,
@@ -667,7 +711,7 @@ private fun DeleteReelDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
                 Spacer(Modifier.width(6.dp))
                 Box(
                     modifier = Modifier
-                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .background(DangerFill, RoundedCornerShape(50))
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
@@ -694,6 +738,8 @@ private val ReelBottomScrim = Brush.verticalGradient(listOf(Color.Transparent, C
 private fun ReelPage(
     reel: NetReel,
     active: Boolean,
+    /** Hold a prepared decoder — see [ReelVideo]'s `prewarm`. */
+    prewarm: Boolean = active,
     onLike: () -> Unit,
     onComment: () -> Unit,
     onSave: () -> Unit = {},
@@ -723,6 +769,7 @@ private fun ReelPage(
         ReelVideo(
             url = reel.mediaUrl,
             playing = active && !paused && !scrubbing,
+            prewarm = prewarm,
             modifier = Modifier.fillMaxSize(),
             loop = !autoScroll,
             seekToMs = seekReq,
@@ -1021,6 +1068,13 @@ private fun ReelVideo(
     url: String,
     playing: Boolean,
     modifier: Modifier = Modifier,
+    /**
+     * Hold a decoder for this page. True for the reel on screen AND the next one, so
+     * the next swipe finds a player that is already prepared and showing its first
+     * frame. False releases the player back to the pool — a page three swipes away
+     * keeps its layout but costs nothing.
+     */
+    prewarm: Boolean = true,
     /** Loop forever (true) vs play once then fire [onEnded] (used for auto-scroll). */
     loop: Boolean = true,
     /** When this changes to a non-null value, seek there (ms). Drives the scrubber. */
@@ -1048,54 +1102,73 @@ private fun ReelVideo(
     val onEndedLatest by rememberUpdatedState(onEnded)
     val onDurationLatest by rememberUpdatedState(onDuration)
 
-    // One ExoPlayer per url, playing THROUGH the shared cache: the first view streams
-    // and fills the cache in the SAME pass (download-once, no separate stream+prefetch
-    // double fetch), and replays read from disk. Surface swaps on scroll are handled by
-    // ExoPlayer itself, so the old MediaPlayer black-frame re-attach dance is gone.
-    val player = remember(url) {
-        androidx.media3.exoplayer.ExoPlayer.Builder(context)
-            .setMediaSourceFactory(
-                androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
-                    com.example.syntra.net.ReelCache.dataSourceFactory(context),
-                ),
-            )
-            .build().apply {
-                setMediaItem(androidx.media3.common.MediaItem.fromUri(url))
-                repeatMode = if (loopLatest) {
-                    androidx.media3.common.Player.REPEAT_MODE_ONE
-                } else {
-                    androidx.media3.common.Player.REPEAT_MODE_OFF
-                }
-                addListener(object : androidx.media3.common.Player.Listener {
-                    override fun onVideoSizeChanged(size: androidx.media3.common.VideoSize) {
-                        videoW = size.width
-                        videoH = size.height
-                    }
+    // The TextureView's surface, held in state so it can be handed to whichever player
+    // this page currently owns — and, unlike before, actually RELEASED when the view
+    // goes away. Every `Surface(st)` that was never released leaked a graphics buffer;
+    // a few dozen swipes of that is exactly how a cheap phone runs out of them.
+    var surface by remember { mutableStateOf<Surface?>(null) }
 
-                    override fun onPlaybackStateChanged(state: Int) {
-                        when (state) {
-                            androidx.media3.common.Player.STATE_READY -> {
-                                ready = true
-                                onDurationLatest(duration.coerceAtLeast(0L).toInt())
-                            }
-                            // Only meaningful when NOT looping — the "finished" signal the
-                            // feed uses to auto-advance to the next reel.
-                            androidx.media3.common.Player.STATE_ENDED ->
-                                if (!loopLatest) onEndedLatest()
-                        }
-                    }
+    // The player is borrowed from [ReelPlayerPool] rather than built here, and only
+    // while this page is on screen or immediately next ([prewarm]). Pages further away
+    // hold no decoder at all — which is what lets the neighbour stay composed (so its
+    // caption/buttons are already laid out) without three videos fighting for codecs.
+    var player by remember(url) { mutableStateOf<androidx.media3.exoplayer.ExoPlayer?>(null) }
 
-                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                        failed = true
-                    }
-                })
-                prepare()
+    DisposableEffect(url, prewarm) {
+        if (!prewarm) return@DisposableEffect onDispose { }
+        val p = com.example.syntra.net.ReelPlayerPool.acquire(context)
+        val listener = object : androidx.media3.common.Player.Listener {
+            override fun onVideoSizeChanged(size: androidx.media3.common.VideoSize) {
+                videoW = size.width
+                videoH = size.height
             }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                when (state) {
+                    androidx.media3.common.Player.STATE_READY -> {
+                        ready = true
+                        onDurationLatest(p.duration.coerceAtLeast(0L).toInt())
+                    }
+                    // Only meaningful when NOT looping — the "finished" signal the
+                    // feed uses to auto-advance to the next reel.
+                    androidx.media3.common.Player.STATE_ENDED ->
+                        if (!loopLatest) onEndedLatest()
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                failed = true
+            }
+        }
+        p.addListener(listener)
+        p.setMediaItem(androidx.media3.common.MediaItem.fromUri(url))
+        p.repeatMode = if (loopLatest) {
+            androidx.media3.common.Player.REPEAT_MODE_ONE
+        } else {
+            androidx.media3.common.Player.REPEAT_MODE_OFF
+        }
+        // Prepared but NOT started. ExoPlayer renders the first frame onto the surface
+        // as soon as it has one, so by the time this page is swiped to, the picture is
+        // already sitting there — no shimmer, no black flash, just play.
+        p.prepare()
+        player = p
+        onDispose {
+            p.removeListener(listener)
+            player = null
+            ready = false
+            com.example.syntra.net.ReelPlayerPool.recycle(p)
+        }
+    }
+
+    // Attach the surface to whichever player is current — either can arrive first.
+    LaunchedEffect(player, surface) {
+        val p = player ?: return@LaunchedEffect
+        runCatching { p.setVideoSurface(surface) }
     }
 
     // Keep looping in sync if the setting flips while a reel is on screen.
-    LaunchedEffect(loop) {
-        player.repeatMode = if (loop) {
+    LaunchedEffect(loop, player) {
+        player?.repeatMode = if (loop) {
             androidx.media3.common.Player.REPEAT_MODE_ONE
         } else {
             androidx.media3.common.Player.REPEAT_MODE_OFF
@@ -1106,20 +1179,19 @@ private fun ReelVideo(
     // dragging shows a precise frame while paused instead of jumping to a keyframe.
     LaunchedEffect(seekToMs) {
         val ms = seekToMs ?: return@LaunchedEffect
-        if (ready) runCatching { player.seekTo(ms.toLong()) }
+        if (ready) runCatching { player?.seekTo(ms.toLong()) }
     }
 
-    // Feed the scrubber: sample the real playback position while it plays.
-    LaunchedEffect(ready, playing) {
-        if (!ready) return@LaunchedEffect
+    // Feed the scrubber: sample the real playback position while it plays. Gated on
+    // `playing` so a paused or off-screen page isn't waking up five times a second
+    // to report a position that hasn't moved.
+    LaunchedEffect(ready, playing, player) {
+        val p = player ?: return@LaunchedEffect
+        if (!ready || !playing) return@LaunchedEffect
         while (true) {
-            if (playing) onPosition(runCatching { player.currentPosition.toInt() }.getOrDefault(0))
+            onPosition(runCatching { p.currentPosition.toInt() }.getOrDefault(0))
             delay(200)
         }
-    }
-
-    DisposableEffect(url) {
-        onDispose { runCatching { player.release() } }
     }
 
     BoxWithConstraints(modifier = modifier.clipToBounds(), contentAlignment = Alignment.Center) {
@@ -1143,12 +1215,17 @@ private fun ReelVideo(
                 TextureView(ctx).apply {
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                            player.setVideoSurface(Surface(st))
+                            surface = Surface(st)
                         }
 
                         override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) = Unit
                         override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                            player.clearVideoSurface()
+                            // Drop it from the player FIRST, then release the buffer —
+                            // the other order hands ExoPlayer a dead surface.
+                            surface?.let { old ->
+                                surface = null
+                                runCatching { old.release() }
+                            }
                             return true
                         }
                         override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
@@ -1163,14 +1240,25 @@ private fun ReelVideo(
                 },
         )
 
-        if (!ready) {
+        if (!ready && !prewarm) {
+            // An off-screen page that holds no decoder: plain black. Running a
+            // breathing shimmer here would keep an animation clock ticking for a page
+            // nobody is looking at.
+            Box(Modifier.fillMaxSize().background(Color.Black))
+        } else if (!ready) {
             // A soft breathing placeholder fills the frame while the video buffers,
-            // so the screen never shows a black void during load.
+            // so the screen never shows a black void during load. The spinner is held
+            // back briefly: with a prewarmed player most reels are ready well inside
+            // that window, and flashing a spinner for 200 ms reads as jank, not speed.
             ShimmerFill(Modifier.fillMaxSize())
-            if (failed) {
-                Text("Video gagal dimuat", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
-            } else {
-                CircularProgressIndicator(color = Color.White.copy(alpha = 0.7f), strokeWidth = 2.dp)
+            var showSpinner by remember(url) { mutableStateOf(false) }
+            LaunchedEffect(url) { delay(350); showSpinner = true }
+            when {
+                failed -> Text("Video gagal dimuat", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+                showSpinner -> CircularProgressIndicator(
+                    color = Color.White.copy(alpha = 0.7f),
+                    strokeWidth = 2.dp,
+                )
             }
         }
     }
@@ -1178,9 +1266,9 @@ private fun ReelVideo(
     // Play/pause follows the current page and the tap-to-pause toggle. ExoPlayer
     // honours playWhenReady even before it's buffered, so no `ready` gate is needed —
     // it starts the instant it can.
-    LaunchedEffect(playing) {
+    LaunchedEffect(playing, player) {
         if (playing) com.example.syntra.net.MusicPlayer.pauseForExternalAudio() // don't talk over music
-        runCatching { player.playWhenReady = playing }
+        runCatching { player?.playWhenReady = playing }
     }
 }
 
@@ -1244,11 +1332,13 @@ fun ReelViewer(
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        VerticalPager(state = pager, beyondViewportPageCount = 0, modifier = Modifier.fillMaxSize()) { page ->
+        // Same prewarm shape as the main feed — see the pager there for the reasoning.
+        VerticalPager(state = pager, beyondViewportPageCount = 1, modifier = Modifier.fillMaxSize()) { page ->
             val reel = items[page]
             ReelPage(
                 reel = reel,
                 active = page == pager.currentPage,
+                prewarm = page in pager.currentPage..(pager.currentPage + 1),
                 onLike = { toggleLike(reel) },
                 onComment = { commentsFor = reel },
                 onSave = { toggleSave(reel) },
@@ -1300,11 +1390,6 @@ fun ReelViewer(
  * light by NOT keeping Shorts composed off-screen (MainTabs beyondViewportPageCount=1),
  * so this holds the last feed + is re-seeded on the next entry. Cleared on sign-out.
  */
-object ShortsFeedCache {
-    var reels: List<NetReel> = emptyList()
-    fun clear() { reels = emptyList() }
-}
-
 private val ShortsTeal = Color(0xFF20D5C4)
 
 /**
@@ -1701,14 +1786,16 @@ private fun ShortsHeader(
         ) {
             Icon(Icons.Rounded.Add, "Unggah", tint = Color(0xFF0A1414), modifier = Modifier.size(26.dp))
         }
-        // Center: Following / For You tabs.
+        // Centre: the two feeds. Indonesian, because every other label in the app is
+        // ("Untuk Kamu" / "Mengikuti") — an English pair here read as a leftover from
+        // a different product.
         Row(
             modifier = Modifier.align(Alignment.Center),
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(22.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            ShortsTab("Following", active = following) { onSelectFollowing(true) }
-            ShortsTab("For You", active = !following) { onSelectFollowing(false) }
+            ShortsTab("Mengikuti", active = following) { onSelectFollowing(true) }
+            ShortsTab("Untuk Kamu", active = !following) { onSelectFollowing(false) }
         }
         // Right: search.
         Icon(
@@ -1724,26 +1811,58 @@ private fun ShortsHeader(
 
 @Composable
 private fun ShortsTab(text: String, active: Boolean, onClick: () -> Unit) {
+    // Everything animates rather than snaps. The old tab jumped 15sp -> 18sp on
+    // selection, which shoved its neighbour sideways on every tap — the row visibly
+    // reflowed each time you switched feed.
+    val alpha by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (active) 1f else 0.6f,
+        animationSpec = tween(220),
+        label = "tab-alpha",
+    )
+    val underline by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (active) 1f else 0f,
+        animationSpec = tween(220),
+        label = "tab-underline",
+    )
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.clickable(
-            indication = null,
-            interactionSource = remember { MutableInteractionSource() },
-            onClick = onClick,
-        ),
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 6.dp, vertical = 4.dp),
     ) {
         Text(
             text = text,
-            color = if (active) Color.White else Color.White.copy(alpha = 0.55f),
-            fontSize = if (active) 18.sp else 15.sp,
+            // ONE size for both states — weight and opacity carry the selection, so
+            // the label never changes width and the row never reflows.
+            color = Color.White.copy(alpha = alpha),
+            fontSize = 16.sp,
             fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+            maxLines = 1,
+            // A soft shadow so white text stays readable over a bright video frame.
+            style = androidx.compose.ui.text.TextStyle(
+                shadow = androidx.compose.ui.graphics.Shadow(
+                    color = Color.Black.copy(alpha = 0.55f),
+                    offset = Offset(0f, 1f),
+                    blurRadius = 6f,
+                ),
+            ),
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(5.dp))
+        // The underline grows out of the centre instead of blinking on.
         Box(
             modifier = Modifier
-                .width(24.dp)
-                .height(3.dp)
-                .background(if (active) ShortsTeal else Color.Transparent, RoundedCornerShape(50)),
+                .graphicsLayer {
+                    scaleX = underline
+                    this.alpha = underline
+                }
+                .width(20.dp)
+                .height(2.5.dp)
+                .background(ShortsTeal, RoundedCornerShape(50)),
         )
     }
 }

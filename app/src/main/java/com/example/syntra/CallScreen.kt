@@ -82,8 +82,10 @@ import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.CallEngine
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
+import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
+import com.example.syntra.ui.theme.NexusOnline
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import io.livekit.android.renderer.TextureViewRenderer
@@ -125,38 +127,199 @@ object CallController {
     var minimized by mutableStateOf(false)
         private set
 
+    /**
+     * The call is ringing as a small banner rather than a full screen.
+     *
+     * Set when a call arrives while the user is inside a voice room. Nothing about the
+     * call itself is different — it simply has not been allowed to take the screen
+     * away from the room yet. Answering clears this and the normal call UI takes over;
+     * declining ends it and the room is never interrupted.
+     */
+    var compact by mutableStateOf(false)
+        private set
+
+    /**
+     * Raised the moment a compact call is ACCEPTED, so the room screen can bow out
+     * cleanly (leave the SFU, tell the backend) before the call grabs the audio
+     * device. Two live audio sessions at once is how you get a call with no sound.
+     */
+    var leaveRoomForCall by mutableStateOf(false)
+
     val isBusy: Boolean get() = call != null
 
     fun startOutgoing(conversationId: String, peerName: String, peerId: String, video: Boolean) {
         if (call != null) return
         call = CallDescriptor(conversationId, peerName, peerId, video, incoming = false, incomingCallId = null)
         minimized = false
+        compact = false
     }
 
-    fun incoming(conversationId: String, peerName: String, peerId: String, video: Boolean, callId: String) {
+    fun incoming(
+        conversationId: String,
+        peerName: String,
+        peerId: String,
+        video: Boolean,
+        callId: String,
+        /** True to ring as a banner instead of taking the screen — see [compact]. */
+        asBanner: Boolean = false,
+    ) {
         if (call != null) return
         call = CallDescriptor(conversationId, peerName, peerId, video, incoming = true, incomingCallId = callId)
         minimized = false
+        compact = asBanner
+    }
+
+    /** Banner "answer": promote to the full call and ask the room to stand down. */
+    fun acceptCompact() {
+        if (!compact) return
+        compact = false
+        leaveRoomForCall = true
     }
 
     fun minimize() { if (call != null) minimized = true }
     fun expand() { minimized = false }
-    fun end() { call = null; minimized = false }
+    fun end() {
+        call = null
+        minimized = false
+        compact = false
+        leaveRoomForCall = false
+    }
 }
 
 private enum class CallPhase { INCOMING, CONNECTING, RINGING, ONGOING, ENDED }
 
 private val callBackdrop = listOf(Color(0xFF141726), Color(0xFF0B0C14))
-private val callAvatarGradient = listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5))
+private val callAvatarGradient = listOf(Color(0xFF2E6BF0), Color(0xFF3B68F5))
 
 /** Renders the current call, if any. Mount once at the app root, above everything. */
 @Composable
 fun CallHost() {
     val descriptor = CallController.call ?: return
+    // Ringing inside a voice room: a banner, not a takeover. The room keeps its
+    // screen and its audio until the user actually chooses the call.
+    if (CallController.compact) {
+        IncomingCallBanner(descriptor)
+        return
+    }
     // Key on the instance so a brand-new call rebuilds all call state from scratch
     // (a re-used descriptor with equal fields must NOT keep the old phase/timer).
     key(descriptor) {
         CallSession(descriptor)
+    }
+}
+
+/**
+ * The small "someone is calling" strip shown while the user is in a voice room.
+ *
+ * Everything a full call screen would say, in one row: who, what kind, and the two
+ * answers. It sits under the status bar so it never covers the room's own controls,
+ * and it pulses gently so it is noticeable without being a modal.
+ *
+ * Declining hangs up properly (the caller stops ringing) rather than just dismissing
+ * the banner locally — a silently-ignored call is worse than a rejected one.
+ */
+@Composable
+private fun IncomingCallBanner(d: CallDescriptor) {
+    val pulse = rememberInfiniteTransition(label = "ring-banner")
+    val glow by pulse.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(tween(850), RepeatMode.Reverse),
+        label = "ring-glow",
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(Color(0xFF16161E).copy(alpha = 0.97f))
+                .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
+                .padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(NexusAccent.copy(alpha = glow)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    if (d.video) Icons.Rounded.Videocam else Icons.Rounded.Call,
+                    null,
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = d.peerName.ifBlank { "Panggilan masuk" },
+                    color = NexusTextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (d.video) "Panggilan video masuk" else "Panggilan suara masuk",
+                    color = NexusTextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            // Decline.
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(DangerFill)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) {
+                        val id = d.incomingCallId
+                        if (!id.isNullOrBlank()) {
+                            SyntraClient.fireAndForget {
+                                SyntraClient.declineCall(id, d.conversationId)
+                            }
+                        }
+                        CallController.end()
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Rounded.CallEnd, "Tolak",
+                    tint = Color(0xFFFF5D5D), modifier = Modifier.size(17.dp),
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            // Answer — hands over to the full call screen, and the room stands down.
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(NexusOnline)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { CallController.acceptCompact() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Rounded.Call, "Jawab",
+                    tint = Color.White, modifier = Modifier.size(17.dp),
+                )
+            }
+        }
     }
 }
 

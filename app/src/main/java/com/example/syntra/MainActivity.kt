@@ -41,6 +41,7 @@ import androidx.fragment.app.FragmentActivity
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
 import com.example.syntra.net.AppLock
+import com.example.syntra.net.ShortsFeedCache
 import com.example.syntra.net.SyntraClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -163,6 +164,10 @@ class MainActivity : FragmentActivity() {
 @Composable
 private fun NexusApp() {
     val context = LocalContext.current
+    // The launch animation. It runs ALONGSIDE the session check below rather than
+    // before it, so it never adds waiting — by the time the three marks have merged,
+    // the app has usually already decided where to send the user.
+    var splashDone by remember { mutableStateOf(false) }
     // null = still deciding, so we don't flash the login screen at a signed-in user.
     var signedIn by remember { mutableStateOf<Boolean?>(null) }
     // Set when the session was valid but the account no longer exists in the
@@ -261,9 +266,15 @@ private fun NexusApp() {
     }
 
     when {
+        // The brand animation owns the first ~1.6s. It sits ahead of every other
+        // branch so the app opens the same way every time — a launch that sometimes
+        // animates and sometimes doesn't reads as a glitch, not a flourish.
+        !splashDone -> SyntraSplash(onDone = { splashDone = true })
         serverDown -> MaintenanceScreen(
             onAgree = { (context as? android.app.Activity)?.finishAndRemoveTask() },
         )
+        // Still deciding after the animation finished — the plain spinner covers the
+        // rare slow case without repeating the logo.
         signedIn == null -> AuthSplash()
         signedIn == false -> AuthScreen(
             onAuthenticated = { signedIn = true; deletedNotice = null },
@@ -277,7 +288,16 @@ private fun NexusApp() {
             // Sign out: stop the background service and close the socket.
             com.example.syntra.net.ChatConnectionService.stop(context)
             if (ApiConfig.ENABLED) SyntraClient.disconnect()
-            ShortsFeedCache.clear() // don't leak another account's feed
+            // Every cached-for-speed store goes with the session. These hold one
+            // account's messages, feed and profiles; leaving them behind would show
+            // the NEXT person to sign in on this phone the previous user's chats.
+            ShortsFeedCache.clear(context)
+            com.example.syntra.net.MessageCache.clear(context)
+            com.example.syntra.net.DiskJsonCache.clear(context)
+            com.example.syntra.net.AvatarCache.clear(context)
+            com.example.syntra.net.LikedMusicStore.clear(context)
+            com.example.syntra.net.BlockStore.clear(context)
+            com.example.syntra.net.HiddenMessageStore.clear(context)
             signedIn = false
         })
     }
@@ -425,6 +445,15 @@ private fun MainTabs(onSignOut: () -> Unit) {
         if (ReelNavRequest.reelId != null) goTo(NexusTab.SHORTS)
     }
 
+    // Pull the server's block list once per launch, so blocks made on another device
+    // (or before this install) are enforced here from the first screen.
+    val appContext = LocalContext.current
+    LaunchedEffect(Unit) {
+        if (!ApiConfig.ENABLED) return@LaunchedEffect
+        runCatching { SyntraClient.getBlocked() }
+            .onSuccess { com.example.syntra.net.BlockStore.sync(appContext, it) }
+    }
+
     // Listen for incoming calls anywhere in the app and hand them to CallController,
     // which the app-root CallHost renders (as a full screen, then a floating window).
     DisposableEffect(Unit) {
@@ -462,6 +491,11 @@ private fun MainTabs(onSignOut: () -> Unit) {
                         peerId = conv?.counterpartId.orEmpty(),
                         video = isVideo,
                         callId = id,
+                        // Inside a live room — host or listener alike — a call rings as
+                        // a banner. Taking the screen would drop the user out of a
+                        // conversation other people are part of, for something they
+                        // have not accepted yet.
+                        asBanner = com.example.syntra.net.AppForeground.inVoiceRoom,
                     )
                 }
             }

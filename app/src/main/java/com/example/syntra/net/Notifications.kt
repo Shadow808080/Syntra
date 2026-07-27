@@ -291,4 +291,14 @@ object AppForeground {
      */
     @Volatile
     var inShorts: Boolean = false
+
+    /**
+     * True while the user is inside a live voice/video room.
+     *
+     * A room is a real-time commitment with other people in it: seizing the whole
+     * screen with an incoming call would drop them mid-sentence for something they
+     * have not agreed to yet. While this is set, a call announces itself as a small
+     * banner and only takes over once it is actually accepted. Set by the room screen.
+     */
+    var inVoiceRoom by androidx.compose.runtime.mutableStateOf(false)
 }

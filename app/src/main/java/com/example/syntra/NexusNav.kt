@@ -4,6 +4,13 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.layout.offset
+import com.example.syntra.ui.theme.NexusBackground
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -99,19 +106,92 @@ val SyntraHeaderPadding = PaddingValues(
     bottom = 14.dp,
 )
 
-/** Brand gradient shared by the wordmark and the logo hero on the auth screen. */
-private val BrandGradient = Brush.horizontalGradient(listOf(Color(0xFFB79CFF), Color(0xFF6E8BFF)))
+/**
+ * Brand gradient shared by the wordmark and the featured Shorts tab.
+ *
+ * A GETTER, not a val. [NexusAccent] and [NexusAccentSoft] are Compose state that
+ * AppTheme rewrites when the user picks a theme; a `val` would capture whatever the
+ * colours happened to be at class-init and then never change, which is exactly why
+ * the wordmark and the Shorts pill stayed blue no matter what theme was selected.
+ * Reading the state on each access also makes anything that draws with it recompose.
+ */
+private val BrandGradient: Brush
+    get() = Brush.horizontalGradient(listOf(NexusAccent, NexusAccentSoft, Color.White))
 
-/** The app title, identical on every screen — a soft two-tone brand wordmark. */
+/**
+ * The featured tab's fill: a diagonal run from the light accent through the base into
+ * a deepened edge, so the pill has a light source instead of a single tint.
+ */
+private val FeaturedGradient: Brush
+    get() = Brush.linearGradient(
+        listOf(
+            NexusAccentSoft,
+            NexusAccent,
+            Color(
+                red = NexusAccent.red * 0.72f,
+                green = NexusAccent.green * 0.72f,
+                blue = NexusAccent.blue * 0.82f,
+            ),
+        ),
+    )
+
+/**
+ * The glass: a bright sheen across the top half, a faint dark pool at the bottom.
+ * The hard hairline border is gone — an outline flattens glass back into a button;
+ * depth has to come from light, not from an edge.
+ */
+private val FeaturedSheen: Brush
+    get() = Brush.verticalGradient(
+        0.0f to Color.White.copy(alpha = 0.38f),
+        0.45f to Color.White.copy(alpha = 0.10f),
+        0.5f to Color.Transparent,
+        0.82f to Color.Black.copy(alpha = 0.04f),
+        1.0f to Color.Black.copy(alpha = 0.14f),
+    )
+
+/** The app title, identical on every screen: wordmark with the mark perched on it. */
 @Composable
 fun SyntraTitle(modifier: Modifier = Modifier) {
-    Text(
-        text = "Syntra",
-        style = TextStyle(brush = BrandGradient),
-        fontSize = 23.sp,
-        fontWeight = FontWeight.ExtraBold,
-        modifier = modifier,
-    )
+    // The bubble PERCHES on the wordmark — tucked against the top-right of the "a",
+    // tilted outward like a sticker — rather than sitting inline like a list icon.
+    // Inline made it read as "icon, label"; perched it reads as one logotype.
+    Box(modifier = modifier) {
+        Text(
+            text = "Syntra",
+            style = TextStyle(brush = BrandGradient),
+            fontSize = 23.sp,
+            fontWeight = FontWeight.ExtraBold,
+        )
+        Canvas(
+            Modifier
+                .align(Alignment.TopEnd)
+                // Nudged up and past the last glyph so it overlaps the corner.
+                .offset(x = 15.dp, y = (-7).dp)
+                .size(17.dp)
+                .graphicsLayer { rotationZ = 14f },
+        ) {
+            val u = size.minDimension / 66f
+            translate(left = -21f * u, top = -22f * u) {
+                // Same accent-to-white run as the wordmark, so the mark is the end of
+                // the gradient rather than a separate solid shape stuck on it.
+                drawPath(
+                    SyntraMark.bubble(u),
+                    brush = Brush.linearGradient(
+                        colors = listOf(NexusAccentSoft, Color.White),
+                        start = Offset(21f * u, 22f * u),
+                        end = Offset(87f * u, 85f * u),
+                    ),
+                )
+                SyntraMark.dots.forEach { dot ->
+                    drawCircle(
+                        color = NexusAccent,
+                        radius = SyntraMark.DOT_RADIUS * u,
+                        center = dot * u,
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -180,16 +260,25 @@ private fun NavItem(
             .padding(horizontal = 6.dp),
     ) {
         if (featured) {
-            // The centre tab stands out: a filled brand-gradient button with a white
-            // glyph, always accented so it reads as the app's signature action.
+            // The centre tab is the app's signature control, so it gets real depth
+            // rather than a flat fill: a diagonal three-stop gradient, a translucent
+            // highlight across the top half, and a hairline rim. That combination is
+            // what reads as "glass" — a single-stop background looked printed on.
             Box(
                 modifier = Modifier
                     .width(54.dp)
                     .height(30.dp)
                     .clip(RoundedCornerShape(13.dp))
-                    .background(BrandGradient),
+                    .background(FeaturedGradient),
                 contentAlignment = Alignment.Center,
             ) {
+                // Top-half sheen. Sits above the gradient and below the glyph, which
+                // is what makes the surface look lit from above rather than tinted.
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(FeaturedSheen),
+                )
                 Icon(
                     imageVector = iconActive,
                     contentDescription = label,

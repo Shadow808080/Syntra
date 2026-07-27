@@ -12,6 +12,9 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -19,6 +22,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,13 +32,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -90,7 +99,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -108,17 +120,20 @@ import coil.compose.AsyncImage
 import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.track.VideoTrack
 import com.example.syntra.net.ApiConfig
+import com.example.syntra.net.rememberAvatarUrl
 import com.example.syntra.net.ApiException
 import com.example.syntra.net.NetRoomMessage
 import com.example.syntra.net.NetRoomParticipant
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VoiceEngine
+import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusOnline
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.delay
@@ -150,6 +165,9 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     val chat = remember(room.id) { mutableStateListOf<RoomChatLine>() }
     var chatInput by remember { mutableStateOf("") }
     var showChat by remember { mutableStateOf(false) }
+    // Messages that arrived while the stage was showing, so the switch can say how
+    // much you've missed instead of the chat quietly filling up out of sight.
+    var unreadChat by remember(room.id) { mutableIntStateOf(0) }
 
     var joinState by remember(room.id) { mutableStateOf(JoinState.CONNECTING) }
     var joinError by remember(room.id) { mutableStateOf<String?>(null) }
@@ -157,6 +175,19 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     var canPublish by remember { mutableStateOf(false) }
     var muted by remember { mutableStateOf(true) }
     var handRaised by remember { mutableStateOf(false) }
+    // Non-null while the "ask the host" sheet is open, and remembered after sending so
+    // the approval can turn on exactly what was asked for. The backend's raise-hand is
+    // a plain flag with no kind attached, so the mic-vs-camera distinction is kept here.
+    var askTarget by remember(room.id) { mutableStateOf<SpeakRequest?>(null) }
+    var pendingRequest by remember(room.id) { mutableStateOf<SpeakRequest?>(null) }
+    // Raised when the host moves me back to listening, so the mic/camera going dead is
+    // explained rather than just happening.
+    var demotedNotice by remember(room.id) { mutableStateOf(false) }
+    // A role change needs a new SFU token, and a new token means the media session is
+    // rebuilt — about a second of silence. The screen itself no longer flinches (the
+    // join gate is skipped and the participant list is left alone), but the audio gap
+    // is real, so it gets a small honest strip instead of looking like a crash.
+    var refreshingSession by remember(room.id) { mutableStateOf(false) }
     // Set once the host grants speaking rights, so we can tell the user why the
     // microphone suddenly works.
     var promoted by remember(room.id) { mutableStateOf(false) }
@@ -216,26 +247,53 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
      * so nobody sees a room they are not actually connected to. Re-run after a
      * promotion: the old token was minted with `can_publish: false`.
      */
+    /**
+     * Replace the participant list.
+     *
+     * De-duplicates by user id, which is not paranoia: the stage grid keys its tiles
+     * by user id, and during a role change the server can briefly report the same
+     * person twice (once under each role). That took the whole screen down with
+     * `Key "…" was already used` — the crash on approving a speak request.
+     *
+     * It also leaves the list ALONE when nothing actually changed, so a routine
+     * refresh doesn't clear and refill the stage — that empty-then-refill flash is
+     * what read as "the room restarted".
+     */
+    fun setParticipants(list: List<NetRoomParticipant>) {
+        val fresh = list.distinctBy { it.userId }
+        if (fresh.size == participants.size && fresh.zip(participants).all { (a, b) -> a == b }) return
+        participants.clear()
+        participants.addAll(fresh)
+    }
+
     suspend fun joinAndConnect(reconnecting: Boolean = false) {
-        if (!reconnecting) joinState = JoinState.CONNECTING
+        if (!reconnecting) joinState = JoinState.CONNECTING else refreshingSession = true
         joinError = null
         runCatching {
             val session = SyntraClient.joinRoom(room.id)
             myRole = session.role
             canPublish = session.canPublish
             SyntraClient.roomJoinTopic(room.id)
-            participants.clear()
-            participants.addAll(SyntraClient.getRoomParticipants(room.id))
+            setParticipants(SyntraClient.getRoomParticipants(room.id))
             if (session.sfuToken.isBlank() || session.sfuUrl.isBlank()) {
                 throw IllegalStateException("Media server belum siap, suara tidak akan terdengar.")
             }
             VoiceEngine.connect(context, session.sfuUrl, session.sfuToken)
             VoiceEngine.setLoudspeaker(loudspeaker)
+        }.also {
+            refreshingSession = false
         }.onSuccess {
             joinState = JoinState.CONNECTED
         }.onFailure {
-            joinError = it.message ?: "Gagal bergabung."
-            joinState = JoinState.FAILED
+            // A failed RECONNECT must not throw the user back to the join gate — they
+            // are already in the room, and the old session is usually still carrying
+            // audio. Say what happened and stay put.
+            if (reconnecting) {
+                Toast.makeText(context, "Gagal menyegarkan sesi: ${it.message}", Toast.LENGTH_SHORT).show()
+            } else {
+                joinError = it.message ?: "Gagal bergabung."
+                joinState = JoinState.FAILED
+            }
         }
     }
 
@@ -254,6 +312,22 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     }
 
     val isHost = myRole == "host"
+
+    // Tell the rest of the app we're in a room, so an incoming call rings as a banner
+    // instead of seizing the screen (see AppForeground.inVoiceRoom).
+    DisposableEffect(Unit) {
+        com.example.syntra.net.AppForeground.inVoiceRoom = true
+        onDispose { com.example.syntra.net.AppForeground.inVoiceRoom = false }
+    }
+
+    // The user answered a banner call: leave the room FIRST so the SFU session is torn
+    // down and the audio device is free before the call claims it.
+    LaunchedEffect(CallController.leaveRoomForCall) {
+        if (CallController.leaveRoomForCall) {
+            CallController.leaveRoomForCall = false
+            leave()
+        }
+    }
 
     fun requestLeave() {
         // Leaving as host ends the room for everyone, so make that explicit.
@@ -274,10 +348,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                     .onFailure { e ->
                         if ((e as? ApiException)?.code == "not_found") roomEnded = true
                     }
-                    .onSuccess { fresh ->
-                        participants.clear()
-                        participants.addAll(fresh)
-                    }
+                    .onSuccess { fresh -> setParticipants(fresh) }
             }
         }
 
@@ -296,8 +367,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
 
                 override fun onRoomParticipants(roomId: String, list: List<NetRoomParticipant>) {
                     if (roomId != room.id) return
-                    participants.clear()
-                    participants.addAll(list)
+                    setParticipants(list)
                 }
 
                 override fun onRoomSpeakRequest(roomId: String, userId: String, name: String) {
@@ -317,13 +387,55 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                     if (roomId != room.id || userId != SyntraClient.myUserId) return
                     val wasListener = myRole == "listener"
                     myRole = role
+                    // Publishing rights follow the role IMMEDIATELY. This used to wait
+                    // for a rejoin that only happens when the server asks for one, so a
+                    // demoted speaker kept `canPublish = true` and their controls stayed
+                    // live.
+                    canPublish = role != "listener"
                     if (needsRejoin) {
                         // The old token was minted with the old can_publish.
                         scope.launch { joinAndConnect(reconnecting = true) }
                     }
+                    if (!wasListener && role == "listener") {
+                        // DEMOTED. Cut the mic and the camera here and now — the server
+                        // revoking permission does not stop tracks already publishing,
+                        // so without this the person carried on being seen and heard
+                        // after being made a listener.
+                        pendingRequest = null
+                        handRaised = false
+                        muted = true
+                        demotedNotice = true
+                        scope.launch {
+                            runCatching { VoiceEngine.setMicrophoneEnabled(false) }
+                            runCatching { VoiceEngine.setCameraEnabled(false) }
+                            runCatching { SyntraClient.setRoomMuted(room.id, true) }
+                        }
+                    }
                     if (wasListener && role != "listener") {
                         handRaised = false
                         promoted = true
+                        // Granted — turn on the thing they actually asked for, so an
+                        // approval is one step, not "you may speak, now find the
+                        // button again". Deferred until the republish finishes, since
+                        // the old token could not publish anything.
+                        val wanted = pendingRequest
+                        pendingRequest = null
+                        if (wanted != null) {
+                            scope.launch {
+                                // Give the rejoin (new token with can_publish) a moment.
+                                if (needsRejoin) delay(1200)
+                                when (wanted) {
+                                    SpeakRequest.MIC -> if (hasMic()) {
+                                        muted = false
+                                        VoiceEngine.setMicrophoneEnabled(true)
+                                        runCatching { SyntraClient.setRoomMuted(room.id, false) }
+                                    }
+                                    SpeakRequest.CAMERA -> if (hasCamera()) {
+                                        VoiceEngine.setCameraEnabled(true)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -351,7 +463,10 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
 
     LaunchedEffect(chat.size) {
         if (chat.isNotEmpty()) chatListState.animateScrollToItem(chat.lastIndex)
+        if (!showChat) unreadChat += 1
     }
+    // Opening the chat clears the badge.
+    LaunchedEffect(showChat) { if (showChat) unreadChat = 0 }
 
     // Room timer — starts ticking once we're connected.
     LaunchedEffect(joinState) {
@@ -365,7 +480,9 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
 
     fun toggleMute() {
         if (!canPublish) {
-            Toast.makeText(context, "Kamu belum jadi speaker.", Toast.LENGTH_SHORT).show()
+            // A listener pressing the mic is ASKING to speak. It used to be a dead
+            // toast telling them what they already knew; now it opens the request.
+            askTarget = SpeakRequest.MIC
             return
         }
         if (!hasMic()) {
@@ -382,7 +499,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
 
     fun toggleCamera() {
         if (!canPublish) {
-            Toast.makeText(context, "Kamu belum jadi speaker.", Toast.LENGTH_SHORT).show()
+            askTarget = SpeakRequest.CAMERA
             return
         }
         if (cameraOn) {
@@ -408,12 +525,32 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
         }
     }
 
+    /** Ask the host for permission to [what]. Same signal either way; the kind is ours. */
+    fun sendSpeakRequest(what: SpeakRequest) {
+        askTarget = null
+        pendingRequest = what
+        handRaised = true
+        scope.launch {
+            runCatching { SyntraClient.raiseHand(room.id) }
+                .onFailure {
+                    pendingRequest = null
+                    handRaised = false
+                    Toast.makeText(context, "Gagal mengirim izin: ${it.message}", Toast.LENGTH_SHORT).show()
+                }
+        }
+    }
+
+    fun cancelSpeakRequest() {
+        pendingRequest = null
+        handRaised = false
+    }
+
     fun setRole(target: NetRoomParticipant, role: String) {
         manageTarget = null
         scope.launch {
             runCatching { SyntraClient.setRoomRole(room.id, target.userId, role) }
                 .onSuccess {
-                    runCatching { participants.clear(); participants.addAll(SyntraClient.getRoomParticipants(room.id)) }
+                    runCatching { setParticipants(SyntraClient.getRoomParticipants(room.id)) }
                     val who = target.displayName.ifBlank { target.username }
                     val what = if (role == "listener") "dijadikan pendengar" else "diizinkan bicara"
                     Toast.makeText(context, "$who $what.", Toast.LENGTH_SHORT).show()
@@ -459,17 +596,63 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            // Warm base: a hint of gold at the very bottom rather than flat black, so
+            // the aurora above it has something to sit in instead of appearing to
+            // float on nothing.
             .background(
-                Brush.verticalGradient(listOf(Color(0xFF17131F), Color(0xFF121212), Color(0xFF121212))),
+                Brush.verticalGradient(
+                    listOf(Color(0xFF17131F), Color(0xFF121212), Color(0xFF15100A)),
+                ),
             ),
     ) {
+        // The room's own light, rising from the bottom edge. Behind everything, so it
+        // never competes with a speaker tile or the controls.
+        AuroraWaves(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .fillMaxHeight(0.42f),
+            intensity = 0.85f,
+        )
+
         Column(modifier = Modifier.fillMaxSize()) {
+            val handRequests = participants.filter { it.hasRaisedHand && it.role == "listener" }
+
             RoomTopBar(
                 room = room,
                 count = participants.size,
                 elapsed = elapsed,
+                requests = if (isHost) handRequests.size else 0,
                 onMinimize = { requestLeave() },
                 onPeople = { showPeople = true },
+            )
+
+            // Host side: everyone currently asking for the mic, with approve/decline
+            // right there. Sits above the body so a request can't be missed.
+            if (isHost && handRequests.isNotEmpty()) {
+                HandRaiseQueue(
+                    requests = handRequests,
+                    onApprove = { setRole(it, "speaker") },
+                    onOpen = { manageTarget = it },
+                )
+            }
+
+            // Requester side: proof that the ask is in flight.
+            pendingRequest?.let { what ->
+                SpeakRequestPending(what = what, onCancel = { cancelSpeakRequest() })
+            }
+
+            if (refreshingSession) SessionRefreshStrip()
+
+            // Stage / chat switch, ALWAYS on screen. It used to be a single icon in the
+            // control bar (duplicated inside the "More" sheet), so once you were in the
+            // chat there was no visible way back to the people — you had to remember
+            // which icon you pressed. A segmented control shows both states at once and
+            // makes the return trip the same one tap as the way in.
+            RoomModeSwitch(
+                chatOpen = showChat,
+                unread = unreadChat,
+                onSelect = { chat -> showChat = chat },
             )
 
             androidx.compose.animation.Crossfade(
@@ -493,6 +676,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                         myId = SyntraClient.myUserId,
                         isHost = isHost,
                         onManage = { manageTarget = it },
+                        onSetRole = { target, role -> setRole(target, role) },
                     )
                 }
             } // end Crossfade room-body
@@ -509,9 +693,13 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 muted = muted,
                 canPublish = canPublish,
                 cameraOn = cameraOn,
+                loudspeaker = loudspeaker,
                 onToggleMute = { toggleMute() },
                 onToggleCamera = { toggleCamera() },
-                onToggleChat = { showChat = !showChat },
+                onToggleLoudspeaker = {
+                    loudspeaker = !loudspeaker
+                    VoiceEngine.setLoudspeaker(loudspeaker)
+                },
                 onMore = { showMore = true },
                 onLeave = { requestLeave() },
             )
@@ -532,6 +720,19 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
             )
         }
 
+        // Moved back to listening by the host.
+        if (demotedNotice) {
+            RoomAlert(
+                title = "Kamu jadi pendengar",
+                message = "Pemilik room memindahkanmu ke pendengar. Mikrofon dan " +
+                    "kamera dimatikan. Kamu bisa minta izin bicara lagi kapan saja.",
+                confirmText = "Mengerti",
+                dismissText = null,
+                onConfirm = { demotedNotice = false },
+                onDismiss = { demotedNotice = false },
+            )
+        }
+
         // The room disappeared while we were inside it.
         if (roomEnded) {
             RoomAlert(
@@ -544,6 +745,16 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                     leave()
                 },
                 onDismiss = {},
+            )
+        }
+
+        // Listener tapped mic or camera — ask the host instead of refusing.
+        askTarget?.let { what ->
+            SpeakRequestSheet(
+                what = what,
+                hostName = room.hostName,
+                onSend = { sendSpeakRequest(what) },
+                onDismiss = { askTarget = null },
             )
         }
 
@@ -563,17 +774,17 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 listeners = listeners,
                 isHost = isHost,
                 onManage = { showPeople = false; manageTarget = it },
+                onSetRole = { target, role -> setRole(target, role) },
                 onDismiss = { showPeople = false },
             )
         }
 
-        // "More" — volume, loudspeaker, switch camera, chat, and (host) end room.
+        // "More" — volume, loudspeaker, switch camera, and (host) end room.
         if (showMore) {
             RoomMoreSheet(
                 volume = volume,
                 loudspeaker = loudspeaker,
                 cameraOn = cameraOn,
-                chatOpen = showChat,
                 isHost = isHost,
                 onVolume = { applyVolume(it) },
                 onToggleLoudspeaker = {
@@ -581,7 +792,6 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                     VoiceEngine.setLoudspeaker(loudspeaker)
                 },
                 onSwitchCamera = { VoiceEngine.switchCamera() },
-                onToggleChat = { showMore = false; showChat = !showChat },
                 onEndRoom = { showMore = false; confirmLeave = true },
                 onDismiss = { showMore = false },
             )
@@ -593,6 +803,246 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
 // ---------------------------------------------------------------------------
 // Volume + dialogs
 // ---------------------------------------------------------------------------
+
+/**
+ * What a listener is asking the host for.
+ *
+ * The backend's raise-hand endpoint carries no "kind", so this only ever lives on the
+ * requester's device — long enough to word the sheet correctly and to switch the right
+ * thing on when the host says yes.
+ */
+private enum class SpeakRequest { MIC, CAMERA }
+
+/**
+ * The permission sheet a listener sees after tapping mic or camera.
+ *
+ * Previously both buttons answered with "Kamu belum jadi speaker." and nothing else —
+ * technically true and completely useless, since it named the problem and offered no
+ * way out. This asks the host on their behalf.
+ */
+@Composable
+private fun SpeakRequestSheet(
+    what: SpeakRequest,
+    hostName: String,
+    onSend: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val mic = what == SpeakRequest.MIC
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurfaceElevated, RoundedCornerShape(20.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(20.dp))
+                .padding(22.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(NexusAccent.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    if (mic) Icons.Filled.Mic else Icons.Filled.Videocam,
+                    null,
+                    tint = NexusAccentSoft,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                if (mic) "Minta izin bicara" else "Minta izin nyalakan kamera",
+                color = NexusTextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Kamu sedang jadi pendengar. ${hostName.ifBlank { "Pemilik room" }} " +
+                    "harus menyetujui dulu sebelum " +
+                    (if (mic) "mikrofonmu" else "kameramu") + " bisa aktif.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+            )
+            Spacer(Modifier.height(20.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Batal",
+                    color = NexusTextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onDismiss,
+                        )
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .background(NexusAccent, RoundedCornerShape(50))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onSend,
+                        )
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                ) {
+                    Text("Kirim permintaan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * "Waiting for the host" strip, shown to the requester until they're promoted.
+ *
+ * Without it a listener has no idea whether their request went anywhere — the old
+ * flow fired a toast and then looked exactly like it had before.
+ */
+@Composable
+private fun SpeakRequestPending(what: SpeakRequest, onCancel: () -> Unit) {
+    val pulse = rememberInfiniteTransition(label = "ask-pending")
+    val alpha by pulse.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "ask-pulse",
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(NexusAccent.copy(alpha = 0.14f))
+            .border(1.dp, NexusAccent.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (what == SpeakRequest.MIC) Icons.Filled.Mic else Icons.Filled.Videocam,
+            null,
+            tint = NexusAccentSoft.copy(alpha = alpha),
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "Menunggu izin pemilik room",
+                color = NexusTextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                if (what == SpeakRequest.MIC) "Permintaan bicara terkirim" else "Permintaan kamera terkirim",
+                color = NexusTextSecondary,
+                fontSize = 11.sp,
+            )
+        }
+        Text(
+            "Batal",
+            color = NexusTextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onCancel,
+                )
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+        )
+    }
+}
+
+/**
+ * The always-visible "Panggung / Obrolan" switch.
+ *
+ * Two segments with a sliding pill behind the active one, so which mode you're in and
+ * how to leave it are the same control. The chat side carries an unread count, because
+ * the whole reason people got stranded on one side was not knowing anything was
+ * happening on the other.
+ */
+@Composable
+private fun RoomModeSwitch(chatOpen: Boolean, unread: Int, onSelect: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .padding(3.dp),
+    ) {
+        RoomModeTab(
+            label = "Panggung",
+            icon = Icons.Filled.Mic,
+            active = !chatOpen,
+            modifier = Modifier.weight(1f),
+        ) { onSelect(false) }
+        RoomModeTab(
+            label = "Obrolan",
+            icon = Icons.Filled.Chat,
+            active = chatOpen,
+            badge = if (!chatOpen && unread > 0) unread else 0,
+            modifier = Modifier.weight(1f),
+        ) { onSelect(true) }
+    }
+}
+
+@Composable
+private fun RoomModeTab(
+    label: String,
+    icon: ImageVector,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+    badge: Int = 0,
+    onClick: () -> Unit,
+) {
+    // The pill fades rather than snaps, so the switch reads as one surface moving.
+    val bg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (active) NexusAccent.copy(alpha = 0.85f) else Color.Transparent,
+        animationSpec = tween(200),
+        label = "room-tab-bg",
+    )
+    val fg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (active) Color.White else NexusTextSecondary,
+        animationSpec = tween(200),
+        label = "room-tab-fg",
+    )
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(vertical = 9.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = fg, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(7.dp))
+        Text(
+            text = label,
+            color = fg,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (badge > 0) {
+            Spacer(Modifier.width(6.dp))
+            CountBadge(badge, NexusAccent)
+        }
+    }
+}
 
 /** What the host sees when listeners ask for the mic. */
 @Composable
@@ -635,7 +1085,15 @@ private fun HandRaiseQueue(
             ) {
                 GradientAvatar(gradientForId(p.userId), name.first().toString(), 28.dp)
                 Spacer(Modifier.width(10.dp))
-                Text(name, color = NexusTextPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                Text(
+                    text = name,
+                    color = NexusTextPrimary,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
                 Box(
                     modifier = Modifier
                         .background(NexusOnline, RoundedCornerShape(50))
@@ -645,7 +1103,13 @@ private fun HandRaiseQueue(
                         ) { onApprove(p) }
                         .padding(horizontal = 14.dp, vertical = 6.dp),
                 ) {
-                    Text("Izinkan", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Izinkan",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                    )
                 }
             }
         }
@@ -704,7 +1168,7 @@ private fun RoomAlert(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
@@ -731,7 +1195,7 @@ private fun RoomAlert(
                 }
                 Box(
                     modifier = Modifier
-                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .background(DangerFill, RoundedCornerShape(50))
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
@@ -764,7 +1228,7 @@ private fun ManageParticipantSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
                 .padding(vertical = 20.dp),
         ) {
@@ -828,13 +1292,15 @@ private fun RoomPeopleSheet(
     listeners: List<NetRoomParticipant>,
     isHost: Boolean,
     onManage: (NetRoomParticipant) -> Unit,
+    /** Host-only: flip this person between speaker and listener in one tap. */
+    onSetRole: (NetRoomParticipant, String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
                 .padding(vertical = 18.dp),
         ) {
@@ -849,19 +1315,53 @@ private fun RoomPeopleSheet(
                 Text("${speakers.size + listeners.size}", color = NexusTextSecondary, fontSize = 13.sp)
             }
             Spacer(Modifier.height(12.dp))
+            // People asking for the mic float to the TOP of the card, in their own
+            // section. Buried among the listeners they were indistinguishable from
+            // everyone else, so requests sat unanswered.
+            val asking = listeners.filter { it.hasRaisedHand }
+            val quiet = listeners.filterNot { it.hasRaisedHand }
             Column(
                 Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
             ) {
+                if (asking.isNotEmpty()) {
+                    Box(Modifier.padding(horizontal = 22.dp)) {
+                        SectionLabel("Minta bicara · ${asking.size}")
+                    }
+                    asking.forEach { p ->
+                        RoomPersonRow(
+                            p = p,
+                            manageable = isHost,
+                            highlight = true,
+                            onClick = { onManage(p) },
+                            onSetRole = if (isHost) ({ onSetRole(p, "speaker") }) else null,
+                        )
+                    }
+                }
                 if (speakers.isNotEmpty()) {
                     Box(Modifier.padding(horizontal = 22.dp)) { SectionLabel("Speaker · ${speakers.size}") }
                     speakers.forEach { p ->
-                        RoomPersonRow(p, manageable = isHost && p.role != "host", onClick = { onManage(p) })
+                        RoomPersonRow(
+                            p = p,
+                            manageable = isHost && p.role != "host",
+                            onClick = { onManage(p) },
+                            // The host can't be demoted out of their own room.
+                            onSetRole = if (isHost && p.role != "host") {
+                                ({ onSetRole(p, "listener") })
+                            } else {
+                                null
+                            },
+                        )
                     }
                 }
-                if (listeners.isNotEmpty()) {
-                    Box(Modifier.padding(horizontal = 22.dp)) { SectionLabel("Pendengar · ${listeners.size}") }
-                    listeners.forEach { p ->
-                        RoomPersonRow(p, manageable = isHost, onClick = { onManage(p) })
+                if (quiet.isNotEmpty()) {
+                    Box(Modifier.padding(horizontal = 22.dp)) { SectionLabel("Pendengar · ${quiet.size}") }
+                    quiet.forEach { p ->
+                        RoomPersonRow(
+                            p = p,
+                            manageable = isHost,
+                            onClick = { onManage(p) },
+                            onSetRole = if (isHost) ({ onSetRole(p, "speaker") }) else null,
+                        )
                     }
                 }
             }
@@ -869,37 +1369,76 @@ private fun RoomPeopleSheet(
     }
 }
 
+/**
+ * One person in the participants card.
+ *
+ * [onSetRole] is the host-only button beside the avatar that flips speaker ⇄ listener
+ * in a single tap. Promoting somebody used to mean tapping the row, reading a sheet
+ * and picking an action — three steps to answer a request that is a yes/no question.
+ * The row still opens the full sheet for anything else.
+ */
 @Composable
-private fun RoomPersonRow(p: NetRoomParticipant, manageable: Boolean, onClick: () -> Unit) {
+private fun RoomPersonRow(
+    p: NetRoomParticipant,
+    manageable: Boolean,
+    highlight: Boolean = false,
+    onClick: () -> Unit,
+    onSetRole: (() -> Unit)? = null,
+) {
     val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
+    val listener = p.role == "listener"
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(14.dp))
+            // A person who is asking gets a tinted row, so the queue reads at a glance.
+            .background(if (highlight) NexusAccent.copy(alpha = 0.12f) else Color.Transparent)
             .clickable(
                 enabled = manageable,
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onClick,
             )
-            .padding(horizontal = 22.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 8.dp),
     ) {
-        RoomAvatar(p = p, size = 40.dp)
+        Box(contentAlignment = Alignment.BottomEnd) {
+            RoomAvatar(p = p, size = 40.dp)
+            // Raised hand sits on the avatar itself for anyone waiting on an answer.
+            if (p.hasRaisedHand && listener) {
+                Box(
+                    modifier = Modifier
+                        .size(16.dp)
+                        .background(NexusAccent, CircleShape)
+                        .border(2.dp, NexusSurfaceElevated, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.PanTool, null,
+                        tint = Color.White, modifier = Modifier.size(8.dp),
+                    )
+                }
+            }
+        }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(name, color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                text = when (p.role) {
-                    "host" -> "Host"
-                    "moderator" -> "Moderator"
-                    "listener" -> "Pendengar"
+                text = when {
+                    p.hasRaisedHand && listener -> "Minta jadi pembicara"
+                    p.role == "host" -> "Host"
+                    p.role == "moderator" -> "Moderator"
+                    listener -> "Pendengar"
                     else -> "Speaker"
                 },
-                color = NexusTextSecondary,
+                color = if (p.hasRaisedHand && listener) NexusAccentSoft else NexusTextSecondary,
                 fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        if (p.role != "listener") {
+        if (!listener) {
             Icon(
                 imageVector = if (p.isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
                 contentDescription = null,
@@ -907,25 +1446,52 @@ private fun RoomPersonRow(p: NetRoomParticipant, manageable: Boolean, onClick: (
                 modifier = Modifier.size(18.dp),
             )
         }
-        if (manageable) {
-            Spacer(Modifier.width(10.dp))
-            Icon(Icons.Filled.MoreHoriz, "Kelola", tint = NexusTextSecondary, modifier = Modifier.size(18.dp))
+        // The one-tap role button — creator only. Icon + a SHORT word: the full
+        // "Jadikan pembicara" wrapped or shoved the name off the row on a narrow
+        // phone, and the icon already carries the meaning.
+        onSetRole?.let { action ->
+            Spacer(Modifier.width(8.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(if (listener) NexusAccent else Color.White.copy(alpha = 0.08f))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = action,
+                    )
+                    .padding(horizontal = 9.dp, vertical = 6.dp),
+            ) {
+                Icon(
+                    if (listener) Icons.Filled.Mic else Icons.Filled.Hearing,
+                    if (listener) "Jadikan pembicara" else "Jadikan pendengar",
+                    tint = if (listener) Color.White else NexusTextSecondary,
+                    modifier = Modifier.size(13.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = if (listener) "Bicara" else "Dengar",
+                    color = if (listener) Color.White else NexusTextSecondary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
 
-/** The "more" sheet from the control bar: volume, loudspeaker, camera, chat, end. */
+/** The "more" sheet from the control bar: volume, loudspeaker, camera, end. */
 @Composable
 private fun RoomMoreSheet(
     volume: Float,
     loudspeaker: Boolean,
     cameraOn: Boolean,
-    chatOpen: Boolean,
     isHost: Boolean,
     onVolume: (Float) -> Unit,
     onToggleLoudspeaker: () -> Unit,
     onSwitchCamera: () -> Unit,
-    onToggleChat: () -> Unit,
     onEndRoom: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -933,7 +1499,7 @@ private fun RoomMoreSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
                 .padding(vertical = 18.dp),
         ) {
@@ -952,12 +1518,7 @@ private fun RoomMoreSheet(
                 onToggleLoudspeaker = onToggleLoudspeaker,
             )
             Spacer(Modifier.height(6.dp))
-            SheetAction(
-                if (chatOpen) "Tutup chat" else "Buka chat",
-                Icons.Filled.Chat,
-                NexusTextPrimary,
-                onToggleChat,
-            )
+            // Chat lives on the switch above the room body, not buried in here.
             if (cameraOn) {
                 SheetAction("Ganti kamera", Icons.Filled.Cameraswitch, NexusTextPrimary, onSwitchCamera)
             }
@@ -1114,11 +1675,205 @@ private fun SpeakingStatusBanner(
 // Top bar
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Aurora
+// ---------------------------------------------------------------------------
+
+/**
+ * The room's aurora colours, derived from whichever theme the user picked in Settings.
+ *
+ * These are computed rather than fixed: a hardcoded gold looked deliberate on the dark
+ * default and wrong on Ocean or Forest, where it clashed with everything else on the
+ * screen. Reading [NexusAccent] means the room is lit in the user's own colour, and
+ * switching theme repaints it with no extra wiring.
+ *
+ * Three steps around the accent's hue — the accent itself, a lighter tint, and a
+ * warmer/deeper neighbour — which is enough separation for the wave bands to read as
+ * distinct layers without becoming a rainbow.
+ */
+private val AuroraGold: Color get() = NexusAccent
+private val AuroraYellow: Color get() = NexusAccentSoft
+private val AuroraAmber: Color get() = shiftHue(NexusAccent, 18f)
+private val AuroraRose: Color get() = shiftHue(NexusAccent, -26f)
+
+/** Rotates [color]'s hue by [degrees], keeping saturation and brightness. */
+private fun shiftHue(color: Color, degrees: Float): Color {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(color.toArgb(), hsv)
+    hsv[0] = (hsv[0] + degrees + 360f) % 360f
+    return Color(android.graphics.Color.HSVToColor(hsv))
+}
+
+/**
+ * Readable ink for a filled control: near-black on a light accent, white on a dark
+ * one. The old code assumed a bright gold and hardcoded dark brown, which vanished
+ * the moment the theme supplied a deep blue.
+ */
+private fun onAccentInk(bg: Color): Color =
+    if (bg.luminance() > 0.55f) Color(0xFF1A1206) else Color.White
+
+/**
+ * A slow band of golden light that rises from the bottom edge in overlapping waves.
+ *
+ * Three sine layers drifting at different speeds and amplitudes: because their periods
+ * don't divide evenly the crests never re-align, so the motion reads as organic rather
+ * than as a looping animation. Each band is filled with a vertical gradient that fades
+ * to nothing at the top, which is what makes it glow instead of looking like a shape.
+ *
+ * One Canvas, no layout, no per-frame allocation beyond the Path — cheap enough to sit
+ * under a live video grid on a low-end phone.
+ */
+@Composable
+private fun AuroraWaves(
+    modifier: Modifier = Modifier,
+    /** Overall opacity, so the same effect can be loud on the bar and quiet behind content. */
+    intensity: Float = 1f,
+) {
+    val t = rememberInfiniteTransition(label = "aurora")
+    val phase by t.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(11000, easing = LinearEasing), RepeatMode.Restart),
+        label = "aurora-phase",
+    )
+    // Each layer: colour, how far up it reaches, wave height, frequency, drift speed.
+    val layers = listOf(
+        Quintuple(AuroraGold, 0.92f, 0.16f, 1.1f, 1.0f),
+        Quintuple(AuroraAmber, 0.66f, 0.13f, 1.7f, -0.72f),
+        Quintuple(AuroraRose, 0.44f, 0.10f, 2.3f, 0.45f),
+    )
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        layers.forEach { (color, reach, amp, freq, speed) ->
+            val baseY = h * (1f - reach)
+            val waveH = h * amp
+            val path = androidx.compose.ui.graphics.Path().apply {
+                moveTo(0f, h)
+                lineTo(0f, baseY)
+                // 24 segments is smooth at this scale and keeps the path cheap.
+                val steps = 24
+                for (i in 0..steps) {
+                    val x = w * i / steps
+                    val tt = i.toFloat() / steps
+                    val y = baseY + waveH * kotlin.math.sin(tt * freq * 2f * Math.PI.toFloat() + phase * speed)
+                    lineTo(x, y)
+                }
+                lineTo(w, h)
+                close()
+            }
+            drawPath(
+                path = path,
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color.Transparent, color.copy(alpha = 0.30f * intensity)),
+                    startY = baseY - waveH,
+                    endY = h,
+                ),
+            )
+        }
+    }
+}
+
+/** Five-field tuple for the wave layer table above. */
+private data class Quintuple(
+    val color: Color,
+    val reach: Float,
+    val amp: Float,
+    val freq: Float,
+    val speed: Float,
+)
+
+/**
+ * "Applying your new role" strip.
+ *
+ * Shown while the SFU token is re-minted after a promotion or demotion. Everything
+ * else on screen stays exactly where it was — this is the whole visible cost of a
+ * role change now, instead of the screen appearing to rejoin the room.
+ */
+@Composable
+private fun SessionRefreshStrip() {
+    val shimmer = rememberInfiniteTransition(label = "session-refresh")
+    val x by shimmer.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Restart),
+        label = "session-shimmer",
+    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        // A dot that travels, rather than a spinner — quieter, and it costs one Canvas.
+        Canvas(Modifier.size(width = 34.dp, height = 6.dp)) {
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.10f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2f),
+            )
+            val w = size.width * 0.42f
+            drawRoundRect(
+                color = NexusAccentSoft,
+                topLeft = androidx.compose.ui.geometry.Offset((size.width + w) * x - w, 0f),
+                size = androidx.compose.ui.geometry.Size(w, size.height),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2f),
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "Menyiapkan izin barumu…",
+            color = NexusTextSecondary,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * A count badge that is actually round.
+ *
+ * The old one wrapped a Text in padding, so its height came from the font's line
+ * metrics — which include ascent/descent space the digit never fills. That is why it
+ * looked squashed and off-centre. Here the box is given an explicit size and the text
+ * has its font padding removed, so the glyph sits dead centre of a true circle. It
+ * widens (into a pill) only when the number needs two or three characters.
+ */
+@Composable
+private fun CountBadge(value: Int, color: Color) {
+    val label = if (value > 99) "99+" else value.toString()
+    Box(
+        modifier = Modifier
+            .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
+            .background(color, CircleShape)
+            .border(2.dp, Color(0xFF17131F), CircleShape)
+            .padding(horizontal = if (label.length > 1) 5.dp else 0.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            style = TextStyle(
+                platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false),
+                lineHeight = 10.sp,
+            ),
+        )
+    }
+}
+
 @Composable
 private fun RoomTopBar(
     room: Room,
     count: Int,
     elapsed: Int,
+    /** Pending speak requests — host only; 0 for everyone else. */
+    requests: Int = 0,
     onMinimize: () -> Unit,
     onPeople: () -> Unit,
 ) {
@@ -1148,19 +1903,32 @@ private fun RoomTopBar(
                 )
             }
             Spacer(Modifier.weight(1f))
-            // People button, with the count as a small badge.
+            // People button. Normally a plain head-count; the moment someone asks to
+            // speak it becomes a PULSING RAISED HAND with the number of requests, so
+            // the host can see there is something waiting without opening anything.
+            // (Requests used to be invisible from here — you had to already be looking
+            // at the participants list.)
             Box(contentAlignment = Alignment.TopEnd) {
-                RoundControl(Icons.Filled.PersonAdd, "Peserta", size = 40.dp, onClick = onPeople)
-                if (count > 0) {
-                    Box(
-                        modifier = Modifier
-                            .padding(top = 1.dp)
-                            .background(NexusAccent, CircleShape)
-                            .border(2.dp, Color(0xFF17131F), CircleShape)
-                            .padding(horizontal = 5.dp, vertical = 1.dp),
-                    ) {
-                        Text("$count", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                    }
+                if (requests > 0) {
+                    val pulse = rememberInfiniteTransition(label = "req-badge")
+                    val glow by pulse.animateFloat(
+                        initialValue = 0.55f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+                        label = "req-glow",
+                    )
+                    RoundControl(
+                        Icons.Filled.PanTool,
+                        "Permintaan bicara",
+                        size = 40.dp,
+                        background = NexusAccent.copy(alpha = glow),
+                        tint = Color.White,
+                        onClick = onPeople,
+                    )
+                    CountBadge(requests, Color(0xFFFF5D5D))
+                } else {
+                    RoundControl(Icons.Filled.PersonAdd, "Peserta", size = 40.dp, onClick = onPeople)
+                    if (count > 0) CountBadge(count, NexusAccent)
                 }
             }
         }
@@ -1180,10 +1948,20 @@ private fun RoomTopBar(
                 Spacer(Modifier.width(8.dp))
                 Box(
                     modifier = Modifier
+                        // Capped, so a long topic shrinks its own chip instead of
+                        // squeezing the room title out of the row.
+                        .widthIn(max = 130.dp)
                         .background(room.accent.copy(alpha = 0.15f), RoundedCornerShape(50))
                         .padding(horizontal = 10.dp, vertical = 3.dp),
                 ) {
-                    Text(room.topic, color = room.accent, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Text(
+                        text = room.topic,
+                        color = room.accent,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }
@@ -1229,6 +2007,8 @@ private fun RoomStage(
     myId: String?,
     isHost: Boolean,
     onManage: (NetRoomParticipant) -> Unit,
+    /** Host-only one-tap role change, straight from the stage. */
+    onSetRole: (NetRoomParticipant, String) -> Unit = { _, _ -> },
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
@@ -1260,29 +2040,84 @@ private fun RoomStage(
         }
         if (listeners.isNotEmpty()) {
             item(span = { GridItemSpan(2) }) {
-                RoomListenerStrip(listeners = listeners, videoTracks = videoTracks)
+                RoomListenerStrip(
+                    listeners = listeners,
+                    videoTracks = videoTracks,
+                    isHost = isHost,
+                    onPromote = { onSetRole(it, "speaker") },
+                )
             }
         }
     }
 }
 
-/** A compact, horizontally scrolling strip of everyone who is only listening. */
+/**
+ * A compact, horizontally scrolling strip of everyone who is only listening.
+ *
+ * For the host, each avatar carries a small promote button in its corner — the
+ * fastest possible "yes" to someone asking for the mic, without opening a list. People
+ * with a hand up are sorted to the front and marked.
+ */
 @Composable
-private fun RoomListenerStrip(listeners: List<NetRoomParticipant>, videoTracks: Map<String, VideoTrack>) {
+private fun RoomListenerStrip(
+    listeners: List<NetRoomParticipant>,
+    videoTracks: Map<String, VideoTrack>,
+    isHost: Boolean = false,
+    onPromote: (NetRoomParticipant) -> Unit = {},
+) {
     Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
         SectionLabel("Mendengarkan · ${listeners.size}")
         Row(
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            listeners.forEach { p ->
+            // Hands up first — the people the host actually needs to act on.
+            listeners.sortedByDescending { it.hasRaisedHand }.forEach { p ->
                 val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(56.dp)) {
-                    RoomAvatar(p = p, size = 48.dp)
+                    Box(contentAlignment = Alignment.BottomEnd) {
+                        RoomAvatar(p = p, size = 48.dp)
+                        if (isHost) {
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .background(
+                                        if (p.hasRaisedHand) NexusAccent else NexusSurfaceElevated,
+                                        CircleShape,
+                                    )
+                                    .border(2.dp, Color(0xFF121212), CircleShape)
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { onPromote(p) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Filled.Mic,
+                                    "Jadikan pembicara",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(11.dp),
+                                )
+                            }
+                        } else if (p.hasRaisedHand) {
+                            Box(
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .background(NexusAccent, CircleShape)
+                                    .border(2.dp, Color(0xFF121212), CircleShape),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Filled.PanTool, null,
+                                    tint = Color.White, modifier = Modifier.size(9.dp),
+                                )
+                            }
+                        }
+                    }
                     Spacer(Modifier.height(4.dp))
                     Text(
                         name.substringBefore(' '),
-                        color = NexusTextSecondary,
+                        color = if (p.hasRaisedHand) NexusAccentSoft else NexusTextSecondary,
                         fontSize = 10.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1370,11 +2205,15 @@ private fun RoomVideoTile(
             Box(Modifier.fillMaxSize().border(1.dp, NexusStroke, shape))
         }
 
-        // Name chip (bottom-start) — small avatar + first name.
+        // Name chip (bottom-start) — small avatar + first name. Width-capped: a long
+        // name would otherwise stretch the chip past the edge of its own tile and
+        // collide with the mic badge opposite it.
         Row(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(8.dp)
+                .fillMaxWidth(0.72f)
+                .wrapContentWidth(Alignment.Start)
                 .clip(RoundedCornerShape(50))
                 .background(Color.Black.copy(alpha = 0.42f))
                 .padding(start = 4.dp, end = 10.dp, top = 3.dp, bottom = 3.dp),
@@ -1383,12 +2222,13 @@ private fun RoomVideoTile(
             RoomAvatar(p = p, size = 22.dp)
             Spacer(Modifier.width(6.dp))
             Text(
-                name.substringBefore(' '),
+                text = name.substringBefore(' '),
                 color = Color.White,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
             if (micOn) {
                 Spacer(Modifier.width(6.dp))
@@ -1448,11 +2288,19 @@ private fun RoomVideoTile(
     }
 }
 
-/** Avatar helper for room UI: photo when available, gradient + initial otherwise. */
+/**
+ * Avatar helper for room UI: photo when available, gradient + initial otherwise.
+ *
+ * The photo comes through [rememberAvatarUrl], so a participant payload that arrives
+ * without an avatar (the realtime pushes routinely do) keeps showing the picture we
+ * already know instead of collapsing to a letter every time someone joins or leaves.
+ */
 @Composable
 private fun RoomAvatar(p: NetRoomParticipant, size: androidx.compose.ui.unit.Dp) {
     val name = p.displayName.ifBlank { p.username }.ifBlank { "Pengguna" }
-    val avatar = p.avatarMediaId?.takeIf { it.startsWith("http") }
+    // Both ids: a room payload gives a user id, but the photo may have been learned
+    // from the chat list, which only ever knew the username.
+    val avatar = rememberAvatarUrl(p.userId, p.username, incoming = p.avatarMediaId)
     if (avatar != null) {
         AsyncImage(
             model = avatar,
@@ -1615,8 +2463,12 @@ private fun RoomChatPane(
             ) {
                 Box(
                     modifier = Modifier
+                        // Capped so a long message wraps into a bubble instead of
+                        // stretching the full width of the screen.
+                        .fillMaxWidth(0.82f)
+                        .wrapContentWidth(if (line.mine) Alignment.End else Alignment.Start)
                         .background(
-                            if (line.mine) NexusAccent else Color(0xFF23232B),
+                            if (line.mine) NexusAccent else NexusSurfaceElevated,
                             RoundedCornerShape(14.dp),
                         )
                         .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -1640,7 +2492,7 @@ private fun RoomChatInput(value: String, onValueChange: (String) -> Unit, onSend
         Box(
             modifier = Modifier
                 .weight(1f)
-                .background(Color(0xFF1E1E26), RoundedCornerShape(24.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(24.dp))
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             if (value.isEmpty()) {
@@ -1679,103 +2531,378 @@ private fun RoomChatInput(value: String, onValueChange: (String) -> Unit, onSend
 // Bottom controls
 // ---------------------------------------------------------------------------
 
+/**
+ * The bottom controls: mic · camera · leave · more.
+ *
+ * Four buttons, floating on a translucent bar rather than a flat block. The active
+ * ones carry a soft breathing aura — a live mic is the single most important piece of
+ * state in a voice room and it now says so without a label. Every state change is
+ * animated (colour, scale, icon), so toggling reads as one continuous object rather
+ * than a redraw.
+ *
+ * There is no role button here. Asking to speak lives on the mic itself — pressing a
+ * mic you aren't allowed to use IS the request — which is one control instead of two
+ * that mean nearly the same thing.
+ */
 @Composable
 private fun RoomControlBar(
     muted: Boolean,
     canPublish: Boolean,
     cameraOn: Boolean,
+    loudspeaker: Boolean,
     onToggleMute: () -> Unit,
     onToggleCamera: () -> Unit,
-    onToggleChat: () -> Unit,
+    onToggleLoudspeaker: () -> Unit,
     onMore: () -> Unit,
     onLeave: () -> Unit,
 ) {
     val micLive = canPublish && !muted
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF16161C))
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
+            .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
     ) {
-        // Mic — filled green when live, red when muted, dimmed when listener-only.
-        CircleControl(
-            icon = if (micLive) Icons.Filled.Mic else Icons.Filled.MicOff,
-            description = "Mikrofon",
-            background = when {
-                !canPublish -> Color(0xFF24242C)
-                micLive -> NexusOnline
-                else -> Color(0xFF3A1620)
-            },
-            tint = when {
-                !canPublish -> NexusTextSecondary
-                micLive -> Color.White
-                else -> Color(0xFFFF5D5D)
-            },
-            onClick = onToggleMute,
-        )
-        // Camera — turns the room into a video room.
-        CircleControl(
-            icon = if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-            description = "Kamera",
-            background = if (cameraOn) NexusAccent else Color(0xFF24242C),
-            tint = if (cameraOn) Color.White else NexusTextPrimary,
-            onClick = onToggleCamera,
-        )
-        // Hang up — the big red center button.
-        CircleControl(
-            icon = Icons.Filled.CallEnd,
-            description = "Keluar",
-            size = 64.dp,
-            iconSize = 28.dp,
-            background = Color(0xFFFF3B48),
-            tint = Color.White,
-            onClick = onLeave,
-        )
-        // Chat.
-        CircleControl(
-            icon = Icons.Filled.Chat,
-            description = "Chat",
-            background = Color(0xFF24242C),
-            tint = NexusTextPrimary,
-            onClick = onToggleChat,
-        )
-        // More — volume, loudspeaker, switch camera, end room.
-        CircleControl(
-            icon = Icons.Filled.MoreHoriz,
-            description = "Lainnya",
-            background = Color(0xFF24242C),
-            tint = NexusTextPrimary,
-            onClick = onMore,
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(32.dp))
+                // The card itself: a deep tinted panel, lit from the lower-left by the
+                // theme accent, with a hairline edge so it lifts off the stage.
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            AuroraRose.copy(alpha = 0.30f),
+                            Color(0xFF120E1A).copy(alpha = 0.96f),
+                            AuroraGold.copy(alpha = 0.16f),
+                        ),
+                    ),
+                )
+                .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(32.dp))
+                .padding(top = 8.dp, bottom = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            // Grab handle. Purely an affordance — it says the panel is a surface that
+            // sits on top of the room rather than part of its frame.
+            Box(
+                Modifier
+                    .padding(bottom = 10.dp)
+                    .size(width = 34.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.White.copy(alpha = 0.22f)),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                // Every control is labelled. In a room the cost of a wrong guess is
+                // being heard when you thought you were muted, so the state is spelled
+                // out rather than left to icon shape alone.
+                LabelledControl(
+                    icon = if (micLive) Icons.Filled.Mic else Icons.Filled.MicOff,
+                    label = when {
+                        !canPublish -> "Minta Bicara"
+                        micLive -> "Mic On"
+                        else -> "Mic Off"
+                    },
+                    tint = when {
+                        !canPublish -> NexusTextSecondary
+                        micLive -> AuroraYellow
+                        else -> Color(0xFFFF6B8A)
+                    },
+                    active = micLive,
+                    onClick = onToggleMute,
+                )
+                LabelledControl(
+                    icon = if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                    label = if (cameraOn) "Video On" else "Video Off",
+                    tint = if (cameraOn) AuroraYellow else Color(0xFFFF6B8A),
+                    active = cameraOn,
+                    onClick = onToggleCamera,
+                )
+                EndCallControl(onClick = onLeave)
+                LabelledControl(
+                    icon = if (loudspeaker) Icons.AutoMirrored.Filled.VolumeUp else Icons.Filled.Hearing,
+                    label = if (loudspeaker) "Speaker" else "Earpiece",
+                    tint = if (loudspeaker) AuroraYellow else Color.White,
+                    active = loudspeaker,
+                    onClick = onToggleLoudspeaker,
+                )
+                LabelledControl(
+                    icon = Icons.Filled.MoreHoriz,
+                    label = "Lainnya",
+                    tint = Color.White,
+                    active = false,
+                    onClick = onMore,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One labelled round control in the room panel: a translucent disc with a hairline
+ * ring, and its state written underneath.
+ *
+ * [active] adds a faint accent wash and a brighter ring — enough to read "this is on"
+ * at a glance without turning the button into a solid block of colour, which is what
+ * made the previous bar look like a row of unrelated toys.
+ */
+@Composable
+private fun LabelledControl(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    active: Boolean,
+    onClick: () -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.90f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+        label = "ctl-press",
+    )
+    val ring by androidx.compose.animation.animateColorAsState(
+        targetValue = if (active) tint.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.13f),
+        animationSpec = tween(240),
+        label = "ctl-ring",
+    )
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .width(64.dp)
+            .clickable(
+                indication = null,
+                interactionSource = interaction,
+                onClick = onClick,
+            ),
+    ) {
+        Box(
+            modifier = Modifier
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                }
+                .size(54.dp)
+                .clip(CircleShape)
+                .background(
+                    if (active) tint.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.07f),
+                )
+                .border(1.dp, ring, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            androidx.compose.animation.Crossfade(
+                targetState = icon,
+                animationSpec = tween(180),
+                label = "ctl-icon",
+            ) { current ->
+                Icon(current, label, tint = tint, modifier = Modifier.size(23.dp))
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = label,
+            color = Color.White.copy(alpha = 0.80f),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
         )
     }
 }
 
-/** A circular control button used across the room control bar. */
+/**
+ * The hang-up button: bigger than its neighbours, solid red, and wrapped in a slow
+ * breathing halo.
+ *
+ * Unlabelled on purpose — a red phone-down glyph at this size is unambiguous in every
+ * language, and leaving the label off is what lets it sit taller than the row and read
+ * as the one destructive action.
+ */
 @Composable
-private fun CircleControl(
+private fun EndCallControl(onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.90f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+        label = "end-press",
+    )
+    val pulse = rememberInfiniteTransition(label = "end-call")
+    val breath by pulse.animateFloat(
+        initialValue = 0.30f,
+        targetValue = 0.80f,
+        animationSpec = infiniteRepeatable(tween(1500, easing = LinearEasing), RepeatMode.Reverse),
+        label = "end-breath",
+    )
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.width(64.dp),
+    ) {
+        Box(
+            modifier = Modifier.size(72.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.matchParentSize().graphicsLayer { alpha = breath }) {
+                val r = size.minDimension / 2f
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        listOf(Color(0xFFFF3B58).copy(alpha = 0.45f), Color.Transparent),
+                        radius = r,
+                    ),
+                    radius = r,
+                )
+                drawCircle(
+                    color = Color(0xFFFF3B58).copy(alpha = 0.45f),
+                    radius = r * 0.80f,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx()),
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                    }
+                    .size(58.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFFF6303F))
+                    .clickable(
+                        indication = null,
+                        interactionSource = interaction,
+                        onClick = onClick,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.CallEnd, "Keluar",
+                    tint = Color.White, modifier = Modifier.size(26.dp),
+                )
+            }
+        }
+        // Keeps the icon rows aligned even though this one carries no label.
+        Spacer(Modifier.height(8.dp))
+        Text("", fontSize = 11.sp, maxLines = 1)
+    }
+}
+
+/**
+ * A round control with an animated halo behind it and a press-spring.
+ *
+ * The halo only draws when [aura] is opaque, so an inactive button costs nothing —
+ * important, since this bar sits over live video on a cheap phone. Colours animate
+ * rather than snap, which is what makes toggling the mic feel like one object
+ * changing state instead of two different buttons swapping places.
+ */
+@Composable
+private fun AuraControl(
     icon: ImageVector,
     description: String,
     background: Color,
     tint: Color,
+    aura: Color,
     size: androidx.compose.ui.unit.Dp = 52.dp,
     iconSize: androidx.compose.ui.unit.Dp = 23.dp,
+    /** 0..1 — how strong the halo gets at its peak. */
+    auraStrength: Float = 1f,
     onClick: () -> Unit,
 ) {
+    val active = aura.alpha > 0f
+    val bg by androidx.compose.animation.animateColorAsState(
+        targetValue = background,
+        animationSpec = tween(280),
+        label = "aura-bg",
+    )
+    val fg by androidx.compose.animation.animateColorAsState(
+        targetValue = tint,
+        animationSpec = tween(280),
+        label = "aura-fg",
+    )
+    // Breathing halo, only while the control is active.
+    val pulse = rememberInfiniteTransition(label = "aura")
+    val breath by pulse.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Reverse),
+        label = "aura-breath",
+    )
+
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.90f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+        label = "aura-press",
+    )
+
     Box(
-        modifier = Modifier
-            .size(size)
-            .background(background, CircleShape)
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = onClick,
-            ),
+        modifier = Modifier.size(size + 18.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, description, tint = tint, modifier = Modifier.size(iconSize))
+        if (active) {
+            // A halo plus a SWEEPING ring. The sweep gradient rotates, so the ring has
+            // a bright arc travelling round it — that slow highlight is what makes the
+            // control feel lit from somewhere rather than just tinted.
+            val spin by pulse.animateFloat(
+                initialValue = 0f,
+                targetValue = 360f,
+                animationSpec = infiniteRepeatable(tween(4200, easing = LinearEasing), RepeatMode.Restart),
+                label = "aura-spin",
+            )
+            Canvas(Modifier.matchParentSize().graphicsLayer { alpha = breath * auraStrength }) {
+                val r = this.size.minDimension / 2f
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(aura.copy(alpha = 0.36f), Color.Transparent),
+                        center = center,
+                        radius = r,
+                    ),
+                    radius = r,
+                )
+                rotate(degrees = spin) {
+                    drawCircle(
+                        brush = Brush.sweepGradient(
+                            listOf(
+                                aura.copy(alpha = 0.10f),
+                                AuroraYellow.copy(alpha = 0.65f),
+                                aura.copy(alpha = 0.25f),
+                                Color.Transparent,
+                                aura.copy(alpha = 0.10f),
+                            ),
+                        ),
+                        radius = r * 0.74f,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()),
+                    )
+                }
+            }
+        }
+        Box(
+            modifier = Modifier
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                }
+                .size(size)
+                .background(bg, CircleShape)
+                .clickable(
+                    indication = null,
+                    interactionSource = interaction,
+                    onClick = onClick,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            // Crossfade the glyph so mic ⇄ mic-off doesn't pop.
+            androidx.compose.animation.Crossfade(
+                targetState = icon,
+                animationSpec = tween(200),
+                label = "aura-icon",
+            ) { current ->
+                Icon(current, description, tint = fg, modifier = Modifier.size(iconSize))
+            }
+        }
     }
 }
 
@@ -1784,7 +2911,7 @@ private fun RoundControl(
     icon: ImageVector,
     description: String,
     size: androidx.compose.ui.unit.Dp = 46.dp,
-    background: Color = Color(0xFF24242C),
+    background: Color = NexusSurfaceElevated,
     tint: Color = NexusTextPrimary,
     onClick: () -> Unit,
 ) {

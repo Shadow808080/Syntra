@@ -76,12 +76,14 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.NetUser
+import com.example.syntra.net.BlockStore
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.launch
@@ -417,7 +419,7 @@ fun ProfileUserScreen(
                             interactionSource = remember { MutableInteractionSource() },
                         ) {
                             scope.launch { runCatching { SyntraClient.blockUser(username) } }
-                            BlockStore.block(context, name)
+                            BlockStore.add(context, username, user?.id)
                             Toast.makeText(context, "$name diblokir.", Toast.LENGTH_SHORT).show()
                             onBack()
                         }
@@ -464,7 +466,7 @@ private fun RenameContactDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text("Edit nama", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -642,7 +644,7 @@ private fun ToggleRow(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = NexusAccent,
                 uncheckedThumbColor = NexusTextSecondary,
-                uncheckedTrackColor = Color(0xFF2A2A32),
+                uncheckedTrackColor = NexusSurfaceElevated,
                 uncheckedBorderColor = NexusStroke,
             ),
         )

@@ -374,6 +374,25 @@ object SyntraClient {
      */
     suspend fun deleteMessage(messageId: String) = delete("/api/v1/messages/$messageId")
 
+    /**
+     * `DELETE /conversations/{id}` — removes the conversation from MY list.
+     *
+     * Personal, not destructive for the other side: a group is left (ownership is
+     * handed on), a direct chat is hidden and its view cleared. The other members are
+     * unaffected — see the `delete_conversation` migration.
+     */
+    suspend fun deleteConversation(conversationId: String) =
+        delete("/api/v1/conversations/$conversationId")
+
+    /**
+     * `DELETE /conversations/{id}/messages` — clears the history from MY view.
+     *
+     * Server-side this moves my `cleared_before_id` marker, so the messages stop
+     * coming back on the next sync. The peer keeps their copy.
+     */
+    suspend fun clearConversation(conversationId: String) =
+        delete("/api/v1/conversations/$conversationId/messages")
+
     /** `PUT /messages/{id}/reaction`. Blank [emoji] removes my reaction. Broadcasts. */
     suspend fun reactToMessage(messageId: String, emoji: String) {
         putData("/api/v1/messages/$messageId/reaction", JSONObject().put("emoji", emoji))

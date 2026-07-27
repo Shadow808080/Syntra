@@ -55,6 +55,7 @@ import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 
@@ -218,7 +219,7 @@ fun ReelDetailsScreen(
                         brush = if (canPost) {
                             Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent))
                         } else {
-                            Brush.horizontalGradient(listOf(Color(0xFF2A2A32), Color(0xFF2A2A32)))
+                            Brush.horizontalGradient(listOf(NexusSurfaceElevated, NexusSurfaceElevated))
                         },
                         shape = RoundedCornerShape(26.dp),
                     )
@@ -372,7 +373,7 @@ private fun ToggleRow(
                 .width(46.dp)
                 .height(28.dp)
                 .background(
-                    if (checked) NexusAccent else Color(0xFF2A2A32),
+                    if (checked) NexusAccent else NexusSurfaceElevated,
                     RoundedCornerShape(50),
                 )
                 .padding(3.dp),

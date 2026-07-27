@@ -30,4 +30,13 @@ var NexusTextSecondary by mutableStateOf(Color(0xFF8A8A9A))
 var NexusAccent by mutableStateOf(Color(0xFF3B68F5))
 var NexusAccentSoft by mutableStateOf(Color(0xFF6E8BFF))
 var NexusRing by mutableStateOf(Color(0xFF6C5CE7))
+
+/**
+ * Fill behind a destructive action (block, end room, sign out).
+ *
+ * Translucent rather than a fixed colour: it takes on whatever surface sits under it,
+ * so the same value reads as a deep maroon on the dark themes and a soft red wash on
+ * the light one. The old hardcoded 0xFF3A1620 was a near-black on a white page.
+ */
+val DangerFill = Color(0xFFFF3B48).copy(alpha = 0.16f)
 var NexusOnline by mutableStateOf(Color(0xFF23C55E))

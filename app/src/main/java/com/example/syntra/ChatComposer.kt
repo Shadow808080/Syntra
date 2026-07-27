@@ -51,16 +51,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.syntra.net.GifClient
 import com.example.syntra.net.GifItem
+import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.delay
@@ -300,7 +301,7 @@ fun GifPickerSheet(
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 6.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF23232B))
+                    .background(NexusSurfaceElevated)
                     .clickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
@@ -339,7 +340,7 @@ fun GifPickerSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 8.dp)
-                    .background(Color(0xFF23232B), RoundedCornerShape(20.dp))
+                    .background(NexusSurfaceElevated, RoundedCornerShape(20.dp))
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -393,7 +394,7 @@ fun GifPickerSheet(
                                 .fillMaxWidth()
                                 .height(120.dp)
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF23232B))
+                                .background(NexusSurfaceElevated)
                                 .clickable(
                                     indication = null,
                                     interactionSource = remember { MutableInteractionSource() },
@@ -516,7 +517,7 @@ fun RecordingBar(seconds: Int, onCancel: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp)
-            .background(Color(0xFF3A1620), RoundedCornerShape(24.dp))
+            .background(DangerFill, RoundedCornerShape(24.dp))
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -551,39 +552,42 @@ fun RecordingBar(seconds: Int, onCancel: () -> Unit) {
 // Attachment sheet
 // ---------------------------------------------------------------------------
 
+/**
+ * The "kirim media" chooser behind the camera button.
+ *
+ * Deliberately plain: two full-width rows, a flat monochrome icon tile each, a label
+ * and a line saying what it does. No gradient discs — those read as a toy next to the
+ * rest of the chat, and a two-item menu doesn't need decoration to be understood.
+ */
 @Composable
 fun AttachmentSheet(onCamera: () -> Unit, onGallery: () -> Unit, onDismiss: () -> Unit) {
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(NexusSurface, RoundedCornerShape(24.dp))
-                .padding(top = 20.dp, bottom = 24.dp),
+                .background(NexusSurface, RoundedCornerShape(20.dp))
+                .padding(vertical = 8.dp),
         ) {
             Text(
                 text = "Kirim media",
-                color = NexusTextPrimary,
-                fontSize = 15.sp,
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(start = 22.dp, bottom = 18.dp),
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 10.dp),
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
-                AttachOption(
-                    label = "Kamera",
-                    icon = Icons.Filled.PhotoCamera,
-                    gradient = listOf(Color(0xFF3B68F5), Color(0xFF6E8BFF)),
-                    onClick = onCamera,
-                )
-                AttachOption(
-                    label = "Galeri",
-                    icon = Icons.Filled.Image,
-                    gradient = listOf(Color(0xFF9733EE), Color(0xFFDA22FF)),
-                    onClick = onGallery,
-                )
-            }
+            AttachOption(
+                label = "Kamera",
+                detail = "Ambil foto sekarang",
+                icon = Icons.Filled.PhotoCamera,
+                onClick = onCamera,
+            )
+            AttachOption(
+                label = "Galeri",
+                detail = "Pilih dari penyimpanan",
+                icon = Icons.Filled.Image,
+                onClick = onGallery,
+            )
+            Spacer(Modifier.height(6.dp))
         }
     }
 }
@@ -591,27 +595,35 @@ fun AttachmentSheet(onCamera: () -> Unit, onGallery: () -> Unit, onDismiss: () -
 @Composable
 private fun AttachOption(
     label: String,
+    detail: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    gradient: List<Color>,
     onClick: () -> Unit,
 ) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.clickable(
-            indication = null,
-            interactionSource = remember { MutableInteractionSource() },
-            onClick = onClick,
-        ),
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 20.dp, vertical = 12.dp),
     ) {
         Box(
             modifier = Modifier
-                .size(64.dp)
-                .background(Brush.linearGradient(gradient), CircleShape),
+                .size(42.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(NexusSurfaceElevated),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, label, tint = Color.White, modifier = Modifier.size(28.dp))
+            Icon(icon, null, tint = NexusTextPrimary, modifier = Modifier.size(20.dp))
         }
-        Spacer(Modifier.height(10.dp))
-        Text(label, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.width(14.dp))
+        Column {
+            Text(label, color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(2.dp))
+            Text(detail, color = NexusTextSecondary, fontSize = 12.sp)
+        }
     }
 }

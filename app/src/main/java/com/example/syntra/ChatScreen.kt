@@ -65,6 +65,8 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -109,6 +111,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.StrokeCap
@@ -130,6 +133,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
@@ -141,6 +145,9 @@ import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import coil.compose.AsyncImage
 import com.example.syntra.net.ApiConfig
+import com.example.syntra.net.AvatarCache
+import com.example.syntra.net.BlockStore
+import com.example.syntra.net.MessageCache
 import com.example.syntra.net.NetConversation
 import com.example.syntra.net.NetMessage
 import com.example.syntra.net.NetPresence
@@ -232,7 +239,7 @@ data class Conversation(
 
 // Stable placeholder gradients, picked from the id hash (align. doc §6).
 private val gradientPalettes = listOf(
-    listOf(Color(0xFF6C5CE7), Color(0xFF3B68F5)),
+    listOf(Color(0xFF2E6BF0), Color(0xFF3B68F5)),
     listOf(Color(0xFF11998E), Color(0xFF38EF7D)),
     listOf(Color(0xFFEE5A6F), Color(0xFFF29263)),
     listOf(Color(0xFF485563), Color(0xFF29323C)),
@@ -616,9 +623,24 @@ fun ChatScreen(
     // keeps disappearing on the home" bug. Run every fresh Conversation through this so
     // the cached photo sticks across rebuilds instead of falling back to the blank tile.
     fun Conversation.withCachedAvatar(): Conversation {
-        if (!avatarUrl.isNullOrBlank()) return this
-        val u = counterpartUsername ?: return this
-        val cached = avatarCache[u]
+        // BOTH ids. The rooms screens only ever see a user id, so storing a photo
+        // under the username alone left them with letter tiles for people whose
+        // picture was sitting right there in the chat list.
+        val keys = listOfNotNull(counterpartUsername, counterpartId).filter { it.isNotBlank() }
+        // Blocked: strip the photo. Their name stays (you need to know whose chat this
+        // is to unblock them), but their face does not — even from a chat you had
+        // before the block, which is the case the user actually notices.
+        if (BlockStore.isBlocked(context, counterpartUsername, counterpartId)) {
+            return copy(avatarUrl = null)
+        }
+        if (!avatarUrl.isNullOrBlank()) {
+            keys.forEach { AvatarCache.put(context, it, avatarUrl) }
+            return this
+        }
+        if (keys.isEmpty()) return this
+        // Session map first (hot), then the persisted store — this is the lookup that
+        // used to start empty on every re-entry and leave the home full of blanks.
+        val cached = keys.firstNotNullOfOrNull { avatarCache[it] ?: AvatarCache.get(context, it) }
         return if (!cached.isNullOrBlank()) copy(avatarUrl = cached) else this
     }
 
@@ -682,7 +704,8 @@ fun ChatScreen(
     fun resolveAvatarFor(convo: Conversation) {
         val username = convo.counterpartUsername
         if (username.isNullOrBlank()) return
-        val cached = avatarCache[username]
+        // Persisted first: a photo resolved in an earlier session means no lookup now.
+        val cached = avatarCache[username] ?: AvatarCache.get(context, username)
         if (cached != null) {
             if (cached.isNotBlank() && convo.avatarUrl != cached) {
                 val i = chats.indexOfFirst { it.id == convo.id }
@@ -694,6 +717,7 @@ fun ChatScreen(
             val url = runCatching { SyntraClient.getUser(username) }.getOrNull()
                 ?.avatarMediaId?.takeIf { it.startsWith("http") }
             avatarCache[username] = url ?: ""
+            AvatarCache.put(context, username, url)
             if (!url.isNullOrBlank()) {
                 val i = chats.indexOfFirst { it.id == convo.id }
                 if (i >= 0 && chats[i].avatarUrl != url) chats[i] = chats[i].copy(avatarUrl = url)
@@ -784,6 +808,9 @@ fun ChatScreen(
                     }
                     // A contact changed name/photo. counterpartId is only set on direct
                     // chats, so updating name here never mislabels a group.
+                    // Record it by user id too, so the rooms screens (which only know
+                    // ids) pick the new photo up as well.
+                    AvatarCache.put(context, userId, avatarUrl)
                     chats.forEachIndexed { i, c ->
                         if (c.counterpartId == userId) {
                             var u = c
@@ -919,13 +946,23 @@ fun ChatScreen(
         }
     }
 
-    // Local view flags: blocked chats disappear, archived hide behind a toggle,
-    // pinned float to the top.
-    val blockedNames = BlockStore.all(context)
-    val notBlocked = filtered.filterNot { it.name in blockedNames }
+    // Local view flags: archived hide behind a toggle, pinned float to the top.
+    //
+    // Blocked conversations deliberately STAY in the list. Unblocking is offered
+    // inside the chat itself, so hiding the row would strand the user with no way to
+    // undo except Settings. What the block removes is their PHOTO (see
+    // `withCachedAvatar` / Conversation.blocked), not the row.
+    val notBlocked = filtered
     val archivedCount = notBlocked.count { it.id in archivedIds }
+    // Archived conversations are NOT mixed into the home list any more. They used to
+    // be revealed in place by a text link at the very BOTTOM of the list — which meant
+    // you had to scroll past every chat to find the thing that hides chats, and once
+    // expanded, archived rows sat indistinguishably among the live ones.
     val visible = notBlocked
-        .filter { showArchived || it.id !in archivedIds }
+        .filter { it.id !in archivedIds }
+        .sortedByDescending { it.id in pinnedIds }
+    val archivedChats = notBlocked
+        .filter { it.id in archivedIds }
         .sortedByDescending { it.id in pinnedIds }
 
     fun openChat(convo: Conversation) {
@@ -1008,7 +1045,12 @@ fun ChatScreen(
                             pendingDelete = picked.firstOrNull()
                         }
                         "Blokir" -> {
-                            picked.forEach { BlockStore.block(context, it.name) }
+                            picked.forEach { convo ->
+                                BlockStore.add(context, convo.counterpartUsername, convo.counterpartId)
+                                convo.counterpartUsername?.takeIf { it.isNotBlank() }?.let { u ->
+                                    SyntraClient.fireAndForget { SyntraClient.blockUser(u) }
+                                }
+                            }
                             selection.clear()
                             Toast.makeText(
                                 context,
@@ -1047,6 +1089,17 @@ fun ChatScreen(
                     items(8) { ChatRowSkeleton() }
                     return@LazyColumn
                 }
+                // Archive entry — an icon row at the TOP, the way every messenger
+                // does it, so the way into the archive is the first thing you see
+                // rather than the last.
+                if (archivedCount > 0 && !searching) {
+                    item(key = "archive-entry") {
+                        ArchiveEntryRow(
+                            count = archivedCount,
+                            onClick = { showArchived = true },
+                        )
+                    }
+                }
                 if (!searching) {
                     item {
                         ActiveRow(
@@ -1081,24 +1134,6 @@ fun ChatScreen(
                         onLongClick = { if (!selection.remove(convo.id)) selection.add(convo.id) },
                         onFirstVisible = { resolveAvatarFor(convo) },
                     )
-                }
-                if (archivedCount > 0 && !searching) {
-                    item {
-                        Text(
-                            text = if (showArchived) "Sembunyikan arsip" else "Diarsipkan ($archivedCount)",
-                            color = NexusAccentSoft,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(
-                                    indication = null,
-                                    interactionSource = remember { MutableInteractionSource() },
-                                ) { showArchived = !showArchived }
-                                .padding(vertical = 18.dp),
-                            textAlign = TextAlign.Center,
-                        )
-                    }
                 }
                 if (searching && visible.isEmpty()) {
                     item {
@@ -1151,7 +1186,10 @@ fun ChatScreen(
                 Icon(
                     imageVector = Icons.Filled.PersonAddAlt,
                     contentDescription = "Cari orang",
-                    tint = NexusAccentSoft,
+                    // Neutral, not accent. This is the SECONDARY action sitting right
+                    // above the camera FAB — two blue circles stacked read as equals,
+                    // and the eye had no way to tell which one was the main one.
+                    tint = NexusTextSecondary,
                     modifier = Modifier.size(24.dp),
                 )
             }
@@ -1265,20 +1303,59 @@ fun ChatScreen(
                 onDismiss = { pendingDelete = null },
                 onConfirm = {
                     pendingDelete = null
-                    // Local only: the backend has no delete/leave endpoint for
-                    // conversations yet, so say plainly what this does.
-                    if (selection.isEmpty()) {
-                        chats.remove(convo)
-                    } else {
-                        chats.removeAll { it.id in selection }
-                        selection.clear()
+                    // The backend DOES have this — DELETE /conversations/{id} (the
+                    // delete_conversation RPC). It was never called, so the row was
+                    // only dropped from the in-memory list and the next refresh
+                    // brought it straight back.
+                    val targets =
+                        if (selection.isEmpty()) listOf(convo) else chats.filter { it.id in selection }
+                    selection.clear()
+                    // AWAIT the server, and only drop the row once it agrees.
+                    //
+                    // This used to be fireAndForget, which swallows every error: the
+                    // row vanished, the request 404'd, and the next refresh brought the
+                    // conversation back. The delete looked like it worked right up
+                    // until it visibly didn't — the worst possible failure mode.
+                    scope.launch {
+                        val failed = mutableListOf<Conversation>()
+                        targets.forEach { c ->
+                            val ok = !ApiConfig.ENABLED ||
+                                runCatching { SyntraClient.deleteConversation(c.id) }.isSuccess
+                            if (ok) {
+                                MessageCache.clearConversation(context, c.id)
+                                chats.remove(c)
+                            } else {
+                                failed += c
+                            }
+                        }
+                        val msg = when {
+                            failed.isEmpty() -> "Percakapan dihapus."
+                            failed.size == targets.size -> "Gagal menghapus percakapan."
+                            else -> "${failed.size} percakapan gagal dihapus."
+                        }
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                     }
-                    Toast.makeText(
-                        context,
-                        "Percakapan disembunyikan di perangkat ini. Pesan baru akan memunculkannya lagi.",
-                        Toast.LENGTH_LONG,
-                    ).show()
                 },
+            )
+        }
+
+        if (showArchived) {
+            ArchivedChatsScreen(
+                chats = archivedChats,
+                onOpen = { showArchived = false; openChat(it) },
+                onUnarchive = { convo ->
+                    ChatFlags.setArchived(context, listOf(convo.id), false)
+                    archivedIds = ChatFlags.archived(context)
+                    // Leaving the screen when it empties, so the user isn't left
+                    // staring at an "empty archive" they have to back out of.
+                    if (archivedIds.isEmpty()) showArchived = false
+                },
+                onUnarchiveAll = {
+                    ChatFlags.setArchived(context, archivedChats.map { it.id }, false)
+                    archivedIds = ChatFlags.archived(context)
+                    showArchived = false
+                },
+                onClose = { showArchived = false },
             )
         }
 
@@ -1488,7 +1565,7 @@ private fun NexusHeader(
                     expanded = menuOpen,
                     onDismissRequest = { menuOpen = false },
                 ) {
-                    listOf("New group", "Starred messages", "Settings").forEach { label ->
+                    listOf("New group", "Settings").forEach { label ->
                         DropdownMenuItem(
                             text = { Text(label) },
                             onClick = {
@@ -1648,25 +1725,43 @@ private fun StoryAuroraBackground(modifier: Modifier = Modifier) {
 
         // Three woven aurora ribbons. Soft vertical gradients (transparent → tint →
         // transparent) make each ribbon a glow rather than a hard band.
+        //
+        // The tints are DERIVED from the theme accent, not fixed. They used to be a
+        // hardcoded blue/teal/periwinkle, so the header kept glowing blue behind a
+        // Forest or Sunset theme — the one part of the screen that ignored the user's
+        // choice. Two of the three are hue-shifted off the accent so the ribbons still
+        // read as separate layers instead of one flat wash.
+        val a1 = NexusAccentSoft
+        val a2 = shiftHue(NexusAccent, 34f)
+        val a3 = NexusAccent
         drawPath(
             ribbon(h * 0.42f, h * 0.16f, 1.4f, p1, h * 0.5f),
             brush = Brush.verticalGradient(
-                listOf(Color.Transparent, Color(0xFFB79CFF).copy(alpha = 0.22f), Color.Transparent),
+                listOf(Color.Transparent, a1.copy(alpha = 0.22f), Color.Transparent),
             ),
         )
         drawPath(
             ribbon(h * 0.58f, h * 0.20f, 1.1f, p2, h * 0.55f),
             brush = Brush.verticalGradient(
-                listOf(Color.Transparent, Color(0xFF20D5C4).copy(alpha = 0.18f), Color.Transparent),
+                listOf(Color.Transparent, a2.copy(alpha = 0.18f), Color.Transparent),
             ),
         )
         drawPath(
             ribbon(h * 0.5f, h * 0.18f, 1.7f, p3, h * 0.42f),
             brush = Brush.verticalGradient(
-                listOf(Color.Transparent, Color(0xFF6E8BFF).copy(alpha = 0.2f), Color.Transparent),
+                listOf(Color.Transparent, a3.copy(alpha = 0.2f), Color.Transparent),
             ),
         )
     }
+}
+
+/** Rotates a colour's hue, keeping saturation and value — used to derive the aurora's
+ *  secondary ribbon tints from whatever accent the theme supplies. */
+private fun shiftHue(color: Color, degrees: Float): Color {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(color.toArgb(), hsv)
+    hsv[0] = (hsv[0] + degrees + 360f) % 360f
+    return Color(android.graphics.Color.HSVToColor(hsv))
 }
 
 // ---------------------------------------------------------------------------
@@ -2996,7 +3091,7 @@ private fun DeleteConversationDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3041,7 +3136,7 @@ private fun DeleteConversationDialog(
                 Spacer(Modifier.width(6.dp))
                 Box(
                     modifier = Modifier
-                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .background(DangerFill, RoundedCornerShape(50))
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
@@ -3071,7 +3166,7 @@ private fun StoryViewersDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(vertical = 20.dp),
         ) {
             Row(
@@ -3161,7 +3256,7 @@ private fun StoryDeleteDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1B1B22), RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
         ) {
             Text("Hapus story ini?", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -3191,7 +3286,7 @@ private fun StoryDeleteDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
                 Spacer(Modifier.width(6.dp))
                 Box(
                     modifier = Modifier
-                        .background(Color(0xFF3A1620), RoundedCornerShape(50))
+                        .background(DangerFill, RoundedCornerShape(50))
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
@@ -3212,73 +3307,306 @@ private fun StoryDeleteDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
 
 /**
  * Empty-home invite: shown once loaded when there are no conversations (and,
- * softly noted, no stories from others yet). A warm door-in, not a dead void.
+ * softly noted, no stories from others yet).
+ *
+ * Pared back from the old version — the heading was 22sp of ExtraBold over a
+ * two-line paragraph and a 104dp emblem, which shouted at someone who had simply not
+ * started yet. Now it is a small animated add-people mark, one line, and the button.
+ * The charisma comes from the aurora behind it rather than from type size.
  */
 @Composable
 private fun ChatHomeEmpty(noStories: Boolean, onDiscover: () -> Unit) {
-    Column(
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+    ) {
+        // A slow aurora bloom behind the mark. Two counter-drifting radial washes, so
+        // the light moves without ever repeating a recognisable cycle.
+        val t = rememberInfiniteTransition(label = "empty-aurora")
+        val drift by t.animateFloat(
+            initialValue = 0f,
+            targetValue = (2f * Math.PI).toFloat(),
+            animationSpec = infiniteRepeatable(tween(9000, easing = LinearEasing), RepeatMode.Restart),
+            label = "empty-drift",
+        )
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(230.dp),
+        ) {
+            val r = size.minDimension * 0.62f
+            listOf(
+                Offset(
+                    size.width * (0.5f + 0.16f * kotlin.math.cos(drift)),
+                    size.height * (0.42f + 0.14f * kotlin.math.sin(drift)),
+                ) to NexusAccent.copy(alpha = 0.22f),
+                Offset(
+                    size.width * (0.5f - 0.14f * kotlin.math.cos(drift * 0.7f)),
+                    size.height * (0.52f - 0.12f * kotlin.math.sin(drift * 0.7f)),
+                ) to NexusAccentSoft.copy(alpha = 0.16f),
+            ).forEach { (center, color) ->
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        listOf(color, Color.Transparent),
+                        center = center,
+                        radius = r,
+                    ),
+                    radius = r,
+                    center = center,
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 36.dp, vertical = 48.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            // The add-people mark: breathes, with a ring that expands and fades out of
+            // it like a signal going looking for someone.
+            val pulse by t.animateFloat(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(tween(2200, easing = LinearEasing), RepeatMode.Restart),
+                label = "empty-pulse",
+            )
+            val breathe by t.animateFloat(
+                initialValue = 0.96f,
+                targetValue = 1.04f,
+                animationSpec = infiniteRepeatable(tween(1800), RepeatMode.Reverse),
+                label = "empty-breathe",
+            )
+            Box(
+                modifier = Modifier.size(76.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(Modifier.matchParentSize()) {
+                    val maxR = size.minDimension / 2f
+                    // Expanding ring: fades as it grows, so it reads as emitted light.
+                    drawCircle(
+                        color = NexusAccent.copy(alpha = 0.30f * (1f - pulse)),
+                        radius = maxR * (0.55f + 0.45f * pulse),
+                        style = Stroke(width = 1.5.dp.toPx()),
+                    )
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            listOf(NexusAccent.copy(alpha = 0.26f), Color.Transparent),
+                            radius = maxR,
+                        ),
+                        radius = maxR,
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Filled.PersonAddAlt,
+                    contentDescription = null,
+                    tint = NexusAccentSoft,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .graphicsLayer {
+                            scaleX = breathe
+                            scaleY = breathe
+                        },
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                text = if (noStories) {
+                    "Ikuti orang untuk melihat story dan mulai mengobrol."
+                } else {
+                    "Belum ada obrolan. Sapa seseorang untuk memulai."
+                },
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(18.dp))
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onDiscover,
+                    )
+                    .padding(horizontal = 22.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Search, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Temukan orang", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+/**
+ * The way into the archive: an icon row pinned at the top of the chat list.
+ *
+ * Replaces a plain text link that sat at the very BOTTOM — you had to scroll past
+ * every conversation to reach the control that hides conversations, and tapping it
+ * expanded archived chats in place, where they were indistinguishable from live ones.
+ */
+@Composable
+private fun ArchiveEntryRow(count: Int, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 32.dp, vertical = 60.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 22.dp, vertical = 14.dp),
     ) {
-        // Soft gradient emblem.
         Box(
             modifier = Modifier
-                .size(104.dp)
-                .clip(CircleShape)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(NexusAccent.copy(alpha = 0.28f), NexusAccent.copy(alpha = 0.06f)),
-                    ),
-                )
-                .border(1.dp, NexusAccent.copy(alpha = 0.35f), CircleShape),
+                .size(38.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(NexusSurfaceElevated),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = Icons.Filled.PersonAddAlt,
-                contentDescription = null,
-                tint = NexusAccentSoft,
-                modifier = Modifier.size(46.dp),
+                Icons.Filled.Archive, null,
+                tint = NexusTextSecondary, modifier = Modifier.size(19.dp),
             )
         }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.width(14.dp))
         Text(
-            text = "Mulai dunia Syntra-mu",
+            text = "Diarsipkan",
             color = NexusTextPrimary,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.ExtraBold,
-            textAlign = TextAlign.Center,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
-        Spacer(Modifier.height(10.dp))
         Text(
-            text = if (noStories) {
-                "Belum ada obrolan atau story. Ikuti orang untuk melihat story mereka, lalu sapa untuk memulai percakapan pertamamu."
-            } else {
-                "Belum ada obrolan. Temukan orang dan kirim pesan pertama — percakapanmu akan muncul di sini."
-            },
+            text = count.toString(),
             color = NexusTextSecondary,
-            fontSize = 14.sp,
-            lineHeight = 21.sp,
-            textAlign = TextAlign.Center,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
         )
-        Spacer(Modifier.height(26.dp))
-        // Primary action: discover people (icon-led, on-brand gradient).
+        Spacer(Modifier.width(8.dp))
+        Icon(
+            Icons.Filled.ChevronRight, null,
+            tint = NexusTextSecondary, modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+/**
+ * The archive, on its own screen.
+ *
+ * Separate rather than expanded-in-place so archived chats keep the property that
+ * makes archiving worth doing: they are somewhere else. Un-archiving is a long-press
+ * away, and emptying the archive returns everything at once.
+ */
+@Composable
+private fun ArchivedChatsScreen(
+    chats: List<Conversation>,
+    onOpen: (Conversation) -> Unit,
+    onUnarchive: (Conversation) -> Unit,
+    onUnarchiveAll: () -> Unit,
+    onClose: () -> Unit,
+) {
+    BackHandler(onBack = onClose)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(NexusBackground),
+    ) {
         Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                    onClick = onDiscover,
-                )
-                .padding(horizontal = 26.dp, vertical = 13.dp),
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.Search, null, tint = Color.White, modifier = Modifier.size(19.dp))
-            Spacer(Modifier.width(9.dp))
-            Text("Temukan orang", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onClose,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack, "Kembali",
+                    tint = NexusTextPrimary, modifier = Modifier.size(22.dp),
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "Diarsipkan",
+                color = NexusTextPrimary,
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (chats.isNotEmpty()) {
+                Text(
+                    "Keluarkan semua",
+                    color = NexusAccentSoft,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onUnarchiveAll,
+                        )
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+            }
+        }
+        if (chats.isEmpty()) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Archive, null,
+                    tint = NexusTextSecondary, modifier = Modifier.size(34.dp),
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Tidak ada obrolan diarsipkan",
+                    color = NexusTextSecondary,
+                    fontSize = 13.sp,
+                )
+            }
+            return@Column
+        }
+        Text(
+            "Tahan sebuah obrolan untuk mengeluarkannya dari arsip.",
+            color = NexusTextSecondary,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+            modifier = Modifier.padding(horizontal = 22.dp, vertical = 6.dp),
+        )
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 24.dp),
+        ) {
+            items(chats, key = { it.id }) { convo ->
+                ConversationRow(
+                    convo = convo,
+                    selected = false,
+                    pinned = false,
+                    onClick = { onOpen(convo) },
+                    onLongClick = { onUnarchive(convo) },
+                    onFirstVisible = {},
+                )
+            }
         }
     }
 }
