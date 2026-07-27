@@ -65,6 +65,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
@@ -212,11 +213,14 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     // video room the moment anyone turns their camera on.
     val videoTracks by VoiceEngine.videoTracks.collectAsState()
     val cameraOn by VoiceEngine.cameraOn.collectAsState()
+    // Whether MY "Mode VTuber" avatar is currently published (in place of the camera).
+    val avatarOn by VoiceEngine.avatarOn.collectAsState()
 
     // Bottom sheets reachable from the control bar / top bar.
     var showMore by remember { mutableStateOf(false) }
     var showPeople by remember { mutableStateOf(false) }
     var showVoiceModes by remember { mutableStateOf(false) }
+    var showVtuber by remember { mutableStateOf(false) }
 
     // Elapsed time since the room UI went live, shown as a call timer in the top bar.
     var elapsed by remember(room.id) { mutableIntStateOf(0) }
@@ -789,6 +793,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 volume = volume,
                 loudspeaker = loudspeaker,
                 cameraOn = cameraOn,
+                avatarOn = avatarOn,
                 isHost = isHost,
                 voiceMode = com.example.syntra.net.RoomVoiceFx.effect,
                 onVolume = { applyVolume(it) },
@@ -798,6 +803,10 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 },
                 onSwitchCamera = { VoiceEngine.switchCamera() },
                 onVoiceMode = { showMore = false; showVoiceModes = true },
+                onVtuber = {
+                    if (canPublish) { showMore = false; showVtuber = true }
+                    else { showMore = false; askTarget = SpeakRequest.CAMERA }
+                },
                 onEndRoom = { showMore = false; confirmLeave = true },
                 onDismiss = { showMore = false },
             )
@@ -809,6 +818,24 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 current = com.example.syntra.net.RoomVoiceFx.effect,
                 onSelect = { com.example.syntra.net.RoomVoiceFx.set(it); showVoiceModes = false },
                 onDismiss = { showVoiceModes = false },
+            )
+        }
+
+        // VTuber avatar picker — pick a character (publishes it), or turn it off.
+        if (showVtuber) {
+            RoomVtuberSheet(
+                enabled = avatarOn,
+                current = com.example.syntra.net.VtuberFx.avatar,
+                onPick = { avatar ->
+                    com.example.syntra.net.VtuberFx.avatar = avatar
+                    scope.launch { VoiceEngine.setAvatarEnabled(true) }
+                    showVtuber = false
+                },
+                onTurnOff = {
+                    scope.launch { VoiceEngine.setAvatarEnabled(false) }
+                    showVtuber = false
+                },
+                onDismiss = { showVtuber = false },
             )
         }
     }
@@ -1503,12 +1530,14 @@ private fun RoomMoreSheet(
     volume: Float,
     loudspeaker: Boolean,
     cameraOn: Boolean,
+    avatarOn: Boolean,
     isHost: Boolean,
     voiceMode: com.example.syntra.net.VoiceEffect,
     onVolume: (Float) -> Unit,
     onToggleLoudspeaker: () -> Unit,
     onSwitchCamera: () -> Unit,
     onVoiceMode: () -> Unit,
+    onVtuber: () -> Unit,
     onEndRoom: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1537,6 +1566,13 @@ private fun RoomMoreSheet(
             Spacer(Modifier.height(6.dp))
             // Voice changer for MY mic in this room.
             SheetAction("Mode suara · ${voiceMode.label}", Icons.Filled.RecordVoiceOver, NexusTextPrimary, onVoiceMode)
+            // VTuber avatar published in place of the camera, lip-synced to my voice.
+            SheetAction(
+                if (avatarOn) "Mode VTuber · aktif" else "Mode VTuber",
+                Icons.Filled.Face,
+                if (avatarOn) AuroraYellow else NexusTextPrimary,
+                onVtuber,
+            )
             // Chat lives on the switch above the room body, not buried in here.
             if (cameraOn) {
                 SheetAction("Ganti kamera", Icons.Filled.Cameraswitch, NexusTextPrimary, onSwitchCamera)
@@ -1604,6 +1640,92 @@ private fun RoomVoiceModeSheet(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Picks the VTuber character published in place of my camera. Tapping a character
+ * turns the avatar on (or switches to it); "Matikan" removes it. The mouth is driven
+ * by my voice, so there's nothing else to configure.
+ */
+@Composable
+private fun RoomVtuberSheet(
+    enabled: Boolean,
+    current: com.example.syntra.net.VtuberAvatar,
+    onPick: (com.example.syntra.net.VtuberAvatar) -> Unit,
+    onTurnOff: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
+                .padding(vertical = 18.dp),
+        ) {
+            Text(
+                "Mode VTuber",
+                color = NexusTextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 22.dp),
+            )
+            Text(
+                "Tampil sebagai karakter, bukan kamera. Mulutnya bergerak mengikuti suaramu.",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 2.dp, bottom = 12.dp),
+            )
+            // Character grid: two per row.
+            val avatars = com.example.syntra.net.VtuberAvatar.entries
+            avatars.chunked(2).forEach { row ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    row.forEach { avatar ->
+                        val selected = enabled && avatar == current
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(if (selected) NexusAccentSoft.copy(alpha = 0.18f) else NexusSurface)
+                                .border(
+                                    1.dp,
+                                    if (selected) NexusAccentSoft else NexusStroke,
+                                    RoundedCornerShape(16.dp),
+                                )
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    onClick = { onPick(avatar) },
+                                )
+                                .padding(horizontal = 14.dp, vertical = 14.dp),
+                        ) {
+                            Text(avatar.emoji, fontSize = 26.sp)
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                avatar.label,
+                                color = if (selected) NexusAccentSoft else NexusTextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                        }
+                    }
+                    // Keep a lone item on the last row half-width, aligned left.
+                    if (row.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            if (enabled) {
+                SheetAction("Matikan VTuber", Icons.Filled.Close, Color(0xFFFF5D5D), onTurnOff)
+            }
+            SheetAction("Tutup", Icons.Filled.Close, NexusTextSecondary, onDismiss)
         }
     }
 }

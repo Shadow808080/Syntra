@@ -60,6 +60,13 @@ object VoiceEngine {
     private val _cameraOn = MutableStateFlow(false)
     val cameraOn: StateFlow<Boolean> = _cameraOn
 
+    /** Whether MY VTuber avatar is currently publishing (in place of the camera). */
+    private val _avatarOn = MutableStateFlow(false)
+    val avatarOn: StateFlow<Boolean> = _avatarOn
+
+    // The avatar's published track, kept so it can be unpublished cleanly.
+    @Volatile private var avatarTrack: io.livekit.android.room.track.LocalVideoTrack? = null
+
     /** Connects to the SFU. Safe to call again; the previous session is dropped first. */
     suspend fun connect(context: Context, url: String, token: String) {
         disconnect()
@@ -105,7 +112,10 @@ object VoiceEngine {
                     rm.localParticipant.let { lp ->
                         val id = lp.identity?.value
                         if (id != null) {
-                            levels[id] = lp.audioLevel.coerceIn(0f, 1f)
+                            val lvl = lp.audioLevel.coerceIn(0f, 1f)
+                            levels[id] = lvl
+                            // Drive the VTuber mouth from my own loudness.
+                            if (_avatarOn.value) VtuberFx.feedLevel(lvl)
                             (lp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack)
                                 ?.let { videos[id] = it }
                         }
@@ -178,6 +188,8 @@ object VoiceEngine {
      */
     suspend fun setCameraEnabled(enabled: Boolean) {
         val lp = room?.localParticipant ?: return
+        // Camera and avatar both own the CAMERA source — only one at a time.
+        if (enabled && _avatarOn.value) setAvatarEnabled(enabled = false)
         runCatching { lp.setCameraEnabled(enabled) }
         _cameraOn.value = enabled
         val id = lp.identity?.value
@@ -186,6 +198,58 @@ object VoiceEngine {
             val track = lp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack
             if (enabled && track != null) cur[id] = track else cur.remove(id)
             _videoTracks.value = cur
+        }
+    }
+
+    /**
+     * Turns MY "Mode VTuber" avatar on/off. The avatar is a locally-rendered video
+     * ([AvatarVideoCapturer]) published under the CAMERA source, so everyone in the room
+     * sees it exactly like a camera — no backend change, no camera permission. Mutually
+     * exclusive with the real camera.
+     */
+    suspend fun setAvatarEnabled(enabled: Boolean) {
+        val lp = room?.localParticipant ?: return
+        if (enabled) {
+            if (_avatarOn.value) return
+            // Free the CAMERA source if the real camera happens to be on.
+            if (_cameraOn.value) runCatching { lp.setCameraEnabled(false) }.also { _cameraOn.value = false }
+            runCatching {
+                val capturer = AvatarVideoCapturer()
+                val track = lp.createVideoTrack(name = "avatar", capturer = capturer)
+                runCatching { track.startCapture() }
+                lp.publishVideoTrack(
+                    track,
+                    io.livekit.android.room.participant.VideoTrackPublishOptions(
+                        source = Track.Source.CAMERA,
+                    ),
+                )
+                avatarTrack = track
+                _avatarOn.value = true
+                VtuberFx.enabled = true
+                // Show my own avatar in the grid immediately (the poll also picks it up).
+                val id = lp.identity?.value
+                if (id != null) {
+                    val cur = HashMap(_videoTracks.value)
+                    cur[id] = track
+                    _videoTracks.value = cur
+                }
+            }
+        } else {
+            if (!_avatarOn.value && avatarTrack == null) return
+            val track = avatarTrack
+            avatarTrack = null
+            _avatarOn.value = false
+            VtuberFx.enabled = false
+            if (track != null) {
+                runCatching { lp.unpublishTrack(track) }
+                runCatching { track.stopCapture() }
+                runCatching { track.dispose() }
+            }
+            val id = lp.identity?.value
+            if (id != null) {
+                val cur = HashMap(_videoTracks.value)
+                if (cur[id] === track) { cur.remove(id); _videoTracks.value = cur }
+            }
         }
     }
 
@@ -207,6 +271,12 @@ object VoiceEngine {
         scope = null
         // A voice disguise is per-session — the next room starts as your real voice.
         RoomVoiceFx.reset()
+        // Tear down the avatar capturer/track if it was running.
+        runCatching { avatarTrack?.stopCapture() }
+        runCatching { avatarTrack?.dispose() }
+        avatarTrack = null
+        VtuberFx.reset()
+        _avatarOn.value = false
         _audioLevels.value = emptyMap()
         _videoTracks.value = emptyMap()
         _cameraOn.value = false
