@@ -1330,69 +1330,76 @@ fun ChatDetailScreen(
                 // the OLDER message; when it's a different day — or this is the very
                 // oldest message — we're at the top of a day group, so the chip is
                 // drawn above the bubble.
-                val older = ordered.getOrNull(index + 1)
-                if (older == null || dayKey(older.at) != dayKey(msg.at)) {
-                    DateChip(dayLabel(msg.at))
-                }
-                // In a group, show who sent each incoming message. `older` (index+1)
-                // is the previous message from the same run; only the first message of
-                // a same-sender run gets the name+avatar so a burst isn't repeated.
-                val sameSenderAsOlder = older != null && older.senderId == msg.senderId &&
-                    dayKey(older.at) == dayKey(msg.at)
-                val member = if (conversation.isGroup && !msg.fromMe) msg.senderId?.let { groupMembers[it] } else null
-                MessageBubble(
-                    msg = msg,
-                    isGroup = conversation.isGroup,
-                    senderName = member?.let { it.displayName.ifBlank { it.username } },
-                    senderAvatar = member?.avatarUrl,
-                    showSenderHeader = !sameSenderAsOlder,
-                    reactions = aggregateReactions(reactions[msg.id]),
-                    outgoingColor = chatTheme.bubble,
-                    onLongPress = { pendingMessage = msg },
-                    onImageClick = { fullscreenCaption = msg.text; fullscreenImage = it },
-                    onReply = { replyingTo = msg },
-                    // Spent from THIS side's point of view: for a received photo that's
-                    // my own open; for one I sent it's the recipient having opened it
-                    // (learned live), which is all the sender ever gets to know.
-                    viewOnceOpened = msg.viewOnce && ViewOnceStore.isSpent(context, msg.id, msg.fromMe),
-                    // Only reached from the recipient's side — the bubble has already
-                    // put the photo on disk, so [src] is a local path that opens at once.
-                    onOpenViewOnce = { src ->
-                        // Consume the single view, and tell the sender so their bubble
-                        // flips to "sudah dibuka" too.
-                        if (!ViewOnceStore.isOpened(context, msg.id)) {
-                            ViewOnceStore.markOpened(context, msg.id)
-                            SyntraClient.fireAndForget {
-                                SyntraClient.reactToMessage(msg.id, VIEW_ONCE_OPENED_MARK)
+                // Wrapped in an explicit Column. Emitting the chip and the bubble as
+                // two bare siblings let the LIST decide their order — and with
+                // reverseLayout that placement is reversed too, so the day label was
+                // rendering UNDER the first message of its own day. A Column owns its
+                // own ordering and is unaffected by the list direction.
+                Column {
+                    val older = ordered.getOrNull(index + 1)
+                    if (older == null || dayKey(older.at) != dayKey(msg.at)) {
+                        DateChip(dayLabel(msg.at))
+                    }
+                    // In a group, show who sent each incoming message. `older` (index+1)
+                    // is the previous message from the same run; only the first message of
+                    // a same-sender run gets the name+avatar so a burst isn't repeated.
+                    val sameSenderAsOlder = older != null && older.senderId == msg.senderId &&
+                        dayKey(older.at) == dayKey(msg.at)
+                    val member = if (conversation.isGroup && !msg.fromMe) msg.senderId?.let { groupMembers[it] } else null
+                    MessageBubble(
+                        msg = msg,
+                        isGroup = conversation.isGroup,
+                        senderName = member?.let { it.displayName.ifBlank { it.username } },
+                        senderAvatar = member?.avatarUrl,
+                        showSenderHeader = !sameSenderAsOlder,
+                        reactions = aggregateReactions(reactions[msg.id]),
+                        outgoingColor = chatTheme.bubble,
+                        onLongPress = { pendingMessage = msg },
+                        onImageClick = { fullscreenCaption = msg.text; fullscreenImage = it },
+                        onReply = { replyingTo = msg },
+                        // Spent from THIS side's point of view: for a received photo that's
+                        // my own open; for one I sent it's the recipient having opened it
+                        // (learned live), which is all the sender ever gets to know.
+                        viewOnceOpened = msg.viewOnce && ViewOnceStore.isSpent(context, msg.id, msg.fromMe),
+                        // Only reached from the recipient's side — the bubble has already
+                        // put the photo on disk, so [src] is a local path that opens at once.
+                        onOpenViewOnce = { src ->
+                            // Consume the single view, and tell the sender so their bubble
+                            // flips to "sudah dibuka" too.
+                            if (!ViewOnceStore.isOpened(context, msg.id)) {
+                                ViewOnceStore.markOpened(context, msg.id)
+                                SyntraClient.fireAndForget {
+                                    SyntraClient.reactToMessage(msg.id, VIEW_ONCE_OPENED_MARK)
+                                }
                             }
-                        }
-                        fullscreenCaption = msg.text
-                        fullscreenImage = src
-                    },
-                    translation = translations[msg.id],
-                    onHideTranslation = { translations.remove(msg.id) },
-                    quoted = msg.replyToId?.let { rid -> messages.firstOrNull { it.id == rid } },
-                    state = when {
-                        // Failure outranks everything: a message that never left the
-                        // device must not keep showing an in-flight clock.
-                        msg.failed -> DeliveryState.FAILED
-                        msg.id.startsWith(LOCAL_ID_PREFIX) -> DeliveryState.SENDING
-                        // READ (blue) is separate and driven ONLY by the peer's read
-                        // mark — never by online status. UUIDv7 sorts by time, so a
-                        // plain id comparison answers "have they read this yet?".
-                        counterpartLastReadId != null && msg.id <= counterpartLastReadId!! ->
-                            DeliveryState.READ
-                        // DELIVERED (✓✓ grey) = it reached the peer's device. True when
-                        // the peer is ONLINE right now (they're connected + subscribed,
-                        // so the message reached them) OR a stored delivered receipt
-                        // already covers it. This is the "peer active but hasn't read =
-                        // two grey ticks" behaviour.
-                        peerOnline || (deliveredUpToId != null && msg.id <= deliveredUpToId!!) ->
-                            DeliveryState.DELIVERED
-                        // Otherwise it only reached the server: a single ✓.
-                        else -> DeliveryState.SENT
-                    },
-                )
+                            fullscreenCaption = msg.text
+                            fullscreenImage = src
+                        },
+                        translation = translations[msg.id],
+                        onHideTranslation = { translations.remove(msg.id) },
+                        quoted = msg.replyToId?.let { rid -> messages.firstOrNull { it.id == rid } },
+                        state = when {
+                            // Failure outranks everything: a message that never left the
+                            // device must not keep showing an in-flight clock.
+                            msg.failed -> DeliveryState.FAILED
+                            msg.id.startsWith(LOCAL_ID_PREFIX) -> DeliveryState.SENDING
+                            // READ (blue) is separate and driven ONLY by the peer's read
+                            // mark — never by online status. UUIDv7 sorts by time, so a
+                            // plain id comparison answers "have they read this yet?".
+                            counterpartLastReadId != null && msg.id <= counterpartLastReadId!! ->
+                                DeliveryState.READ
+                            // DELIVERED (✓✓ grey) = it reached the peer's device. True when
+                            // the peer is ONLINE right now (they're connected + subscribed,
+                            // so the message reached them) OR a stored delivered receipt
+                            // already covers it. This is the "peer active but hasn't read =
+                            // two grey ticks" behaviour.
+                            peerOnline || (deliveredUpToId != null && msg.id <= deliveredUpToId!!) ->
+                                DeliveryState.DELIVERED
+                            // Otherwise it only reached the server: a single ✓.
+                            else -> DeliveryState.SENT
+                        },
+                    )
+                }
             }
             // Declared AFTER the messages so they get the highest indices and land at
             // the very top: the "loading earlier" skeleton, and the empty-chat prompt.
@@ -2243,6 +2250,7 @@ private fun DetailTopBar(
                 initial = convo.name.first().toString(),
                 size = 36.dp,
                 photoUrl = peerAvatar ?: convo.avatarUrl,
+                group = convo.isGroup,
             )
         }
         Spacer(Modifier.width(14.dp))

@@ -55,6 +55,14 @@ import com.example.syntra.ui.theme.SyntraTheme
  * A pending "open this chat" request, set when the user taps a message notification.
  * The chat tab observes it, jumps to the conversation, then clears it.
  */
+/**
+ * Set when the user tapped ANSWER on the call notification, so the call screen accepts
+ * immediately instead of showing the incoming buttons again — they already answered.
+ */
+object PendingCallAnswer {
+    @Volatile var autoAnswer: Boolean = false
+}
+
 object ChatNavRequest {
     var conversationId by mutableStateOf<String?>(null)
 }
@@ -75,6 +83,18 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         // Paint the saved theme before the first frame so there is no flash.
         AppTheme.load(this)
+        // The window background is a fixed dark colour in themes.xml — that is the very
+        // first frame, drawn before Compose exists. On a light theme it flashed dark and
+        // then turned white, which reads as a fault rather than a launch. The theme is a
+        // per-account choice, not system dark mode, so values-night cannot express it;
+        // it has to be set here, right after the palette is known.
+        runCatching {
+            window.setBackgroundDrawable(
+                android.graphics.drawable.ColorDrawable(
+                    com.example.syntra.ui.theme.NexusBackground.toArgb(),
+                ),
+            )
+        }
         applySystemBars()
         handleNavIntent(intent)
         // Let the Shorts feed ask the Activity to shrink into a floating window.
@@ -170,6 +190,38 @@ class MainActivity : FragmentActivity() {
 
     /** Pulls an "open this chat" request out of a notification intent, if present. */
     private fun handleNavIntent(intent: Intent?) {
+        // A call notification's Answer / Decline / tap. Handled before the chat
+        // deep-link so answering never lands the user in the chat list first.
+        val callId = intent?.getStringExtra("call_id")
+        if (!callId.isNullOrBlank()) {
+            val convId = intent.getStringExtra("call_conversation_id").orEmpty()
+            val caller = intent.getStringExtra("call_caller").orEmpty()
+            val video = intent.getBooleanExtra("call_video", false)
+            com.example.syntra.net.Notifications.cancelIncomingCall(this)
+            when (intent.action) {
+                com.example.syntra.net.Notifications.ACTION_DECLINE_CALL -> {
+                    if (ApiConfig.ENABLED) {
+                        SyntraClient.fireAndForget { SyntraClient.declineCall(callId, convId) }
+                    }
+                }
+                else -> {
+                    // Answer and plain tap both open the call screen. Answering from the
+                    // notification still goes through the normal incoming flow, so the
+                    // permission and media setup are identical to answering in-app.
+                    PendingCallAnswer.autoAnswer =
+                        intent.action == com.example.syntra.net.Notifications.ACTION_ANSWER_CALL
+                    CallController.incoming(
+                        conversationId = convId,
+                        peerName = caller.ifBlank { "Panggilan masuk" },
+                        peerId = "",
+                        video = video,
+                        callId = callId,
+                    )
+                }
+            }
+            intent.removeExtra("call_id")
+            return
+        }
         val cid = intent?.getStringExtra("open_conversation")
         if (!cid.isNullOrBlank()) ChatNavRequest.conversationId = cid
         val rid = intent?.getStringExtra("open_reel")
@@ -520,9 +572,26 @@ private fun MainTabs(onSignOut: () -> Unit) {
         if (!ApiConfig.ENABLED) return@DisposableEffect onDispose {}
         val listener = object : com.example.syntra.net.SocketListener {
             override fun onCallIncoming(conversationId: String, callId: String, kind: String, initiatorId: String) {
-                // Already in/among a call on this device — ignore (a re-sent event,
-                // or a call in another chat while one is active).
-                if (CallController.isBusy) return
+                // Already in a call: ring the newcomer as a BANNER instead of dropping
+                // the event. This used to `return`, so a second caller rang into
+                // silence — the callee never learned anyone was trying to reach them.
+                if (CallController.isBusy) {
+                    if (initiatorId.isNotBlank() && initiatorId == SyntraClient.myUserId) return
+                    if (callId.isNotBlank()) {
+                        scope.launch {
+                            val conv = runCatching { SyntraClient.getConversations() }
+                                .getOrNull()?.firstOrNull { it.id == conversationId }
+                            CallController.secondaryIncoming(
+                                conversationId = conversationId,
+                                peerName = conv?.title.orEmpty().ifBlank { "Panggilan masuk" },
+                                peerId = conv?.counterpartId.orEmpty(),
+                                video = kind == "video",
+                                callId = callId,
+                            )
+                        }
+                    }
+                    return
+                }
                 // Never ring myself for a call I placed (the event fans out to the
                 // whole conversation, including the caller's own session).
                 if (initiatorId.isNotBlank() && initiatorId == SyntraClient.myUserId) return

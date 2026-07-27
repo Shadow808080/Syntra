@@ -2,6 +2,9 @@ package com.example.syntra.net
 
 import android.app.Service
 import android.content.Context
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.os.SystemClock
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -39,6 +42,38 @@ class ChatConnectionService : Service() {
         override fun onReady(userId: String) {
             // Pull conversation titles so notifications can name the sender.
             scope.launch { refreshNames() }
+        }
+
+        /**
+         * Ring for an incoming call even with the app closed.
+         *
+         * This listener lives in the SERVICE, which outlives the UI — the in-app
+         * handler is a Compose effect and only exists while a screen is composed, so
+         * with the app in the background or freshly killed nothing rang at all.
+         *
+         * When the app IS on screen the in-app call UI handles it; posting here as
+         * well would ring twice, so the foreground case is skipped.
+         */
+        override fun onCallIncoming(conversationId: String, callId: String, kind: String, initiatorId: String) {
+            if (callId.isBlank()) return
+            if (initiatorId.isNotBlank() && initiatorId == SyntraClient.myUserId) return
+            if (AppForeground.isForeground) return
+            scope.launch {
+                val name = runCatching { SyntraClient.getConversations() }
+                    .getOrNull()?.firstOrNull { it.id == conversationId }?.title.orEmpty()
+                Notifications.showIncomingCall(
+                    context = this@ChatConnectionService,
+                    callId = callId,
+                    conversationId = conversationId,
+                    callerName = name,
+                    video = kind == "video",
+                )
+            }
+        }
+
+        override fun onCallEnded(endedCallId: String, endedConversationId: String, reason: String) {
+            // The caller gave up, or it was answered elsewhere — stop ringing.
+            Notifications.cancelIncomingCall(this@ChatConnectionService)
         }
 
         override fun onMessageNew(message: NetMessage) {
@@ -114,6 +149,32 @@ class ChatConnectionService : Service() {
         // START_STICKY: if the system kills the service (memory pressure) it tries to
         // recreate it — best-effort background survival short of FCM.
         return START_STICKY
+    }
+
+    /**
+     * The user swiped the app out of Recents.
+     *
+     * START_STICKY does NOT cover this: a task-removal kill is treated as deliberate,
+     * so Android does not restart the service — and on ColorOS/OneUI-style skins the
+     * whole process goes with it. Messages and calls then stop arriving until the app
+     * is opened again, which is exactly the failure people describe as "notifications
+     * only work when the app is open".
+     *
+     * Re-scheduling through AlarmManager rather than calling startService directly:
+     * the process is being torn down as this runs, so anything started inline dies with
+     * it. A one-shot alarm a second later starts cleanly in a fresh process.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        runCatching {
+            val restart = Intent(applicationContext, ChatConnectionService::class.java)
+            val pending = PendingIntent.getService(
+                applicationContext, 41, restart,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val am = getSystemService(AlarmManager::class.java)
+            am?.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + 1000L, pending)
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
@@ -203,6 +264,46 @@ class ChatConnectionService : Service() {
         /** Stop it (call on sign-out). */
         fun stop(context: Context) {
             context.stopService(Intent(context, ChatConnectionService::class.java))
+        }
+
+        /**
+         * True when the system is allowed to doze this app's background work.
+         *
+         * A foreground service survives most things, but Doze still suspends the
+         * network on an idle screen, so the socket dies quietly and messages arrive in
+         * a burst whenever the phone wakes. The exemption is what keeps it live.
+         */
+        fun batteryRestricted(context: Context): Boolean {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+            val pm = context.getSystemService(android.os.PowerManager::class.java) ?: return false
+            return !pm.isIgnoringBatteryOptimizations(context.packageName)
+        }
+
+        /**
+         * Opens the system dialog asking to exempt Syntra from battery optimisation.
+         *
+         * Deliberately user-initiated from Settings rather than fired on launch: this
+         * is a permission that materially affects the user's battery, and an app that
+         * demands it unprompted at first run deserves to be refused. The app works
+         * without it — messages just arrive late once the screen has been off a while.
+         */
+        fun requestBatteryExemption(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+            runCatching {
+                val i = Intent(
+                    android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:" + context.packageName),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(i)
+            }.onFailure {
+                // Some skins hide that screen — fall back to the app's settings page.
+                runCatching {
+                    context.startActivity(
+                        Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            }
         }
     }
 }

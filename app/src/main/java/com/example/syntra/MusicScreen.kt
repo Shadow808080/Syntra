@@ -2170,7 +2170,7 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                 PlayerIconButton(
                     icon = if (liked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                     size = 44.dp, iconSize = 26.dp,
-                    tint = if (liked) NexusAccentSoft else Color.White,
+                    tint = if (liked) NexusAccentSoft else NexusTextPrimary,
                 ) { LikedMusicStore.toggle(context, track) }
             }
             Spacer(Modifier.height(18.dp))
@@ -2183,11 +2183,11 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 PlayerIconButton(Icons.Filled.Shuffle, size = 46.dp, iconSize = 24.dp,
-                    tint = if (MusicPlayer.shuffle) NexusAccentSoft else Color.White.copy(alpha = 0.7f)) {
+                    tint = if (MusicPlayer.shuffle) NexusAccentSoft else NexusTextSecondary) {
                     MusicPlayer.toggleShuffle()
                 }
                 PlayerIconButton(Icons.Filled.SkipPrevious, size = 52.dp, iconSize = 34.dp,
-                    tint = if (MusicPlayer.hasPrevious) Color.White else Color.White.copy(alpha = 0.3f)) {
+                    tint = if (MusicPlayer.hasPrevious) NexusTextPrimary else NexusTextPrimary.copy(alpha = 0.3f)) {
                     MusicPlayer.previous(context)
                 }
                 Box(
@@ -2205,13 +2205,13 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                     }
                 }
                 PlayerIconButton(Icons.Filled.SkipNext, size = 52.dp, iconSize = 34.dp,
-                    tint = if (MusicPlayer.hasNext || MusicPlayer.shuffle) Color.White else Color.White.copy(alpha = 0.3f)) {
+                    tint = if (MusicPlayer.hasNext || MusicPlayer.shuffle) NexusTextPrimary else NexusTextPrimary.copy(alpha = 0.3f)) {
                     MusicPlayer.next(context)
                 }
                 PlayerIconButton(
                     icon = if (MusicPlayer.repeatOne) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
                     size = 46.dp, iconSize = 24.dp,
-                    tint = if (MusicPlayer.repeatOne) NexusAccentSoft else Color.White.copy(alpha = 0.7f),
+                    tint = if (MusicPlayer.repeatOne) NexusAccentSoft else NexusTextSecondary,
                 ) { MusicPlayer.toggleRepeat() }
             }
             Spacer(Modifier.height(20.dp))
@@ -2239,12 +2239,12 @@ private fun NowPlayingSeekBar() {
                 },
             contentAlignment = Alignment.CenterStart,
         ) {
-            Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.22f)))
-            Box(Modifier.fillMaxWidth(MusicPlayer.progress).height(4.dp).clip(RoundedCornerShape(50)).background(Color.White))
+            Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(50)).background(NexusTextPrimary.copy(alpha = 0.18f)))
+            Box(Modifier.fillMaxWidth(MusicPlayer.progress).height(4.dp).clip(RoundedCornerShape(50)).background(NexusAccent))
         }
         Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(clock(MusicPlayer.positionMs), color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
-            Text(clock(MusicPlayer.durationMs), color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
+            Text(clock(MusicPlayer.positionMs), color = NexusTextSecondary, fontSize = 11.sp)
+            Text(clock(MusicPlayer.durationMs), color = NexusTextSecondary, fontSize = 11.sp)
         }
     }
 }

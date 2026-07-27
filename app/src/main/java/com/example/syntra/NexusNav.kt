@@ -49,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
@@ -115,8 +116,26 @@ val SyntraHeaderPadding = PaddingValues(
  * the wordmark and the Shorts pill stayed blue no matter what theme was selected.
  * Reading the state on each access also makes anything that draws with it recompose.
  */
+/**
+ * The wordmark runs from the accent to the BACKDROP's own extreme — white on a dark
+ * theme, near-black on a light one.
+ *
+ * Ending on literal white was right for the dark theme and wrong everywhere else: on
+ * the light theme the tail of "Syntra" faded into the page and the last letters simply
+ * disappeared. What the effect actually wants is "fades toward the background", which
+ * is the opposite colour depending on the theme.
+ */
 private val BrandGradient: Brush
-    get() = Brush.horizontalGradient(listOf(NexusAccent, NexusAccentSoft, Color.White))
+    get() = Brush.horizontalGradient(
+        if (NexusBackground.luminance() > 0.5f) {
+            listOf(NexusAccent, NexusAccentSoft, darken(NexusAccent, 0.45f))
+        } else {
+            listOf(NexusAccent, NexusAccentSoft, Color.White)
+        },
+    )
+
+/** Multiplies a colour toward black, keeping its hue. */
+private fun darken(c: Color, f: Float) = Color(c.red * f, c.green * f, c.blue * f)
 
 /**
  * The featured tab's fill: a diagonal run from the light accent through the base into
@@ -177,7 +196,11 @@ fun SyntraTitle(modifier: Modifier = Modifier) {
                 drawPath(
                     SyntraMark.bubble(u),
                     brush = Brush.linearGradient(
-                        colors = listOf(NexusAccentSoft, Color.White),
+                        colors = if (NexusBackground.luminance() > 0.5f) {
+                            listOf(NexusAccentSoft, darken(NexusAccent, 0.45f))
+                        } else {
+                            listOf(NexusAccentSoft, Color.White)
+                        },
                         start = Offset(21f * u, 22f * u),
                         end = Offset(87f * u, 85f * u),
                     ),

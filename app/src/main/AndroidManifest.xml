@@ -30,6 +30,11 @@
          WebSocket alive so new messages arrive while the app is in the background,
          and shows a local notification. All over the app's own backend, no Google. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Lets an incoming call take over a locked screen instead of arriving as a
+         silent banner. Android 14+ grants this by default only to apps whose primary
+         purpose is calling; where it is refused the notification still shows as a
+         heads-up with both buttons, so a call is never missed either way. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Keep a call (audio/video) alive while the phone sleeps: a mic/camera-typed
@@ -57,6 +62,8 @@
             android:label="@string/app_name"
             android:theme="@style/Theme.Syntra"
             android:supportsPictureInPicture="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>

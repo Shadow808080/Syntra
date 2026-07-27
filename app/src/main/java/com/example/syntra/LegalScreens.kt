@@ -303,7 +303,27 @@ fun PrivacyPolicyScreen(onClose: () -> Unit) {
                     "meninggalkan perangkat dan tidak dapat kami akses.",
             )
 
-            LegalHeading("4. Data yang tersimpan di perangkatmu saja")
+            LegalHeading("4. Berjalan di latar belakang")
+            LegalBody(
+                "Agar pesan dan panggilan tetap masuk saat aplikasi tidak dibuka, Syntra " +
+                    "menjalankan satu layanan latar belakang yang menjaga koneksi realtime " +
+                    "ke server kami tetap hidup. Layanan ini selalu ditandai notifikasi " +
+                    "tetap di panel notifikasi — jika notifikasi itu ada, artinya Syntra " +
+                    "sedang berjalan; jika tidak ada, artinya tidak berjalan.\n\n" +
+                    "Yang dilakukan layanan itu HANYA: menunggu pesan, panggilan, dan " +
+                    "notifikasi aktivitas dari server, lalu menampilkannya. Ia tidak " +
+                    "merekam audio, tidak mengambil lokasi, tidak membaca aplikasi lain, " +
+                    "dan tidak mengirim apa pun tentangmu ke mana pun saat menganggur.\n\n" +
+                    "Mikrofon dan kamera hanya aktif selama panggilan atau room yang kamu " +
+                    "ikuti sendiri, ditandai layanan terpisah beserta notifikasinya, dan " +
+                    "berhenti begitu panggilan berakhir.\n\n" +
+                    "Kalau kamu menutup aplikasi dari daftar aplikasi terbaru, layanan " +
+                    "dinyalakan ulang supaya panggilan tidak terlewat. Untuk benar-benar " +
+                    "menghentikannya, keluar dari akun — atau matikan lewat pengaturan " +
+                    "aplikasi di sistem.",
+            )
+
+            LegalHeading("5. Data yang tersimpan di perangkatmu saja")
             LegalBody(
                 "Hal-hal berikut TIDAK dikirim ke server kami:\n\n" +
                     "• PIN kunci aplikasi dan preferensi biometrik.\n" +
@@ -316,7 +336,7 @@ fun PrivacyPolicyScreen(onClose: () -> Unit) {
                     "menghapus aplikasi.",
             )
 
-            LegalHeading("5. Siapa yang bisa melihat apa")
+            LegalHeading("6. Siapa yang bisa melihat apa")
             LegalBody(
                 "• Pesan pribadi: hanya kamu dan penerima. Pesan disimpan di server agar " +
                     "sampai ke perangkat penerima.\n" +
@@ -328,7 +348,7 @@ fun PrivacyPolicyScreen(onClose: () -> Unit) {
                     "saat room ditutup.",
             )
 
-            LegalHeading("6. Enkripsi — apa yang jujur bisa kami katakan")
+            LegalHeading("7. Enkripsi — apa yang jujur bisa kami katakan")
             LegalBody(
                 "Semua koneksi antara aplikasi dan server kami dienkripsi saat transit " +
                     "(HTTPS/TLS). Media panggilan dan voice room dienkripsi oleh SFU.\n\n" +
@@ -338,7 +358,7 @@ fun PrivacyPolicyScreen(onClose: () -> Unit) {
                     "dengan terbuka agar kamu bisa menilai sendiri apa yang pantas dikirim.",
             )
 
-            LegalHeading("7. Berapa lama data disimpan")
+            LegalHeading("8. Berapa lama data disimpan")
             LegalBody(
                 "• Pesan: sampai kamu atau penerima menghapusnya, atau akun dihapus.\n" +
                     "• Story: 24 jam, lalu dihapus otomatis.\n" +
@@ -350,7 +370,7 @@ fun PrivacyPolicyScreen(onClose: () -> Unit) {
                     "akun. Salinan cadangan terhapus dalam 90 hari.",
             )
 
-            LegalHeading("8. Hakmu atas datamu")
+            LegalHeading("9. Hakmu atas datamu")
             LegalBody(
                 "Kamu berhak untuk:\n\n" +
                     "• Mengakses data yang kami simpan tentangmu.\n" +
@@ -364,7 +384,7 @@ fun PrivacyPolicyScreen(onClose: () -> Unit) {
                     "30 hari.",
             )
 
-            LegalHeading("9. Dengan siapa data dibagikan")
+            LegalHeading("10. Dengan siapa data dibagikan")
             LegalBody(
                 "Kami tidak menjual data pribadi. Data hanya dibagikan kepada penyedia " +
                     "yang menjalankan layanan ini:\n\n" +
@@ -377,21 +397,21 @@ fun PrivacyPolicyScreen(onClose: () -> Unit) {
                     "mencegah bahaya serius pada seseorang.",
             )
 
-            LegalHeading("10. Transfer lintas negara")
+            LegalHeading("11. Transfer lintas negara")
             LegalBody(
                 "Server penyedia kami dapat berada di luar Indonesia. Saat data " +
                     "dipindahkan lintas negara, kami mengandalkan perlindungan kontraktual " +
                     "yang disediakan penyedia tersebut.",
             )
 
-            LegalHeading("11. Anak-anak")
+            LegalHeading("12. Anak-anak")
             LegalBody(
                 "Syntra tidak ditujukan untuk anak di bawah 13 tahun. Jika kami mengetahui " +
                     "ada akun milik anak di bawah usia tersebut, akun itu kami hapus. " +
                     "Orang tua atau wali dapat menghubungi $LEGAL_CONTACT_EMAIL.",
             )
 
-            LegalHeading("12. Keamanan")
+            LegalHeading("13. Keamanan")
             LegalBody(
                 "Kami menggunakan enkripsi saat transit, hashing kata sandi, dan token " +
                     "sesi. Tidak ada sistem yang sepenuhnya aman — jika terjadi kebocoran " +
@@ -399,13 +419,13 @@ fun PrivacyPolicyScreen(onClose: () -> Unit) {
                     "hukum yang berlaku.",
             )
 
-            LegalHeading("13. Perubahan kebijakan")
+            LegalHeading("14. Perubahan kebijakan")
             LegalBody(
                 "Jika kebijakan ini berubah secara material, kami memberi tahu di dalam " +
                     "aplikasi sebelum perubahan berlaku, dan memperbarui tanggal di atas.",
             )
 
-            LegalHeading("14. Kontak")
+            LegalHeading("15. Kontak")
             LegalBody(
                 "$LEGAL_ENTITY\n$LEGAL_CONTACT_EMAIL\n\n" +
                     "Untuk pertanyaan privasi, permintaan data, atau keluhan.",

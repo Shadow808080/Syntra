@@ -793,6 +793,36 @@ object SyntraClient {
             .toCall(callId)
 
     /** Rejects an incoming call (direct chats only). */
+    /** One person in a call (or invited to it and still ringing). */
+    data class CallMember(
+        val userId: String,
+        val username: String,
+        val displayName: String,
+        val joined: Boolean,
+    )
+
+    /**
+     * Invites [targetId] into an ongoing call, so calls can chain up to five people.
+     * The 5-person cap is enforced by the database, not here.
+     */
+    suspend fun inviteToCall(callId: String, conversationId: String, targetId: String, video: Boolean) {
+        val body = JSONObject()
+            .put("target_id", targetId)
+            .put("kind", if (video) "video" else "audio")
+        postData("/api/v1/calls/$callId/invite?conversation_id=$conversationId", body)
+    }
+
+    /** Who is in the call right now — drives the participant strip and the "3/5". */
+    suspend fun callParticipants(callId: String): List<CallMember> =
+        (getData("/api/v1/calls/$callId/participants") as JSONArray).mapObjects {
+            CallMember(
+                userId = it.optString("user_id", ""),
+                username = it.optString("username", ""),
+                displayName = it.optString("display_name", ""),
+                joined = it.optBoolean("joined", false),
+            )
+        }
+
     suspend fun declineCall(callId: String, conversationId: String) {
         runCatching { postData("/api/v1/calls/$callId/decline?conversation_id=$conversationId", JSONObject()) }
     }

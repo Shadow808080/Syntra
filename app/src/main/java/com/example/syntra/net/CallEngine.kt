@@ -63,6 +63,35 @@ object CallEngine {
     var remoteVideo by mutableStateOf<VideoTrack?>(null)
         private set
 
+    /**
+     * EVERY remote participant, not just the first.
+     *
+     * The engine was written for 1:1 and read `remoteParticipants.values.firstOrNull()`
+     * everywhere, so a third person in the room was invisible: their audio played (the
+     * SFU sends it regardless) but nothing on screen ever acknowledged them. Group
+     * calls need the whole set.
+     */
+    var remotePeers by mutableStateOf<List<RemotePeer>>(emptyList())
+        private set
+
+    /**
+     * True while MY microphone is picking up speech.
+     *
+     * Without this the local tile was hardcoded to "not speaking", so the minimized
+     * pill could never show you — it followed everyone except the one person it always
+     * had the data for.
+     */
+    var localSpeaking by mutableStateOf(false)
+        private set
+
+    /** One other person in the call. */
+    data class RemotePeer(
+        val identity: String,
+        val name: String,
+        val video: VideoTrack?,
+        val speaking: Boolean,
+    )
+
     /** My own camera track for the self-preview. */
     var localVideo by mutableStateOf<VideoTrack?>(null)
         private set
@@ -73,6 +102,7 @@ object CallEngine {
      * Connects to the SFU and turns on the microphone (and camera when [video]).
      * Safe to call again; any previous session is dropped first.
      */
+
     suspend fun connect(context: Context, url: String, token: String, video: Boolean) {
         disconnect()
         val app = context.applicationContext
@@ -115,18 +145,13 @@ object CallEngine {
 
     private fun onEvent(event: RoomEvent) {
         when (event) {
-            is RoomEvent.TrackSubscribed -> {
-                remoteJoined = true
-                (event.track as? VideoTrack)?.let { remoteVideo = it }
-            }
-            is RoomEvent.TrackUnsubscribed -> {
-                if (event.track === remoteVideo) remoteVideo = null
-            }
-            is RoomEvent.ParticipantConnected -> remoteJoined = true
-            is RoomEvent.ParticipantDisconnected -> {
-                remoteJoined = false
-                remoteVideo = null
-            }
+            is RoomEvent.TrackSubscribed -> refreshRemote()
+            is RoomEvent.TrackUnsubscribed -> refreshRemote()
+            // Recomputed from the room rather than toggled by hand: with more than two
+            // people, one person leaving does NOT mean the call is empty.
+            is RoomEvent.ParticipantConnected -> refreshRemote()
+            is RoomEvent.ParticipantDisconnected -> refreshRemote()
+            is RoomEvent.ActiveSpeakersChanged -> refreshRemote()
             is RoomEvent.TrackPublished -> {
                 if (event.participant == event.room.localParticipant) refreshLocalVideo()
             }
@@ -146,9 +171,23 @@ object CallEngine {
 
     private fun refreshRemote() {
         val r = room ?: return
-        val peer = r.remoteParticipants.values.firstOrNull()
-        remoteJoined = peer != null
-        remoteVideo = peer?.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack
+        localSpeaking = r.localParticipant.isSpeaking && micEnabled
+        val peers = r.remoteParticipants.values.toList()
+        remoteJoined = peers.isNotEmpty()
+        remotePeers = peers.map { p ->
+            RemotePeer(
+                identity = p.identity?.value.orEmpty(),
+                name = p.name?.takeIf { it.isNotBlank() } ?: p.identity?.value.orEmpty(),
+                video = p.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack,
+                speaking = p.isSpeaking,
+            )
+        }
+        // The full-screen stage still shows ONE video — whoever is speaking, else the
+        // first with a camera on. A five-way grid is a different screen; this keeps the
+        // existing 1:1 layout correct while the participant strip carries the rest.
+        remoteVideo = (peers.firstOrNull { it.isSpeaking }
+            ?: peers.firstOrNull { it.getTrackPublication(Track.Source.CAMERA)?.track != null })
+            ?.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack
     }
 
     private fun refreshLocalVideo() {
@@ -246,6 +285,8 @@ object CallEngine {
         connected = false
         remoteJoined = false
         remoteVideo = null
+        remotePeers = emptyList()
+        localSpeaking = false
         localVideo = null
         micEnabled = true
         cameraEnabled = false

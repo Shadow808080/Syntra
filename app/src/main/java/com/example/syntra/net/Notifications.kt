@@ -34,8 +34,18 @@ object Notifications {
     // is first created — the old "syntra_social" would stay DEFAULT forever.
     const val SOCIAL_CHANNEL = "syntra_social_v2"
     const val CALL_CHANNEL = "syntra_call"
+    /**
+     * Ringing channel — separate from [CALL_CHANNEL] on purpose.
+     *
+     * CALL_CHANNEL is IMPORTANCE_LOW because it carries the silent "call in progress"
+     * foreground-service notice. An incoming call is the opposite: it must be loud, and
+     * Android freezes a channel's importance after first creation, so this cannot
+     * simply be a louder use of the same id.
+     */
+    const val RINGING_CHANNEL = "syntra_ringing"
     const val SERVICE_NOTIFICATION_ID = 1001
     const val CALL_NOTIFICATION_ID = 1002
+    const val RINGING_NOTIFICATION_ID = 1003
 
     /** Creates the notification channels once; safe to call repeatedly. */
     fun ensureChannels(context: Context) {
@@ -65,6 +75,31 @@ object Notifications {
                     description = "Balasan komentar, suka, pengikut baru"
                     enableVibration(true)
                     enableLights(true)
+                },
+            )
+        }
+        if (mgr.getNotificationChannel(RINGING_CHANNEL) == null) {
+            mgr.createNotificationChannel(
+                NotificationChannel(
+                    RINGING_CHANNEL,
+                    "Panggilan masuk",
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = "Dering panggilan masuk"
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 700, 600, 700, 600)
+                    enableLights(true)
+                    setBypassDnd(true)
+                    // The system rings this one, using the device's own ringtone, so a
+                    // call is audible even when the app was never opened.
+                    setSound(
+                        android.media.RingtoneManager
+                            .getActualDefaultRingtoneUri(context, android.media.RingtoneManager.TYPE_RINGTONE),
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build(),
+                    )
                 },
             )
         }
@@ -276,6 +311,101 @@ object Notifications {
             (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         return PendingIntent.getActivity(context, conversationId?.hashCode() ?: 0, intent, flags)
     }
+
+    /**
+     * Rings for an incoming call, with Answer and Decline right on the notification.
+     *
+     * Uses a CallStyle full-screen intent. On a locked or asleep device Android turns
+     * that into the full-screen incoming-call UI; where it cannot (Android 14+ without
+     * the permission, or a device that declines it), the same notification still shows
+     * as a heads-up banner with both buttons — so the call is never silently missed,
+     * which is what happened before: with the app closed, nothing appeared at all.
+     */
+    fun showIncomingCall(
+        context: Context,
+        callId: String,
+        conversationId: String,
+        callerName: String,
+        video: Boolean,
+    ) {
+        ensureChannels(context)
+        // Same explicit POST_NOTIFICATIONS gate the other notifications use.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        fun intentFor(action: String, requestCode: Int): PendingIntent {
+            val i = Intent(context, MainActivity::class.java).apply {
+                this.action = action
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("call_id", callId)
+                putExtra("call_conversation_id", conversationId)
+                putExtra("call_caller", callerName)
+                putExtra("call_video", video)
+            }
+            return PendingIntent.getActivity(
+                context, requestCode, i,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        }
+
+        val answer = intentFor(ACTION_ANSWER_CALL, 2001)
+        val decline = intentFor(ACTION_DECLINE_CALL, 2002)
+        val full = intentFor(ACTION_SHOW_CALL, 2003)
+        // Swiping it away must DECLINE, not silently dismiss. Otherwise the caller is
+        // left ringing against a device that has already thrown the call away.
+        val swipedAway = intentFor(ACTION_DECLINE_CALL, 2004)
+
+        val caller = Person.Builder()
+            .setName(callerName.ifBlank { "Panggilan masuk" })
+            .setImportant(true)
+            .build()
+
+        val n = NotificationCompat.Builder(context, RINGING_CHANNEL)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(callerName.ifBlank { "Panggilan masuk" })
+            .setContentText(if (video) "Panggilan video masuk" else "Panggilan suara masuk")
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            // Keeps it on screen until answered or declined rather than fading away.
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setFullScreenIntent(full, true)
+            .setDeleteIntent(swipedAway)
+            // Sits in the shade like a system call notification rather than a banner
+            // that scrolls away: PUBLIC so it is fully readable on the lock screen,
+            // colourised so Android gives it the call treatment, and pinned to the top
+            // of the shade by the CALL category + MAX priority above.
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setColorized(true)
+            .setColor(0xFF2E6BF0.toInt())
+            .setShowWhen(true)
+            .setWhen(System.currentTimeMillis())
+            // Clears itself if nobody ever answers, matching the 35s in-app ring —
+            // an ongoing notification with no timeout would otherwise sit there forever.
+            .setTimeoutAfter(38_000L)
+            .setStyle(NotificationCompat.CallStyle.forIncomingCall(caller, decline, answer))
+            .build()
+
+        // FLAG_INSISTENT makes the ringtone repeat until it is dealt with, which is what
+        // separates a call from a message. Set on the built notification because
+        // NotificationCompat.Builder has no wrapper for it.
+        n.flags = n.flags or android.app.Notification.FLAG_INSISTENT
+
+        runCatching { NotificationManagerCompat.from(context).notify(RINGING_NOTIFICATION_ID, n) }
+    }
+
+    /** Stops the ringing notification — answered, declined, or the caller gave up. */
+    fun cancelIncomingCall(context: Context) {
+        runCatching { NotificationManagerCompat.from(context).cancel(RINGING_NOTIFICATION_ID) }
+    }
+
+    const val ACTION_ANSWER_CALL = "com.example.syntra.ANSWER_CALL"
+    const val ACTION_DECLINE_CALL = "com.example.syntra.DECLINE_CALL"
+    const val ACTION_SHOW_CALL = "com.example.syntra.SHOW_CALL"
 }
 
 /**

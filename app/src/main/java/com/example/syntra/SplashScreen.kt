@@ -43,6 +43,9 @@ import androidx.compose.ui.unit.sp
 import com.example.syntra.net.SplashSound
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
+import androidx.compose.ui.graphics.luminance
+import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.delay
 
@@ -133,7 +136,10 @@ fun SyntraSplash(onDone: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0B0B12)),
+            // Follows the theme. A fixed near-black meant the very first screen of a
+            // light-theme install was dark, then flipped white the moment the app
+            // loaded — the one transition guaranteed to look like a fault.
+            .background(NexusBackground),
         contentAlignment = Alignment.Center,
     ) {
         // Aurora — drifting sheets of blue light behind the mark. It brightens as the
@@ -168,7 +174,7 @@ fun SyntraSplash(onDone: () -> Unit) {
             Spacer(Modifier.height(18.dp))
             Text(
                 text = "Syntra",
-                color = Color.White.copy(alpha = settle.value),
+                color = NexusTextPrimary.copy(alpha = settle.value),
                 fontSize = 27.sp,
                 fontWeight = FontWeight.ExtraBold,
             )
@@ -181,6 +187,26 @@ fun SyntraSplash(onDone: () -> Unit) {
         }
     }
 }
+
+/** One filament's colour, chosen to stay visible against the current backdrop. */
+private fun threadTint(index: Int): Color = if (isLightTheme()) {
+    when (index) {
+        0 -> NexusAccent
+        1 -> darken(NexusAccent, 0.55f)
+        2 -> darken(NexusAccent, 0.75f)
+        else -> NexusAccentSoft
+    }
+} else {
+    when (index) {
+        0 -> NexusAccentSoft
+        1 -> Color.White
+        2 -> NexusAccent
+        else -> lighten(NexusAccent, 0.55f)
+    }
+}
+
+/** True when the active palette is light, so the mark can invert against it. */
+private fun isLightTheme(): Boolean = NexusBackground.luminance() > 0.5f
 
 /** Mixes [c] toward white by [f] — the splash's tints are all "accent, lightened". */
 private fun lighten(c: Color, f: Float) = Color(
@@ -202,14 +228,33 @@ private fun darken(c: Color, f: Float) = Color(c.red * f, c.green * f, c.blue * 
  */
 private val markColours: List<Color>
     get() = listOf(
-        Color.White,                  // chat — always the brightest piece
-        lighten(NexusAccent, 0.72f),  // shorts
-        lighten(NexusAccent, 0.52f),  // rooms
+        // The lead piece is the highest-CONTRAST colour against the backdrop, not
+    // literally white: on a light theme a white bubble on a white page is invisible.
+    if (isLightTheme()) darken(NexusAccent, 0.55f) else Color.White,
+        if (isLightTheme()) darken(NexusAccent, 0.80f) else lighten(NexusAccent, 0.72f),
+        if (isLightTheme()) NexusAccent else lighten(NexusAccent, 0.52f),
     )
 
 /** The bubble's three dots: dark, base, soft — the accent family in miniature. */
+/**
+ * The bubble's three dots — INVERTED with the theme, because they sit on the bubble,
+ * not on the page.
+ *
+ * On the dark theme the bubble is white, so the dots are the dark accent family. On the
+ * light theme the bubble itself became dark (a white bubble on a white page is
+ * invisible), which left dark dots on a dark bubble: the mark turned into a mud-blue
+ * blob with no dots readable at all.
+ */
 private val dotColours: List<Color>
-    get() = listOf(darken(NexusAccent, 0.72f), NexusAccent, NexusAccentSoft)
+    get() = if (isLightTheme()) {
+        // The bubble is now a gradient running dark→pale left-to-right, and the dots sit
+        // across it in that same order. So they have to run the OTHER way: light on the
+        // dark end, dark on the pale end. Keeping all three light made the last one
+        // disappear into the tail it was sitting on.
+        listOf(Color.White, lighten(NexusAccentSoft, 0.72f), darken(NexusAccent, 0.38f))
+    } else {
+        listOf(darken(NexusAccent, 0.72f), NexusAccent, NexusAccentSoft)
+    }
 
 /** The film strip's sprockets and play window — near-black, tinted by the accent. */
 private val filmInk: Color
@@ -335,7 +380,29 @@ private fun DrawScope.drawAssembly(
         val grow = 1f + 0.34f * merge.coerceIn(0f, 1f)
         scale(grow, pivot = mid) {
             centred(SyntraMark.bubble(u), 54f, 53.5f) { p ->
-                drawPath(p, markColours[0].copy(alpha = chat))
+                // A GRADIENT, not a flat fill — deep at the top-left, washing out to
+                // near-white at the tail. Flat navy read as a solid blob; the pale tip
+                // is what gives the mark its light and keeps it from looking painted on.
+                //
+                // On the dark theme the bubble is white and needs no shading, so this
+                // only applies where the mark had to darken to stay visible.
+                if (isLightTheme()) {
+                    drawPath(
+                        p,
+                        brush = Brush.linearGradient(
+                            colors = listOf(
+                                darken(NexusAccent, 0.42f),
+                                NexusAccent,
+                                lighten(NexusAccentSoft, 0.72f),
+                            ),
+                            start = Offset(18f * u, 18f * u),
+                            end = Offset(92f * u, 92f * u),
+                        ),
+                        alpha = chat,
+                    )
+                } else {
+                    drawPath(p, markColours[0].copy(alpha = chat))
+                }
             }
             if (chat > 0.72f) {
                 val k = ((chat - 0.72f) / 0.28f).coerceIn(0f, 1f)
@@ -371,15 +438,19 @@ private fun DrawScope.drawEnergyThreads(phase: Float, phase2: Float, energy: Flo
     val threads = listOf(
         // Thread tints follow the theme accent too — the filaments were the most
         // visibly blue thing on a non-blue theme.
-        Thread(0.34f, 0.055f, 1.6f, 1.00f, NexusAccentSoft, 2.4f),
-        Thread(0.47f, 0.085f, 1.1f, 1.45f, Color(0xFFFFFFFF), 1.8f),
-        Thread(0.58f, 0.045f, 2.1f, 0.72f, NexusAccent, 3.0f),
-        Thread(0.66f, 0.070f, 1.35f, 1.18f, lighten(NexusAccent, 0.55f), 2.0f),
+        // Filaments are drawn on the PAGE, so they invert the opposite way to the dots.
+        // The pale set (and a literal white thread) simply vanished on a white page —
+        // the aurora was there the whole time, just invisible.
+        Thread(0.34f, 0.055f, 1.6f, 1.00f, threadTint(0), 2.4f),
+        Thread(0.47f, 0.085f, 1.1f, 1.45f, threadTint(1), 1.8f),
+        Thread(0.58f, 0.045f, 2.1f, 0.72f, threadTint(2), 3.0f),
+        Thread(0.66f, 0.070f, 1.35f, 1.18f, threadTint(3), 2.0f),
     )
     // More segments: at 44 the filaments visibly faceted where they curve hardest,
     // which is most of what read as "not smooth".
     val steps = 96
     val tau = 2f * Math.PI.toFloat()
+    val lightBackdrop = isLightTheme()
     threads.forEachIndexed { index, th ->
         val baseY = h * th.y
         val amp = h * th.amp
@@ -405,11 +476,16 @@ private fun DrawScope.drawEnergyThreads(phase: Float, phase2: Float, energy: Flo
             // the wrap is invisible.
             val t = (1f - d).coerceIn(0f, 1f)
             val glow = t * t * (3f - 2f * t) * t
+            // Light backdrops need MORE ink for the same perceived contrast: a pale
+            // stroke at 0.4 alpha reads clearly on black and disappears on white. The
+            // filaments were being drawn the whole time — they just could not be seen.
+            val ink = if (lightBackdrop) 1.55f else 0.6f
             drawLine(
-                color = th.colour.copy(alpha = (0.06f + 0.7f * glow) * energy * 0.6f),
+                color = th.colour.copy(alpha = ((0.06f + 0.7f * glow) * energy * ink).coerceAtMost(0.95f)),
                 start = Offset(w * f0, yAt(f0)),
                 end = Offset(w * f1, yAt(f1)),
-                strokeWidth = th.weight * (0.6f + 0.9f * glow),
+                // Slightly heavier on light, where thin strokes read as dust.
+                strokeWidth = th.weight * (0.6f + 0.9f * glow) * (if (lightBackdrop) 1.35f else 1f),
                 cap = StrokeCap.Round,
             )
         }

@@ -804,23 +804,27 @@ private fun CallRow(
     }
 }
 
-/** Avatar that shows the contact's photo when we have one, else a gradient initial. */
+/**
+ * The contact's photo, or Syntra's empty-profile mark — never a letter.
+ *
+ * The call log is built from a local history file that stores no avatar, so almost
+ * every row fell to the initial branch. It now looks the photo up in the shared
+ * AvatarCache by id and username (the same store chat and rooms write to), and hands
+ * whatever it finds to GradientAvatar — which draws Syntra's own placeholder when there
+ * is genuinely no photo, exactly like every other list in the app.
+ */
 @Composable
 private fun CallAvatar(avatarUrl: String?, name: String, peerId: String, size: androidx.compose.ui.unit.Dp) {
-    if (!avatarUrl.isNullOrBlank()) {
-        AsyncImage(
-            model = avatarUrl,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.size(size).clip(CircleShape).background(NexusSurface),
-        )
-    } else {
-        GradientAvatar(
-            gradient = callGradient(peerId.ifBlank { name }),
-            initial = name.firstOrNull()?.toString() ?: "?",
-            size = size,
-        )
-    }
+    val ctx = LocalContext.current
+    val resolved = avatarUrl?.takeIf { it.isNotBlank() }
+        ?: peerId.takeIf { it.isNotBlank() }?.let { com.example.syntra.net.AvatarCache.get(ctx, it) }
+        ?: name.takeIf { it.isNotBlank() }?.let { com.example.syntra.net.AvatarCache.get(ctx, it) }
+    GradientAvatar(
+        gradient = callGradient(peerId.ifBlank { name }),
+        initial = "",
+        size = size,
+        photoUrl = resolved,
+    )
 }
 
 @Composable
@@ -831,7 +835,7 @@ private fun ContactRow(name: String, onCall: () -> Unit, onVideo: () -> Unit) {
             .padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        GradientAvatar(callGradient(name), name.firstOrNull()?.toString() ?: "?", 44.dp)
+        CallAvatar(avatarUrl = null, name = name, peerId = "", size = 44.dp)
         Spacer(Modifier.width(14.dp))
         Text(
             text = name,

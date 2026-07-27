@@ -246,13 +246,22 @@ data class Conversation(
 )
 
 // Stable placeholder gradients, picked from the id hash (align. doc §6).
+/**
+ * Per-person avatar tints — all within the brand's blue range.
+ *
+ * These used to be a rainbow (teal-green, coral, magenta-violet, slate), which put
+ * colours on screen that appear nowhere else in Syntra and directly contradicted the
+ * blue-and-white decision. Variety is still useful — it makes people distinguishable at
+ * a glance — so the set keeps six DISTINCT gradients, just drawn from deep navy through
+ * to sky rather than across the whole wheel.
+ */
 private val gradientPalettes = listOf(
-    listOf(Color(0xFF2E6BF0), Color(0xFF3B68F5)),
-    listOf(Color(0xFF11998E), Color(0xFF38EF7D)),
-    listOf(Color(0xFFEE5A6F), Color(0xFFF29263)),
-    listOf(Color(0xFF485563), Color(0xFF29323C)),
-    listOf(Color(0xFFDA22FF), Color(0xFF9733EE)),
-    listOf(Color(0xFF2196F3), Color(0xFF3B68F5)),
+    listOf(Color(0xFF4D9BFF), Color(0xFF2E6BF0)), // sky → brand
+    listOf(Color(0xFF2E6BF0), Color(0xFF1B49C9)), // brand → deep
+    listOf(Color(0xFF6FB2FF), Color(0xFF3B7FE8)), // pale sky
+    listOf(Color(0xFF1B49C9), Color(0xFF12307F)), // navy
+    listOf(Color(0xFF3FA9E0), Color(0xFF2E6BF0)), // cyan-leaning blue
+    listOf(Color(0xFF5C7CE8), Color(0xFF2A4FB8)), // indigo-leaning blue
 )
 
 internal fun gradientFor(id: String): List<Color> =
@@ -2068,6 +2077,7 @@ private fun ConversationRow(
                     initial = convo.name.first().toString(),
                     size = 54.dp,
                     photoUrl = convo.avatarUrl,
+                    group = convo.isGroup,
                 )
                 when {
                     selected -> Box(
@@ -2647,6 +2657,13 @@ internal fun GradientAvatar(
      * so changing a profile picture is reflected everywhere an avatar is drawn.
      */
     photoUrl: String? = null,
+    /**
+     * Draw the GROUP placeholder instead of the single bust.
+     *
+     * A group with no picture used to fall back to the one-person mark, which read as
+     * "a person called Keluarga Besar" — the row gave no hint it was a group at all.
+     */
+    group: Boolean = false,
 ) {
     val base = Modifier.size(size)
     val ringed = if (ring) {
@@ -2682,24 +2699,67 @@ internal fun GradientAvatar(
                 val h = this.size.height
                 val cx = w / 2f
                 val glyph = Color.White.copy(alpha = 0.92f)
-                // Head.
-                drawCircle(color = glyph, radius = w * 0.168f, center = Offset(cx, h * 0.38f))
-                // Shoulders — a wide rounded bust; the parent circle clip cuts it into
-                // the classic silhouette, but with Syntra's softer, higher proportions.
-                val shoulderW = w * 0.62f
-                drawRoundRect(
-                    color = glyph,
-                    topLeft = Offset(cx - shoulderW / 2f, h * 0.6f),
-                    size = Size(shoulderW, h * 0.55f),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(shoulderW * 0.5f, shoulderW * 0.5f),
-                )
+                if (group) {
+                    // THREE figures, and none of them bleeds off the circle.
+                    //
+                    // The single mark is deliberately full-height — the crop IS the
+                    // silhouette. That trick does not survive being repeated: three
+                    // cropped busts turn into one white mass at the bottom. So the group
+                    // mark is drawn as a contained little crowd with clear space around
+                    // it, which also makes the two variants instantly distinguishable at
+                    // list size, where a subtle difference would be no difference.
+                    val backGlyph = Color.White.copy(alpha = 0.55f)
+                    // Two figures behind, left and right, smaller and dimmer for depth.
+                    listOf(-1f, 1f).forEach { side ->
+                        val bx = cx + side * w * 0.235f
+                        drawCircle(color = backGlyph, radius = w * 0.108f, center = Offset(bx, h * 0.375f))
+                        val bw = w * 0.30f
+                        drawRoundRect(
+                            color = backGlyph,
+                            topLeft = Offset(bx - bw / 2f, h * 0.50f),
+                            size = Size(bw, h * 0.26f),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(bw * 0.5f, bw * 0.5f),
+                        )
+                    }
+                    // Front figure, centred and larger — the one the eye lands on.
+                    drawCircle(color = glyph, radius = w * 0.145f, center = Offset(cx, h * 0.435f))
+                    val frontW = w * 0.40f
+                    drawRoundRect(
+                        color = glyph,
+                        topLeft = Offset(cx - frontW / 2f, h * 0.585f),
+                        // Stops WELL short of the bottom edge: contained, not cropped.
+                        size = Size(frontW, h * 0.245f),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(frontW * 0.5f, frontW * 0.5f),
+                    )
+                } else {
+                    // Head.
+                    drawCircle(color = glyph, radius = w * 0.168f, center = Offset(cx, h * 0.38f))
+                    // Shoulders — a wide rounded bust; the parent circle clip cuts it
+                    // into the classic silhouette, but with Syntra's softer, higher
+                    // proportions.
+                    val shoulderW = w * 0.62f
+                    drawRoundRect(
+                        color = glyph,
+                        topLeft = Offset(cx - shoulderW / 2f, h * 0.6f),
+                        size = Size(shoulderW, h * 0.55f),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(shoulderW * 0.5f, shoulderW * 0.5f),
+                    )
+                }
             }
         }
     }
 }
 
 /** Syntra's signature avatar gradient — the brand two-tone, used for empty profiles. */
-private val SyntraAvatarGradient = listOf(Color(0xFF8E7BEA), Color(0xFF5C79F0))
+/**
+ * The empty-profile backdrop — the launcher icon's own blues.
+ *
+ * This was a violet (#8E7BEA → #5C79F0) left over from before the brand settled on
+ * blue-and-white only, so every person without a photo wore a colour that appears
+ * nowhere else in the app. These are the mid and light stops of the launcher gradient,
+ * light end first so the circle reads as lit from the top like the icon does.
+ */
+private val SyntraAvatarGradient = listOf(Color(0xFF4D9BFF), Color(0xFF2E6BF0))
 
 // ---------------------------------------------------------------------------
 // Full-screen story viewer (WhatsApp-status style)
@@ -3358,7 +3418,13 @@ private fun DeleteConversationDialog(
                 .padding(22.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                GradientAvatar(convo.gradient, convo.name.first().toString(), 40.dp)
+                GradientAvatar(
+                    gradient = convo.gradient,
+                    initial = convo.name.first().toString(),
+                    size = 40.dp,
+                    photoUrl = convo.avatarUrl,
+                    group = convo.isGroup,
+                )
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(

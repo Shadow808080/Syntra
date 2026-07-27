@@ -26,8 +26,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -45,6 +48,7 @@ import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.Videocam
@@ -57,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -163,6 +168,17 @@ object CallController {
      */
     var leaveRoomForCall by mutableStateOf(false)
 
+    /**
+     * A SECOND call arriving while one is already active.
+     *
+     * Kept apart from [call] so the live call is never disturbed by it. It rings as a
+     * banner — exactly the treatment a call gets while you are in a voice room — and
+     * the user decides. Previously MainActivity dropped these on the floor
+     * (`if (isBusy) return`), so a second caller rang into silence forever.
+     */
+    var secondary by mutableStateOf<CallDescriptor?>(null)
+        private set
+
     val isBusy: Boolean get() = call != null
 
     fun startOutgoing(
@@ -198,6 +214,35 @@ object CallController {
         )
         minimized = false
         compact = asBanner
+    }
+
+    /** A call arrived while one is in progress — ring it as a banner. */
+    fun secondaryIncoming(
+        conversationId: String,
+        peerName: String,
+        peerId: String,
+        video: Boolean,
+        callId: String,
+    ) {
+        if (call == null || secondary != null) return
+        if (callId == call?.incomingCallId) return // the same call, re-announced
+        secondary = CallDescriptor(
+            conversationId, peerName, peerId, video,
+            incoming = true, incomingCallId = callId,
+        )
+    }
+
+    /** Accepting the second call ENDS the first — one media session at a time. */
+    fun acceptSecondary() {
+        val next = secondary ?: return
+        secondary = null
+        call = next
+        minimized = false
+        compact = false
+    }
+
+    fun dismissSecondary() {
+        secondary = null
     }
 
     /** Banner "answer": promote to the full call and ask the room to stand down. */
@@ -258,6 +303,21 @@ fun CallHost() {
     key(descriptor) {
         CallSession(descriptor)
     }
+    // A second caller rings as a banner OVER the live call. It must be declared after
+    // CallSession so it draws on top.
+    CallController.secondary?.let { second ->
+        SecondCallBanner(
+            d = second,
+            onAccept = { CallController.acceptSecondary() },
+            onDecline = {
+                val id = second.incomingCallId
+                if (!id.isNullOrBlank() && ApiConfig.ENABLED) {
+                    SyntraClient.fireAndForget { SyntraClient.declineCall(id, second.conversationId) }
+                }
+                CallController.dismissSecondary()
+            },
+        )
+    }
 }
 
 /**
@@ -270,6 +330,61 @@ fun CallHost() {
  * Declining hangs up properly (the caller stops ringing) rather than just dismissing
  * the banner locally — a silently-ignored call is worse than a rejected one.
  */
+/**
+ * A second caller ringing while a call is already up.
+ *
+ * Pinned under the status bar so it never covers the live call's own controls, and it
+ * says plainly that accepting ends the current call — otherwise "Terima" looks like it
+ * merges the two, which is not what happens: one media session at a time.
+ */
+@Composable
+private fun SecondCallBanner(d: CallDescriptor, onAccept: () -> Unit, onDecline: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(NexusSurfaceElevated)
+                .border(1.dp, NexusStroke, RoundedCornerShape(18.dp))
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                if (d.video) Icons.Rounded.Videocam else Icons.Rounded.Call,
+                null, tint = NexusAccentSoft, modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    d.peerName.ifBlank { "Panggilan masuk" },
+                    color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    "Menerima akan mengakhiri panggilan ini",
+                    color = NexusTextSecondary, fontSize = 11.sp, maxLines = 1,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(36.dp).clip(CircleShape).background(DangerFill)
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDecline),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Rounded.CallEnd, "Tolak", tint = Color(0xFFFF5D5D), modifier = Modifier.size(17.dp)) }
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(36.dp).clip(CircleShape).background(NexusOnline)
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onAccept),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Rounded.Call, "Jawab", tint = Color.White, modifier = Modifier.size(17.dp)) }
+        }
+    }
+}
+
 @Composable
 private fun IncomingCallBanner(d: CallDescriptor) {
     val pulse = rememberInfiniteTransition(label = "ring-banner")
@@ -405,6 +520,57 @@ private fun CallSession(d: CallDescriptor) {
         }
     }
 
+    // Who is in this call. Refreshed while it runs so the "n/5" and the invite button
+    // reflect people joining and leaving.
+    val members = remember(d) { mutableStateListOf<SyntraClient.CallMember>() }
+    var showInvite by remember(d) { mutableStateOf(false) }
+    LaunchedEffect(callId, CallEngine.remotePeers.size) {
+        if (callId.isBlank() || !ApiConfig.ENABLED) return@LaunchedEffect
+        runCatching { SyntraClient.callParticipants(callId) }
+            .onSuccess { members.clear(); members.addAll(it) }
+    }
+
+    // Everyone on the call, lead tile first (active speaker, else the first person).
+    // "Me" is included so the grid is the whole call and not just the others.
+    val peers = CallEngine.remotePeers
+    val bentoTiles = remember(
+        peers, members.toList(), CallEngine.localVideo, CallEngine.cameraEnabled,
+        CallEngine.localSpeaking,
+    ) {
+        val others = peers.map { peer ->
+            // LiveKit's identity IS the user id, so using it raw put a UUID under every
+            // face. Resolve it against the participant list for a real name, and against
+            // the avatar cache for a real photo; GradientAvatar supplies Syntra's own
+            // empty-profile mark when there genuinely is none.
+            val m = members.firstOrNull { it.userId == peer.identity }
+            val label = m?.displayName?.takeIf { it.isNotBlank() }
+                ?: m?.username?.takeIf { it.isNotBlank() }
+                ?: peer.name.takeIf { it.isNotBlank() && it != peer.identity }
+                ?: "Pengguna"
+            CallTile(
+                name = label,
+                video = peer.video,
+                speaking = peer.speaking,
+                isMe = false,
+                photo = AvatarCache.get(context, peer.identity),
+            )
+        }
+        val me = CallTile(
+            name = "Anda",
+            video = CallEngine.localVideo.takeIf { CallEngine.cameraEnabled },
+            speaking = CallEngine.localSpeaking,
+            isMe = true,
+            photo = AvatarCache.get(context, SyntraClient.myUserId.orEmpty()),
+        )
+        // Speaker leads; otherwise keep a stable order so tiles do not shuffle on every
+        // recomposition, which is far more distracting than a slightly stale layout.
+        val ordered = others.sortedByDescending { it.speaking }
+        ordered + me
+    }
+    // The grid takes over from THREE people (two others + me). A 1:1 call keeps the
+    // full-bleed layout: a grid of two throws away the whole point of a video call.
+    val isGroupCall = phase == CallPhase.ONGOING && peers.size >= 2
+
     val remoteJoined = CallEngine.remoteJoined
     val remoteVideo = CallEngine.remoteVideo
     val localVideo = CallEngine.localVideo
@@ -500,6 +666,10 @@ private fun CallSession(d: CallDescriptor) {
     // key mid-connect cancelled answer_call/start_call halfway, which is exactly why
     // "Terima" looked dead AND why a cancelled outgoing call never sent leaveCall
     // (its callId was never assigned), leaving the callee's screen stuck ringing.
+    // The in-app UI is now responsible for this call, so the notification must stop
+    // ringing — otherwise both ring at once.
+    LaunchedEffect(Unit) { com.example.syntra.net.Notifications.cancelIncomingCall(context) }
+
     val callScope = rememberCoroutineScope()
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -536,8 +706,17 @@ private fun CallSession(d: CallDescriptor) {
         }
     }
 
-    // Outgoing dials immediately; incoming waits for the user to accept.
-    LaunchedEffect(Unit) { if (!incoming) proceed() }
+    // Outgoing dials immediately; incoming waits for the user to accept — unless they
+    // already accepted on the notification, in which case showing the Terima button
+    // again would be asking twice.
+    LaunchedEffect(Unit) {
+        if (!incoming) {
+            proceed()
+        } else if (PendingCallAnswer.autoAnswer) {
+            PendingCallAnswer.autoAnswer = false
+            proceed()
+        }
+    }
 
     // Promote to "ongoing" the moment the other side is really in the room.
     LaunchedEffect(CallEngine.connected) {
@@ -734,10 +913,42 @@ private fun CallSession(d: CallDescriptor) {
         CallController.end()
     }
 
+    if (showInvite) {
+        InvitePickerDialog(
+            already = members.map { it.userId }.toSet(),
+            onDismiss = { showInvite = false },
+            onPick = { userId ->
+                showInvite = false
+                val id = callId
+                if (id.isNotBlank()) {
+                    callScope.launch {
+                        runCatching { SyntraClient.inviteToCall(id, d.conversationId, userId, isVideo) }
+                            .onSuccess {
+                                Toast.makeText(context, "Undangan terkirim.", Toast.LENGTH_SHORT).show()
+                                runCatching { SyntraClient.callParticipants(id) }
+                                    .onSuccess { members.clear(); members.addAll(it) }
+                            }
+                            .onFailure {
+                                // The cap and the block rules live in the database, so a
+                                // refusal here is meaningful — surface it verbatim.
+                                Toast.makeText(
+                                    context,
+                                    it.message ?: "Gagal mengundang.",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                    }
+                }
+            },
+        )
+    }
+
     if (CallController.minimized) {
         MiniCallWindow(
             peerName = d.peerName,
             peerPhoto = peerPhoto,
+            tiles = bentoTiles,
+            isGroupCall = isGroupCall,
             elapsed = elapsed,
             statusLine = if (phase == CallPhase.ONGOING) formatDuration(elapsed) else statusLine,
             isVideo = isVideo,
@@ -749,6 +960,14 @@ private fun CallSession(d: CallDescriptor) {
         FullCallUi(
             peerName = d.peerName,
             peerPhoto = peerPhoto,
+            members = members,
+            bentoTiles = bentoTiles,
+            isGroupCall = isGroupCall,
+            // Invite is only offered once the call is actually up, and only while there
+            // is room — the server enforces the cap, but a button that can only fail is
+            // not worth showing.
+            canInvite = phase == CallPhase.ONGOING && members.count { it.joined } < 5,
+            onInvite = { showInvite = true },
             phase = phase,
             statusLine = statusLine,
             elapsed = elapsed,
@@ -771,6 +990,11 @@ private fun CallSession(d: CallDescriptor) {
 private fun FullCallUi(
     peerName: String,
     peerPhoto: String? = null,
+    members: List<SyntraClient.CallMember> = emptyList(),
+    bentoTiles: List<CallTile> = emptyList(),
+    isGroupCall: Boolean = false,
+    canInvite: Boolean = false,
+    onInvite: () -> Unit = {},
     phase: CallPhase,
     statusLine: String,
     elapsed: Int,
@@ -797,7 +1021,11 @@ private fun FullCallUi(
         }
     }
 
-    val showVideoStage = isVideo && phase == CallPhase.ONGOING && remoteVideo != null
+    val showVideoStage = isVideo && phase == CallPhase.ONGOING && remoteVideo != null && !isGroupCall
+    // 1:1 video only: tapping the corner window swaps which feed is full-screen.
+    // Reset whenever the call's shape changes, so a swap can't survive into a state
+    // where "the other feed" means something different.
+    var swapped by remember(isGroupCall, showVideoStage) { mutableStateOf(false) }
 
     // WHAT THE TEXT SITS ON decides its colour, not the theme alone. Over live video
     // the surface is the video itself (plus a scrim), so white is correct on every
@@ -812,7 +1040,13 @@ private fun FullCallUi(
             .background(Brush.verticalGradient(callBackdrop)),
     ) {
         if (showVideoStage) {
-            remoteVideo?.let { track -> VideoRenderer(track = track, modifier = Modifier.fillMaxSize()) }
+            // Swapped: your own camera takes the stage and the peer moves to the
+            // corner. Mirrored only when it is your own feed — a mirrored peer looks
+            // subtly wrong and nobody can say why.
+            val stageTrack = if (swapped) localVideo else remoteVideo
+            stageTrack?.let { track ->
+                VideoRenderer(track = track, mirror = swapped, modifier = Modifier.fillMaxSize())
+            }
             Box(
                 modifier = Modifier.fillMaxWidth().height(180.dp).background(
                     Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)),
@@ -857,6 +1091,18 @@ private fun FullCallUi(
             if (showVideoStage) {
                 Spacer(Modifier.height(8.dp))
                 CallHeaderPill(onSurface = onCall, name = peerName.ifBlank { "Tanpa nama" }, subtitle = formatDuration(elapsed))
+            } else if (isGroupCall) {
+                // Three or more: the grid IS the screen. A single big name and one
+                // avatar cannot represent four people, and the 1:1 layout silently
+                // showed only whoever happened to be first.
+                Spacer(Modifier.height(56.dp))
+                Text(
+                    text = if (statusLine.isBlank()) formatDuration(elapsed) else statusLine,
+                    color = NexusAccentSoft, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.height(10.dp))
+                CallBentoGrid(tiles = bentoTiles, modifier = Modifier.weight(1f).fillMaxWidth())
+                Spacer(Modifier.height(10.dp))
             } else {
                 Spacer(Modifier.height(64.dp))
                 Text(
@@ -885,7 +1131,17 @@ private fun FullCallUi(
 
             Spacer(Modifier.weight(1f))
 
-            Box(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
+            Row(
+                modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // BESIDE the controls, not above them. Stacked, the strip and the
+                // control bar were two floating pills fighting for the same corner of
+                // the screen and overlapping on short displays.
+                if (canInvite && phase == CallPhase.ONGOING) {
+                    InviteSideButton(count = members.count { it.joined }, onClick = onInvite)
+                    Spacer(Modifier.width(10.dp))
+                }
                 when (phase) {
                     CallPhase.INCOMING -> IncomingControls(video = isVideo, onAccept = onAccept, onDecline = onDecline)
                     CallPhase.ENDED -> Spacer(Modifier.height(40.dp))
@@ -903,8 +1159,16 @@ private fun FullCallUi(
         }
 
         // Self-preview picture-in-picture (video calls only).
-        if (isVideo && CallEngine.cameraEnabled && localVideo != null && phase == CallPhase.ONGOING) {
-            localVideo?.let { track ->
+        // Hidden in group mode: the bento grid already has a tile for you, so the
+        // floating self-view was the same face twice, covering a real participant.
+        if (isVideo && !isGroupCall && CallEngine.cameraEnabled && localVideo != null &&
+            phase == CallPhase.ONGOING
+        ) {
+            // Whichever feed is NOT on the stage. Tapping swaps them — the standard
+            // gesture on every video call app, and the only way to check your own
+            // framing at a useful size without hunting for a setting.
+            val cornerTrack = if (swapped) remoteVideo else localVideo
+            cornerTrack?.let { track ->
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -913,9 +1177,29 @@ private fun FullCallUi(
                         .size(width = 112.dp, height = 156.dp)
                         .clip(RoundedCornerShape(18.dp))
                         .background(Color.Black)
-                        .border(1.5.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(18.dp)),
+                        .border(1.5.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(18.dp))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { swapped = !swapped },
                 ) {
-                    VideoRenderer(track = track, mirror = true, modifier = Modifier.fillMaxSize())
+                    VideoRenderer(track = track, mirror = !swapped, modifier = Modifier.fillMaxSize())
+                    // A small hint that the window is interactive: without it the swap
+                    // is a gesture nobody discovers.
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(6.dp)
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.45f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Rounded.Cameraswitch, "Tukar tampilan",
+                            tint = Color.White, modifier = Modifier.size(13.dp),
+                        )
+                    }
                 }
             }
         }
@@ -930,6 +1214,10 @@ private fun FullCallUi(
 private fun MiniCallWindow(
     peerName: String,
     peerPhoto: String? = null,
+    /** Everyone on the call, so the pill can follow whoever is speaking. */
+    tiles: List<CallTile> = emptyList(),
+    /** Three or more people: minimize to the pill, never a single video thumbnail. */
+    isGroupCall: Boolean = false,
     elapsed: Int,
     statusLine: String,
     isVideo: Boolean,
@@ -940,8 +1228,12 @@ private fun MiniCallWindow(
     val density = LocalDensity.current
     // The window is 128x180 (video) or a compact pill (audio). It starts near the
     // top-right and can be dragged ANYWHERE; position is clamped to stay on screen.
-    val winW = if (isVideo) 128.dp else 220.dp
-    val winH = if (isVideo) 180.dp else 76.dp
+    // A group call minimizes to the PILL, so its size must follow that decision too —
+    // otherwise the pill was being laid out inside a 128x180 video-shaped box and every
+    // element inside it was crushed.
+    val asVideo = isVideo && remoteVideo != null && !isGroupCall
+    val winW = if (asVideo) 132.dp else 232.dp
+    val winH = if (asVideo) 186.dp else 78.dp
 
     // Full-screen container that does NOT consume touches, so the app behind the
     // window stays fully interactive — only the window itself grabs gestures.
@@ -975,18 +1267,44 @@ private fun MiniCallWindow(
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            if (isVideo && remoteVideo != null) {
+            // A group call minimizes to the SPEAKER PILL, exactly like an audio call.
+            // A 128x180 thumbnail can only show one of four people, and picking one
+            // arbitrarily is worse than showing whoever is actually talking.
+            if (asVideo) {
                 VideoRenderer(track = remoteVideo, modifier = Modifier.fillMaxSize())
-                // Bottom bar with timer + hang up over the video.
-                Row(
+                // Restructured. The old bar put the status text and the hang-up button
+                // in ONE row across a 128dp-wide window: the button took ~34dp, the
+                // padding another 16dp, and the timer was left fighting for what
+                // remained — usually clipped to a couple of characters.
+                //
+                // Now the timer sits on its own line above, and the button gets the
+                // full width beneath it. Nothing competes, and nothing truncates.
+                Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.45f))
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f)),
+                            ),
+                        )
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text(statusLine, color = NexusTextPrimary, fontSize = 11.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    // Speaker name when someone is talking, otherwise the timer: in a
+                    // thumbnail this small, only one of them can be legible at a time.
+                    val speaking = tiles.firstOrNull { it.speaking }
+                    Text(
+                        speaking?.name ?: statusLine,
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(4.dp))
                     MiniHangUp(onHangUp)
                 }
             } else {
@@ -995,25 +1313,83 @@ private fun MiniCallWindow(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // Follows the VOICE. A minimized call showed one fixed face and
+                    // name, so in a group you had no idea who was talking without
+                    // opening it again.
+                    // Everyone, yourself included — "who is talking" has no reason to
+                    // exclude you, and excluding you made the pill freeze on the peer
+                    // whenever you were the one speaking.
+                    val speaker = tiles.firstOrNull { it.speaking }
                     GradientAvatar(
                         gradient = callAvatarGradient,
                         initial = "",
                         size = 44.dp,
-                        photoUrl = peerPhoto,
+                        photoUrl = speaker?.photo ?: peerPhoto,
                     )
                     Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            peerName.ifBlank { "Tanpa nama" },
+                            speaker?.name ?: peerName.ifBlank { "Tanpa nama" },
                             color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
-                        Text(statusLine, color = NexusAccentSoft, fontSize = 12.sp, maxLines = 1)
+                        // The wave replaces the status line while someone is talking:
+                        // "00:42" and "sedang bicara" compete for the same slot, and the
+                        // wave answers the more useful question without any words.
+                        if (speaker != null) {
+                            SpeakerWave(modifier = Modifier.height(14.dp))
+                        } else {
+                            Text(statusLine, color = NexusAccentSoft, fontSize = 12.sp, maxLines = 1)
+                        }
                     }
                     Spacer(Modifier.width(8.dp))
                     MiniHangUp(onHangUp)
                 }
             }
+        }
+    }
+}
+
+/**
+ * A live voice waveform.
+ *
+ * Bars driven by summed sines at unrelated frequencies rather than random heights:
+ * random reads as flicker, and a single sine reads as a mechanical bounce. Two
+ * non-harmonic components per bar give the irregular-but-continuous motion that
+ * actually looks like a voice, and it never visibly repeats.
+ *
+ * Phase is shared and each bar is offset along it, so the movement travels across the
+ * group instead of every bar pumping in unison.
+ */
+@Composable
+private fun SpeakerWave(modifier: Modifier = Modifier, bars: Int = 5) {
+    val t = rememberInfiniteTransition(label = "speaker-wave")
+    val phase by t.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        // One whole period with LinearEasing, so the loop point is the identical frame.
+        animationSpec = infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart),
+        label = "speaker-wave-phase",
+    )
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        repeat(bars) { i ->
+            val o = i * 0.9f
+            val a = kotlin.math.sin(phase + o)
+            val b = kotlin.math.sin(phase * 1.7f + o * 1.3f)
+            // 0.25..1.0 — never fully collapses, so the group keeps its shape.
+            val level = (0.25f + 0.375f * (a + b * 0.6f).coerceIn(-1.2f, 1.2f) / 1.2f + 0.375f)
+                .coerceIn(0.25f, 1f)
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .fillMaxHeight(level)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(NexusAccentSoft),
+            )
         }
     }
 }
@@ -1066,6 +1442,234 @@ private fun VideoRenderer(
 // ---------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------
+
+/**
+ * A bento grid of everyone on the call.
+ *
+ * Used from three people upward. A 1:1 call keeps the full-bleed layout — a grid of two
+ * is just two rectangles, and it throws away the one thing a video call should give you,
+ * which is the other person as large as the screen allows.
+ *
+ * The proportions are deliberately UNEQUAL. A uniform grid says everyone matters
+ * equally at every moment, which is false in a conversation: whoever is speaking is
+ * what you want to look at. The lead tile is the active speaker, and it is roughly
+ * twice the area of the rest, so attention follows the voice without anyone vanishing.
+ *
+ *   3 people → lead left, two stacked right
+ *   4 people → lead across the top, three along the bottom
+ *   5 people → lead top-left, two beside it, two underneath
+ */
+@Composable
+private fun CallBentoGrid(
+    tiles: List<CallTile>,
+    modifier: Modifier = Modifier,
+) {
+    if (tiles.isEmpty()) return
+    val gap = 6.dp
+    val lead = tiles.first()
+    val rest = tiles.drop(1)
+    Column(modifier = modifier.padding(horizontal = 10.dp), verticalArrangement = Arrangement.spacedBy(gap)) {
+        when (tiles.size) {
+            in 0..2 -> {
+                // Two tiles: split the height evenly. Still not a "grid" — just both.
+                tiles.forEach { CallTileView(it, Modifier.weight(1f).fillMaxWidth()) }
+            }
+            3 -> Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                CallTileView(lead, Modifier.weight(1.35f).fillMaxHeight())
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(gap)) {
+                    rest.forEach { CallTileView(it, Modifier.weight(1f).fillMaxWidth()) }
+                }
+            }
+            4 -> {
+                CallTileView(lead, Modifier.weight(1.25f).fillMaxWidth())
+                Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    rest.forEach { CallTileView(it, Modifier.weight(1f).fillMaxHeight()) }
+                }
+            }
+            else -> {
+                Row(Modifier.weight(1.3f), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    CallTileView(lead, Modifier.weight(1.5f).fillMaxHeight())
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(gap)) {
+                        rest.take(2).forEach { CallTileView(it, Modifier.weight(1f).fillMaxWidth()) }
+                    }
+                }
+                Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    rest.drop(2).take(2).forEach { CallTileView(it, Modifier.weight(1f).fillMaxHeight()) }
+                }
+            }
+        }
+    }
+}
+
+/** One person in the bento grid. */
+private data class CallTile(
+    val name: String,
+    val video: VideoTrack?,
+    val speaking: Boolean,
+    val isMe: Boolean,
+    val photo: String? = null,
+)
+
+@Composable
+private fun CallTileView(tile: CallTile, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(NexusSurfaceElevated)
+            // The speaking ring is the grid's only moving part. With several faces on
+            // screen and no audio cue, it is genuinely hard to tell who is talking.
+            .border(
+                width = if (tile.speaking) 2.dp else 0.dp,
+                color = if (tile.speaking) NexusAccent else Color.Transparent,
+                shape = RoundedCornerShape(18.dp),
+            ),
+    ) {
+        if (tile.video != null) {
+            VideoRenderer(track = tile.video, modifier = Modifier.fillMaxSize())
+        } else {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                GradientAvatar(
+                    gradient = callAvatarGradient,
+                    initial = "",
+                    size = 56.dp,
+                    photoUrl = tile.photo,
+                )
+            }
+        }
+        // Name plate: a scrim behind it, because a tile can be video (any colour) or a
+        // flat surface, and the label has to stay readable on both.
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(8.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.Black.copy(alpha = 0.45f))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (tile.isMe) "Anda" else tile.name.ifBlank { "Pengguna" },
+                color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/**
+ * The add-someone control, sized to sit BESIDE the call controls.
+ *
+ * A vertical pill matching the control bar's height rather than a full-width strip: the
+ * strip stacked above the controls and the two overlapped on short screens. The count
+ * rides along because "can I add one more?" is the only question this button raises,
+ * and 5 is the cap.
+ */
+@Composable
+private fun InviteSideButton(count: Int, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(28.dp))
+            .background(NexusTextPrimary.copy(alpha = 0.08f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            modifier = Modifier.size(34.dp).clip(CircleShape).background(NexusAccent),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Rounded.PersonAdd, "Ajak orang", tint = Color.White, modifier = Modifier.size(18.dp))
+        }
+        Spacer(Modifier.height(5.dp))
+        Text("$count/5", color = NexusTextSecondary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * Picks someone to pull into the call, from the people you already have chats with.
+ *
+ * Deliberately sourced from conversations rather than a global search: a call is not a
+ * place to meet strangers, and everyone here is someone you have already spoken to.
+ * People already in the call are filtered out so the list only offers what can happen.
+ */
+@Composable
+private fun InvitePickerDialog(
+    already: Set<String>,
+    onDismiss: () -> Unit,
+    onPick: (String) -> Unit,
+) {
+    val ctx = LocalContext.current
+    var people by remember { mutableStateOf<List<com.example.syntra.net.NetConversation>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        runCatching { SyntraClient.getConversations() }
+            .onSuccess { list ->
+                people = list
+                    .filter { it.type == "direct" }
+                    .filter { !it.counterpartId.isNullOrBlank() && it.counterpartId !in already }
+                    .filterNot { com.example.syntra.net.BlockMask.hidden(ctx, it.counterpartUsername, it.counterpartId) }
+            }
+        loading = false
+    }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated)
+                .padding(18.dp),
+        ) {
+            Text("Ajak ke panggilan", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Maksimal 5 orang dalam satu panggilan.",
+                color = NexusTextSecondary, fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(14.dp))
+            when {
+                loading -> Text("Memuat…", color = NexusTextSecondary, fontSize = 13.sp)
+                people.isEmpty() -> Text(
+                    "Tidak ada orang lain untuk diajak.",
+                    color = NexusTextSecondary, fontSize = 13.sp,
+                )
+                else -> androidx.compose.foundation.lazy.LazyColumn(
+                    modifier = Modifier.heightIn(max = 320.dp),
+                ) {
+                    items(people.size) { i ->
+                        val c = people[i]
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) { c.counterpartId?.let(onPick) }
+                                .padding(vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            GradientAvatar(
+                                gradient = callAvatarGradient,
+                                initial = "",
+                                size = 34.dp,
+                                photoUrl = c.avatarMediaId?.takeIf { it.startsWith("http") },
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                c.title.ifBlank { c.counterpartUsername.orEmpty() },
+                                color = NexusTextPrimary, fontSize = 14.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun OngoingControls(
@@ -1127,10 +1731,14 @@ private fun OngoingControls(
             }
             .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(44.dp)),
     ) {
+    // Spacing and sizes shrink as controls are added. A video call carries four
+    // buttons; with the invite pill beside it the row ran past the screen edge and the
+    // end-call button — always last — was the one pushed out of reach.
+    val dense = isVideo
     Row(
         modifier = Modifier
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(20.dp),
+            .padding(horizontal = if (dense) 12.dp else 20.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (dense) 12.dp else 20.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         CallControl(
@@ -1157,12 +1765,15 @@ private fun OngoingControls(
         }
         Box(
             modifier = Modifier
-                .size(58.dp)
+                .size(if (dense) 52.dp else 58.dp)
                 .background(Color(0xFFE5484D), CircleShape)
                 .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onHangUp),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Rounded.CallEnd, "Akhiri", tint = Color.White, modifier = Modifier.size(26.dp))
+            Icon(
+                Icons.Rounded.CallEnd, "Akhiri",
+                tint = Color.White, modifier = Modifier.size(if (dense) 23.dp else 26.dp),
+            )
         }
     }
     }

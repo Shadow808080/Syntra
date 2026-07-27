@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Gavel
@@ -424,6 +425,20 @@ private fun SettingsCategoryScreen(
                         }
 
                         SettingsCategory.NOTIFIKASI -> {
+                            // Re-homed into this category page after the settings
+                            // restructure. Shown only while the exemption is missing —
+                            // a row that can only say "already done" is noise.
+                            if (com.example.syntra.net.ChatConnectionService.batteryRestricted(context)) {
+                                NavRow(
+                                    Icons.Filled.BatteryAlert,
+                                    "Jalankan di latar belakang",
+                                    "Agar pesan dan panggilan tetap masuk saat layar mati",
+                                ) {
+                                    com.example.syntra.net.ChatConnectionService
+                                        .requestBatteryExemption(context)
+                                }
+                                Divider()
+                            }
                             ToggleRow(
                                 icon = Icons.Filled.Notifications,
                                 title = "Pesan",
