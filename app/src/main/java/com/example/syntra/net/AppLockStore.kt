@@ -22,6 +22,7 @@ object AppLockStore {
     private const val KEY_HASH = "pin_hash"
     private const val KEY_SALT = "pin_salt"
     private const val KEY_BIO = "biometric_enabled"
+    private const val KEY_AUTOLOCK = "autolock_seconds"
 
     /** Iterations of SHA-256 — cheap on device, but slows a brute-force of the file. */
     private const val STRETCH = 12_000
@@ -34,6 +35,20 @@ object AppLockStore {
 
     fun biometricEnabled(context: Context): Boolean =
         isEnabled(context) && prefs(context).getBoolean(KEY_BIO, false)
+
+    /**
+     * How long the app may sit in the background before it re-locks, in seconds.
+     * 0 = lock as soon as you leave (subject only to the short picker grace).
+     */
+    fun autoLockSeconds(context: Context): Int =
+        prefs(context).getInt(KEY_AUTOLOCK, 0)
+
+    fun setAutoLockSeconds(context: Context, seconds: Int) {
+        prefs(context).edit().putInt(KEY_AUTOLOCK, seconds).apply()
+    }
+
+    /** The auto-lock delay in millis (0 for "segera"). */
+    fun autoLockMs(context: Context): Long = autoLockSeconds(context) * 1000L
 
     fun setBiometricEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_BIO, enabled).apply()
@@ -135,9 +150,12 @@ object AppLock {
             return
         }
         // Cold start (no recorded background time) stays locked; a quick round-trip
-        // to a picker within the grace window keeps the current unlocked state.
+        // to a picker within the grace window keeps the current unlocked state. The
+        // user's chosen auto-lock delay extends this window (min the picker grace, so
+        // "segera" still survives our own pickers).
+        val grace = maxOf(GRACE_MS, AppLockStore.autoLockMs(context))
         val away = SystemClock.elapsedRealtime() - backgroundedAt
-        if (backgroundedAt != 0L && away < GRACE_MS) return
+        if (backgroundedAt != 0L && away < grace) return
         unlocked = false
     }
 }

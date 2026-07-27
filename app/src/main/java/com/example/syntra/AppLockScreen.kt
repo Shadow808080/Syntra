@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Backspace
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Icon
@@ -227,6 +228,8 @@ fun AppLockSettingsScreen(onClose: () -> Unit) {
     var enabled by remember { mutableStateOf(AppLockStore.isEnabled(context)) }
     var bioEnabled by remember { mutableStateOf(AppLockStore.biometricEnabled(context)) }
     val bioAvailable = remember { BiometricAuth.canAuthenticate(context) }
+    var autoLockSeconds by remember { mutableStateOf(AppLockStore.autoLockSeconds(context)) }
+    var showAutoLock by remember { mutableStateOf(false) }
     // When non-null we're inside the set/change-PIN flow.
     var settingPin by remember { mutableStateOf(false) }
     // What we're re-authenticating FOR, or null when not verifying. Turning the lock
@@ -354,12 +357,93 @@ fun AppLockSettingsScreen(onClose: () -> Unit) {
                             }
                         },
                     )
+                    RowDivider()
+                    LockRow(
+                        title = "Kunci otomatis",
+                        subtitle = autoLockLabel(autoLockSeconds),
+                        onClick = { showAutoLock = true },
+                    )
                 }
                 Spacer(Modifier.height(20.dp))
                 PrimaryButton("Matikan kunci aplikasi", destructive = true) {
                     verifyFor = LockAction.DISABLE
                 }
             }
+        }
+    }
+
+    if (showAutoLock) {
+        AutoLockDialog(
+            current = autoLockSeconds,
+            onSelect = {
+                autoLockSeconds = it
+                AppLockStore.setAutoLockSeconds(context, it)
+                showAutoLock = false
+            },
+            onDismiss = { showAutoLock = false },
+        )
+    }
+}
+
+/** Human label for the auto-lock delay shown in the settings row. */
+private fun autoLockLabel(seconds: Int): String =
+    if (seconds <= 0) "Segera setelah keluar" else "Setelah $seconds detik di latar belakang"
+
+/** Picks how long the app may sit in the background before it re-locks. */
+@Composable
+private fun AutoLockDialog(current: Int, onSelect: (Int) -> Unit, onDismiss: () -> Unit) {
+    val options = listOf(0 to "Segera", 10 to "10 detik", 20 to "20 detik", 30 to "30 detik")
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurface, RoundedCornerShape(20.dp))
+                .padding(vertical = 8.dp),
+        ) {
+            Text(
+                text = "Kunci otomatis",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp),
+            )
+            Text(
+                text = "Minta PIN lagi setelah aplikasi ditinggalkan selama ini.",
+                color = NexusTextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
+            )
+            options.forEach { (seconds, label) ->
+                val selected = seconds == current
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = { onSelect(seconds) },
+                        )
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        label,
+                        color = if (selected) NexusAccentSoft else NexusTextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (selected) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = "Dipilih",
+                            tint = NexusAccentSoft,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
         }
     }
 }
