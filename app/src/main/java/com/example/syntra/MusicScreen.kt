@@ -643,15 +643,6 @@ private fun MusicBrowseBody(
         if (communityTracks.isNotEmpty()) {
             item { SectionHeader("Unggahan komunitas") }
             item {
-                Text(
-                    "Tahan sebuah lagu untuk memasang gambar sampulmu sendiri — " +
-                        "tersimpan di perangkat ini saja.",
-                    color = NexusTextSecondary,
-                    fontSize = 11.sp,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
-                )
-            }
-            item {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
