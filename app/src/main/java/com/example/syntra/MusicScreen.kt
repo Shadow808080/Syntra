@@ -51,6 +51,9 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -91,6 +94,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -457,6 +461,23 @@ fun MusicScreen(
                     scope.launch {
                         val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                             com.example.syntra.net.LocalMusicStore.remove(context, t.id)
+                        }
+                        localTracks.clear(); localTracks.addAll(updated)
+                    }
+                },
+                // Reuse the same cover-picker used by community tracks: the result is
+                // stored per-track in TrackArtStore and repaints automatically.
+                onPickCover = { t ->
+                    artTarget = t.id
+                    AppLock.expectSystemDialog()
+                    pickArt.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    )
+                },
+                onEditTitle = { t, newTitle ->
+                    scope.launch {
+                        val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            com.example.syntra.net.LocalMusicStore.setTitle(context, t.id, newTitle)
                         }
                         localTracks.clear(); localTracks.addAll(updated)
                     }
@@ -970,11 +991,16 @@ private fun MusicDetailScreen(
     onBack: () -> Unit,
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
     onRemoveLocal: (MusicTrack) -> Unit = {},
+    onPickCover: (MusicTrack) -> Unit = {},
+    onEditTitle: (MusicTrack, String) -> Unit = { _, _ -> },
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val tracks = remember(detail) { mutableStateListOf<MusicTrack>() }
     var loading by remember(detail) { mutableStateOf(true) }
+    // Long-press menu + rename dialog for a device song (Local page only).
+    var menuFor by remember { mutableStateOf<MusicTrack?>(null) }
+    var renameFor by remember { mutableStateOf<MusicTrack?>(null) }
 
     // Device songs are already in hand (live list) — no network fetch, and their rows
     // keep the remove button. Everything else fetches its tracks below.
@@ -1084,10 +1110,134 @@ private fun MusicDetailScreen(
                         track = t,
                         onClick = { onPlay(t, shown.toList()) },
                         onRemove = { onRemoveLocal(t) },
+                        onLongPress = { menuFor = t },
                     )
                 }
             } else {
                 items(shown, key = { it.id }) { t -> TrackRow(t) { onPlay(t, shown.toList()) } }
+            }
+        }
+    }
+
+    // Long-press menu for a device song: change cover, rename, delete.
+    menuFor?.let { t ->
+        LocalTrackMenu(
+            track = t,
+            onChangeCover = { menuFor = null; onPickCover(t) },
+            onRename = { menuFor = null; renameFor = t },
+            onDelete = { menuFor = null; onRemoveLocal(t) },
+            onDismiss = { menuFor = null },
+        )
+    }
+
+    renameFor?.let { t ->
+        EditTitleDialog(
+            initial = t.title,
+            onConfirm = { newTitle -> onEditTitle(t, newTitle); renameFor = null },
+            onDismiss = { renameFor = null },
+        )
+    }
+}
+
+/** Long-press sheet for a device song. */
+@Composable
+private fun LocalTrackMenu(
+    track: MusicTrack,
+    onChangeCover: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurface, RoundedCornerShape(20.dp))
+                .padding(vertical = 8.dp),
+        ) {
+            Text(
+                text = track.title,
+                color = NexusTextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 10.dp),
+            )
+            MusicMenuRow(Icons.Filled.Image, "Ubah cover musik", onChangeCover)
+            MusicMenuRow(Icons.Filled.Edit, "Edit judul musik", onRename)
+            MusicMenuRow(Icons.Filled.Delete, "Hapus musik", onDelete, danger = true)
+            Spacer(Modifier.height(6.dp))
+        }
+    }
+}
+
+@Composable
+private fun MusicMenuRow(icon: ImageVector, label: String, onClick: () -> Unit, danger: Boolean = false) {
+    val tint = if (danger) Color(0xFFFF5D5D) else NexusTextPrimary
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+    ) {
+        Icon(icon, null, tint = if (danger) tint else NexusAccentSoft, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(16.dp))
+        Text(label, color = tint, fontSize = 15.sp)
+    }
+}
+
+/** Rename dialog for a device song's title. */
+@Composable
+private fun EditTitleDialog(initial: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
+                .padding(22.dp),
+        ) {
+            Text("Edit judul musik", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(14.dp))
+            androidx.compose.foundation.text.BasicTextField(
+                value = text,
+                onValueChange = { text = it },
+                textStyle = androidx.compose.ui.text.TextStyle(color = NexusTextPrimary, fontSize = 15.sp),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(NexusAccentSoft),
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(NexusSurface)
+                    .border(1.dp, NexusStroke, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+            )
+            Spacer(Modifier.height(20.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Batal",
+                    color = NexusTextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDismiss)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .background(NexusAccent, RoundedCornerShape(50))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = { if (text.isNotBlank()) onConfirm(text) },
+                        )
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                ) {
+                    Text("Simpan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
@@ -1173,14 +1323,24 @@ private fun LocalLibraryCard(tracks: List<MusicTrack>, onOpen: () -> Unit) {
     }
 }
 
-/** A device-music row: artwork · title/artist · remove. */
+/** A device-music row: artwork · title/artist · remove. Long-press opens its menu. */
 @Composable
-private fun LocalTrackRow(track: MusicTrack, onClick: () -> Unit, onRemove: () -> Unit) {
+private fun LocalTrackRow(
+    track: MusicTrack,
+    onClick: () -> Unit,
+    onRemove: () -> Unit,
+    onLongPress: () -> Unit = {},
+) {
     val isCurrent = MusicPlayer.current?.id == track.id
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .combinedClickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+                onLongClick = onLongPress,
+            )
             .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -82,6 +82,15 @@ object LocalMusicStore {
         return updated
     }
 
+    /** Renames a device track; blank titles are ignored. Returns the updated list. */
+    fun setTitle(context: Context, id: String, title: String): List<MusicTrack> {
+        val clean = title.trim()
+        if (clean.isBlank()) return list(context)
+        val updated = list(context).map { if (it.id == id) it.copy(title = clean) else it }
+        save(context, updated)
+        return updated
+    }
+
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
 
