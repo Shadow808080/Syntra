@@ -99,6 +99,15 @@ fun SyntraSplash(onDone: () -> Unit) {
         animationSpec = infiniteRepeatable(tween(17000, easing = LinearEasing), RepeatMode.Restart),
         label = "aurora-swell",
     )
+    // The one leaf that flies out of the distance at the mark. Its own clock, running
+    // 0 → 1 on a period that shares no factor with the other two, so its pass never
+    // syncs up with the drift behind it.
+    val heroLeaf by sky.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(7300, easing = LinearEasing), RepeatMode.Restart),
+        label = "hero-leaf",
+    )
 
     // A spring with a little overshoot: each piece arrives with weight and snaps home,
     // which is what makes it read as locking rather than sliding.
@@ -142,16 +151,17 @@ fun SyntraSplash(onDone: () -> Unit) {
             .background(NexusBackground),
         contentAlignment = Alignment.Center,
     ) {
-        // Aurora — drifting sheets of blue light behind the mark. It brightens as the
-        // pieces land, so the screen itself reacts to the assembly.
+        // A slow fall of leaves behind the mark, with one tumbling out of the distance
+        // to nearly cover it. Brightens as the pieces land, so the screen itself reacts
+        // to the assembly.
         Canvas(Modifier.fillMaxSize()) {
             // Energy no longer bottoms out once the assembly finishes: the splash now
-            // HOLDS until the app is ready, so the aurora has to stay alive on its own
+            // HOLDS until the app is ready, so the field has to stay alive on its own
             // instead of freezing on the last frame of the build-up. It breathes
             // between 0.55 and 1.0 forever, lifted further while pieces are landing.
             val assembly = (chat.value + shorts.value + rooms.value) / 3f
             val breath = 0.78f + 0.22f * kotlin.math.sin(swell)
-            drawEnergyThreads(drift, swell, breath * (0.55f + 0.45f * assembly))
+            drawLeafDrift(drift, swell, heroLeaf, breath * (0.55f + 0.45f * assembly))
         }
 
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -188,21 +198,20 @@ fun SyntraSplash(onDone: () -> Unit) {
     }
 }
 
-/** One filament's colour, chosen to stay visible against the current backdrop. */
-private fun threadTint(index: Int): Color = if (isLightTheme()) {
-    when (index) {
-        0 -> NexusAccent
-        1 -> darken(NexusAccent, 0.55f)
-        2 -> darken(NexusAccent, 0.75f)
-        else -> NexusAccentSoft
-    }
+/**
+ * A leaf's colour for a given depth — 0 is furthest away, 1 is right at the lens.
+ *
+ * Depth is expressed as VALUE, never hue: distant leaves sink toward the backdrop and
+ * near ones come forward, all of them the theme's own colour. That is also what sells
+ * the depth — real distance desaturates toward the background, it doesn't change what
+ * colour a thing is.
+ */
+private fun leafTint(depth: Float): Color = if (isLightTheme()) {
+    // On a light page a far leaf must get DARKER to recede, not paler — a pale leaf on
+    // white is simply invisible, which is how the old filaments disappeared entirely.
+    darken(NexusAccent, 0.45f + 0.4f * depth)
 } else {
-    when (index) {
-        0 -> NexusAccentSoft
-        1 -> Color.White
-        2 -> NexusAccent
-        else -> lighten(NexusAccent, 0.55f)
-    }
+    lighten(NexusAccent, 0.10f + 0.5f * depth)
 }
 
 /** True when the active palette is light, so the mark can invert against it. */
@@ -432,75 +441,121 @@ private fun DrawScope.drawAssembly(
  * Drawn as short segments rather than one path, so the head can be brighter than the
  * tail — which is what makes each thread read as travelling in a direction.
  */
-private fun DrawScope.drawEnergyThreads(phase: Float, phase2: Float, energy: Float) {
+private fun DrawScope.drawLeafDrift(phase: Float, phase2: Float, hero: Float, energy: Float) {
     val w = size.width
     val h = size.height
-    val threads = listOf(
-        // Thread tints follow the theme accent too — the filaments were the most
-        // visibly blue thing on a non-blue theme.
-        // Filaments are drawn on the PAGE, so they invert the opposite way to the dots.
-        // The pale set (and a literal white thread) simply vanished on a white page —
-        // the aurora was there the whole time, just invisible.
-        Thread(0.34f, 0.055f, 1.6f, 1.00f, threadTint(0), 2.4f),
-        Thread(0.47f, 0.085f, 1.1f, 1.45f, threadTint(1), 1.8f),
-        Thread(0.58f, 0.045f, 2.1f, 0.72f, threadTint(2), 3.0f),
-        Thread(0.66f, 0.070f, 1.35f, 1.18f, threadTint(3), 2.0f),
-    )
-    // More segments: at 44 the filaments visibly faceted where they curve hardest,
-    // which is most of what read as "not smooth".
-    val steps = 96
     val tau = 2f * Math.PI.toFloat()
-    val lightBackdrop = isLightTheme()
-    threads.forEachIndexed { index, th ->
-        val baseY = h * th.y
-        val amp = h * th.amp
-        val head = ((phase * th.speed) % tau) / tau
-        // Each thread drifts vertically on the slow clock, offset per thread so they
-        // never move as a block. This is what stops the field looking like one texture
-        // sliding sideways.
-        val sway = h * 0.035f * kotlin.math.sin(phase2 + index * 1.7f)
-        for (i in 0 until steps) {
-            val f0 = i / steps.toFloat()
-            val f1 = (i + 1) / steps.toFloat()
-            fun yAt(f: Float): Float {
-                // Two summed sines of unrelated frequency: a single sine is a rope, and
-                // the eye reads its period immediately.
-                val primary = kotlin.math.sin(f * th.wave * tau + phase * th.speed)
-                val ripple = 0.28f * kotlin.math.sin(f * th.wave * tau * 2.3f + phase2 * th.speed)
-                return baseY + sway + amp * (primary + ripple)
-            }
-            var d = f0 - head
-            if (d < 0f) d += 1f
-            // Smoothstep instead of a cubic: the old falloff snapped as the head
-            // wrapped past the left edge. This eases in and out of the comet head, so
-            // the wrap is invisible.
-            val t = (1f - d).coerceIn(0f, 1f)
-            val glow = t * t * (3f - 2f * t) * t
-            // Light backdrops need MORE ink for the same perceived contrast: a pale
-            // stroke at 0.4 alpha reads clearly on black and disappears on white. The
-            // filaments were being drawn the whole time — they just could not be seen.
-            val ink = if (lightBackdrop) 1.55f else 0.6f
-            drawLine(
-                color = th.colour.copy(alpha = ((0.06f + 0.7f * glow) * energy * ink).coerceAtMost(0.95f)),
-                start = Offset(w * f0, yAt(f0)),
-                end = Offset(w * f1, yAt(f1)),
-                // Slightly heavier on light, where thin strokes read as dust.
-                strokeWidth = th.weight * (0.6f + 0.9f * glow) * (if (lightBackdrop) 1.35f else 1f),
-                cap = StrokeCap.Round,
-            )
-        }
+    val light = isLightTheme()
+    // Light pages need noticeably more ink for the same perceived weight — the thing
+    // the old filaments got wrong badly enough to be invisible on a white theme.
+    val ink = if (light) 1.5f else 1f
+
+    // --- the drifting stack --------------------------------------------------
+    // Fourteen leaves seeded on the golden ratio. Anything modulo-based lines them up
+    // into rows the eye finds instantly; φ is the classic fix, and it also means no
+    // two leaves share a phase, so the field never pulses as one.
+    val count = 14
+    for (i in 0 until count) {
+        val g = (i * 0.6180339f) % 1f
+        val g2 = (i * 0.3819660f) % 1f
+        // Depth: mostly far, a few mid. The near plane is reserved for the hero.
+        val depth = 0.06f + 0.5f * g2
+
+        // Each leaf falls on its own slow line and wraps. `phase` is one full turn, so
+        // the wrap lands on the identical frame and never hitches.
+        val fall = ((phase / tau) * (0.10f + 0.16f * depth) + g) % 1f
+        // Sideways it sways rather than travels — leaves in still air, not wind.
+        val sway = kotlin.math.sin(phase2 * (0.6f + g) + g * tau) * w * (0.05f + 0.07f * depth)
+        val x = w * (0.08f + 0.84f * g) + sway
+        // Drift downward through 1.25 screens so a leaf is fully gone before it wraps.
+        val y = h * (fall * 1.25f - 0.12f)
+
+        // Tumbling: a slow spin plus a wobble, so it turns like a falling leaf rather
+        // than rotating like a wheel.
+        val spin = phase * (0.35f + 0.5f * g) + g * tau +
+            0.55f * kotlin.math.sin(phase2 * 1.3f + g * tau)
+        val len = h * (0.030f + 0.075f * depth)
+        // Far leaves are faint; the whole field lifts with `energy` as the mark builds.
+        val alpha = (0.10f + 0.30f * depth) * energy * ink
+
+        drawLeaf(Offset(x, y), len, spin, leafTint(depth), alpha.coerceIn(0f, 0.85f))
+    }
+
+    // --- the one that comes at you -------------------------------------------
+    // [hero] runs 0 → 1 forever. It reads as a single leaf tumbling out of the far
+    // distance, swelling until it nearly covers the mark, then sweeping past the lens.
+    // Almost all of the visual interest in this screen is this one object, which is
+    // why the rest of the field is kept deliberately quiet.
+    //
+    // The depth curve is cubed: distance compresses hard at the far end and rushes at
+    // the near end, which is how approach actually looks. A linear ramp reads as a
+    // sticker being scaled up.
+    val approach = hero * hero * hero
+    // Fade in from nothing, hold, then fade out as it passes the lens — so it never
+    // pops into or out of existence.
+    val heroAlpha = when {
+        hero < 0.12f -> hero / 0.12f
+        hero > 0.82f -> ((1f - hero) / 0.18f).coerceIn(0f, 1f)
+        else -> 1f
+    }
+    if (heroAlpha > 0.01f) {
+        // It arcs across rather than flying straight at the camera — a leaf blown past
+        // you, not a projectile aimed at you.
+        val hx = w * (0.16f + 0.62f * hero) + w * 0.10f * kotlin.math.sin(hero * tau * 0.75f)
+        val hy = h * (0.30f + 0.34f * approach) + h * 0.05f * kotlin.math.sin(hero * tau * 1.4f)
+        // Grows from a speck to roughly the width of the 150dp mark.
+        val hlen = h * (0.012f + 0.30f * approach)
+        // Spins up as it nears — the tumble accelerates with the approach.
+        val hspin = hero * tau * 1.6f + approach * 2.4f
+        drawLeaf(
+            centre = Offset(hx, hy),
+            length = hlen,
+            angle = hspin,
+            colour = leafTint(0.85f),
+            alpha = (0.34f * heroAlpha * energy * ink).coerceIn(0f, 0.72f),
+            rib = true,
+        )
     }
 }
 
-/** One thread's parameters. */
-private data class Thread(
-    val y: Float,
-    val amp: Float,
-    val wave: Float,
-    val speed: Float,
-    val colour: Color,
-    val weight: Float,
-)
+/**
+ * One leaf: an almond of two mirrored cubics, optionally with a midrib.
+ *
+ * Kept translucent and filled rather than outlined — a stack of outlines turns into a
+ * thicket of lines, while soft filled shapes overlap into depth.
+ */
+private fun DrawScope.drawLeaf(
+    centre: Offset,
+    length: Float,
+    angle: Float,
+    colour: Color,
+    alpha: Float,
+    rib: Boolean = false,
+) {
+    if (length <= 0.5f || alpha <= 0.005f) return
+    val half = length * 0.5f
+    val wide = length * 0.30f
+    val path = Path().apply {
+        moveTo(0f, -half)
+        cubicTo(wide, -half * 0.45f, wide, half * 0.40f, 0f, half)
+        cubicTo(-wide, half * 0.40f, -wide, -half * 0.45f, 0f, -half)
+        close()
+    }
+    translate(centre.x, centre.y) {
+        rotate(angle * 180f / Math.PI.toFloat(), Offset.Zero) {
+            drawPath(path, colour.copy(alpha = alpha))
+            if (rib) {
+                drawLine(
+                    color = colour.copy(alpha = (alpha * 1.5f).coerceAtMost(0.9f)),
+                    start = Offset(0f, -half * 0.86f),
+                    end = Offset(0f, half * 0.86f),
+                    strokeWidth = (length * 0.016f).coerceAtLeast(1f),
+                    cap = StrokeCap.Round,
+                )
+            }
+        }
+    }
+}
 
 /** The mark's optical centre within the 108 viewport — not the box centre. */
 private val MARK_CENTRE = Offset(56f, 51f)

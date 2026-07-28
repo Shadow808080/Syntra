@@ -1879,118 +1879,134 @@ private fun ActiveRow(
 }
 
 /**
- * A slow, wavy aurora that flows the full width behind the story rail. Three soft,
- * translucent ribbons drift on their own phases so they weave and undulate. Drawn
- * behind the avatars (very low alpha), it peeks through the gaps without ever
- * covering the story UI.
+ * A draped silk shawl of light behind the story rail.
+ *
+ * Two things were wrong with the version this replaces. It fanned the theme accent
+ * ±140° of hue, so a blue theme rendered as a green-and-violet light show — the
+ * background stopped following the theme in any way you could see. And it stacked
+ * four full-width ribbons, nine drifting sparkles, a breathing white sheen and a
+ * 4.2-second shimmer behind a row of avatars, which is a lot of movement competing
+ * with the actual content.
+ *
+ * Now: ONE colour family, three depths of it (deep → accent → pale), the way a fold
+ * of cloth shades itself. Three bands, each **tapered** — thick through the middle,
+ * vanishing at both ends — which is what makes it read as a shawl draped across the
+ * rail rather than as stripes running off the edges. Two slow non-harmonic clocks
+ * (17 s / 23 s) keep the drape from ever repeating the same silhouette.
  */
 @Composable
 private fun StoryAuroraBackground(modifier: Modifier = Modifier) {
-    val t = rememberInfiniteTransition(label = "story-aurora")
+    val t = rememberInfiniteTransition(label = "story-shawl")
     val twoPi = (2.0 * Math.PI).toFloat()
-    val p1 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(9000, easing = LinearEasing)), label = "a1")
-    val p2 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(14000, easing = LinearEasing)), label = "a2")
-    val p3 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(11000, easing = LinearEasing)), label = "a3")
-    val p4 by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(17000, easing = LinearEasing)), label = "a4")
-    // Sideways drift of the crests, plus an out-of-phase shimmer of the ribbon glow.
-    val drift by t.animateFloat(0f, 1f, infiniteRepeatable(tween(22000, easing = LinearEasing)), label = "drift")
-    val shimmer by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(4200, easing = LinearEasing)), label = "shimmer")
 
-    // Aurora-borealis spectrum derived from the theme accent — not one flat blue. The
-    // hue spread (green ↔ teal ↔ violet) is what gives it the "northern lights" feel
-    // while still following whatever accent the user's theme supplies.
-    // Frosted-glass tints: each spectrum colour is pulled toward white so the aurora
-    // reads as translucent, milky "glass" rather than saturated neon.
-    val cA = glassify(NexusAccentSoft)
-    val cB = glassify(shiftHue(NexusAccent, 62f))
-    val cC = glassify(shiftHue(NexusAccent, 140f))
-    val cD = glassify(shiftHue(NexusAccent, -48f))
+    // Travel clocks: each runs 0 → 1 and restarts. The wave argument is
+    // waves·2π·(f − travel) with an INTEGER `waves`, so one full turn shifts the curve
+    // by a whole number of periods and lands on the identical frame. That is what lets
+    // it loop forever with no seam — a non-integer wave count visibly jumps on wrap.
+    val flow1 by t.animateFloat(0f, 1f, infiniteRepeatable(tween(19000, easing = LinearEasing), RepeatMode.Restart), label = "flow1")
+    val flow2 by t.animateFloat(0f, 1f, infiniteRepeatable(tween(27000, easing = LinearEasing), RepeatMode.Restart), label = "flow2")
+    val flow3 by t.animateFloat(0f, 1f, infiniteRepeatable(tween(23000, easing = LinearEasing), RepeatMode.Restart), label = "flow3")
+    // One very slow breath so it is never quite static — presence, not flicker.
+    val breath by t.animateFloat(0f, twoPi, infiniteRepeatable(tween(13000, easing = LinearEasing)), label = "breath")
+
+    // Monochrome, straight from the theme: the same hue at three values.
+    val deep = shadeToward(NexusAccent, Color.Black, 0.42f)
+    val mid = NexusAccentSoft
+    val pale = shadeToward(NexusAccentSoft, Color.White, 0.52f)
 
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
 
-        // A wavy horizontal band; `xShift` slides the wave sideways so crests travel.
-        fun ribbon(centerY: Float, amp: Float, waves: Float, phase: Float, xShift: Float, thickness: Float): androidx.compose.ui.graphics.Path {
+        // The cloth is drawn WIDER than the rail and overhangs both sides, so its ends
+        // are off-screen and what you see is a long bolt passing through the frame.
+        // Pinching it to a spindle inside the viewport is what made it read as a short
+        // scarf hung in the middle.
+        val overhang = 0.14f
+        fun xAt(f: Float) = w * (-overhang + (1f + 2f * overhang) * f)
+
+        // Flat through the middle, easing away only in the outermost slivers — which
+        // sit mostly beyond the edges, so the band keeps its full body all the way
+        // across while still having no hard cut anywhere.
+        fun envelope(f: Float): Float {
+            val edge = 0.16f
+            val u = when {
+                f < edge -> f / edge
+                f > 1f - edge -> (1f - f) / edge
+                else -> 1f
+            }.coerceIn(0f, 1f)
+            return u * u * (3f - 2f * u) // smoothstep
+        }
+
+        // `travel` slides the crests left → right. Two summed integer harmonics keep it
+        // from reading as one plain sine rolling past.
+        fun shawl(
+            centerY: Float,
+            amp: Float,
+            waves: Int,
+            ripple: Int,
+            travel: Float,
+            thick: Float,
+            tilt: Float,
+        ): androidx.compose.ui.graphics.Path {
             val path = androidx.compose.ui.graphics.Path()
-            val steps = 48
+            val steps = 96
+            fun midY(f: Float): Float {
+                val a = kotlin.math.sin(waves * twoPi * (f - travel))
+                val b = 0.34f * kotlin.math.sin(ripple * twoPi * (f - travel * 0.6f))
+                return centerY + amp * (a + b) + tilt * (f - 0.5f) * h
+            }
+            fun half(f: Float) = thick * 0.5f * envelope(f)
             for (i in 0..steps) {
                 val f = i.toFloat() / steps
-                val x = w * f
-                val y = centerY + kotlin.math.sin(phase + (f + xShift) * waves * twoPi) * amp
-                if (i == 0) path.moveTo(x, y - thickness / 2f) else path.lineTo(x, y - thickness / 2f)
+                val y = midY(f) - half(f)
+                if (i == 0) path.moveTo(xAt(f), y) else path.lineTo(xAt(f), y)
             }
             for (i in steps downTo 0) {
                 val f = i.toFloat() / steps
-                val x = w * f
-                val y = centerY + kotlin.math.sin(phase + (f + xShift) * waves * twoPi) * amp
-                path.lineTo(x, y + thickness / 2f)
+                path.lineTo(xAt(f), midY(f) + half(f))
             }
             path.close()
             return path
         }
 
-        fun glow(base: Color, a: Float) =
-            Brush.verticalGradient(listOf(Color.Transparent, base.copy(alpha = a.coerceIn(0f, 1f)), Color.Transparent))
-
-        // Four woven ribbons across the spectrum; each breathes on its own shimmer phase.
-        // Alphas and amplitudes are pushed up so the aurora reads boldly, not as a hint.
-        val s1 = 0.5f + 0.5f * kotlin.math.sin(shimmer)
-        val s2 = 0.5f + 0.5f * kotlin.math.sin(shimmer + 2.1f)
-        val s3 = 0.5f + 0.5f * kotlin.math.sin(shimmer + 4.2f)
-        drawPath(ribbon(h * 0.38f, h * 0.24f, 1.4f, p1, drift, h * 0.58f), glow(cA, 0.30f + 0.16f * s1))
-        drawPath(ribbon(h * 0.60f, h * 0.28f, 1.1f, p2, -drift, h * 0.62f), glow(cB, 0.24f + 0.15f * s2))
-        drawPath(ribbon(h * 0.50f, h * 0.25f, 1.7f, p3, drift * 0.6f, h * 0.50f), glow(cC, 0.24f + 0.15f * s3))
-        drawPath(ribbon(h * 0.45f, h * 0.20f, 2.2f, p4, -drift * 0.4f, h * 0.44f), glow(cD, 0.20f + 0.13f * s1))
-
-        // Frosted-glass sheen: a soft translucent white wash breathing over the top, the
-        // giveaway of a glassmorphism surface.
-        drawRect(
-            brush = Brush.verticalGradient(
-                listOf(Color.White.copy(alpha = 0.05f + 0.05f * s2), Color.Transparent),
+        // Transparency runs ALONG the ribbon, not just across it: each one surfaces,
+        // peaks, and dissolves as it crosses. That gradient is most of what makes a
+        // thin band read as chiffon catching the light rather than as a drawn line.
+        fun silk(base: Color, peak: Float, offset: Float) = Brush.linearGradient(
+            colorStops = arrayOf(
+                0.00f to Color.Transparent,
+                0.16f to base.copy(alpha = (peak * 0.40f).coerceIn(0f, 1f)),
+                0.40f to base.copy(alpha = peak.coerceIn(0f, 1f)),
+                0.62f to base.copy(alpha = (peak * 0.62f).coerceIn(0f, 1f)),
+                0.85f to base.copy(alpha = (peak * 0.20f).coerceIn(0f, 1f)),
+                1.00f to Color.Transparent,
             ),
+            start = Offset(w * (-overhang + offset), 0f),
+            end = Offset(w * (1f + overhang + offset), 0f),
         )
 
-        // A scatter of slow-drifting light specks — the sparkle of a real aurora.
-        val palette = listOf(cA, cB, cC, cD)
-        val specks = 9
-        for (k in 0 until specks) {
-            val seed = k * 1.6180339f
-            val x = w * ((seed + drift * (0.6f + 0.15f * k)) % 1f)
-            val bob = kotlin.math.sin(p2 + seed * twoPi) * h * 0.18f
-            val y = h * (0.28f + 0.44f * ((seed * 2.3f) % 1f)) + bob
-            val twk = 0.5f + 0.5f * kotlin.math.sin(shimmer + seed * 3f)
-            val r = (2.5f + 2.5f * ((seed * 1.7f) % 1f)).dp.toPx()
-            val col = palette[k % palette.size]
-            drawCircle(
-                brush = Brush.radialGradient(
-                    listOf(col.copy(alpha = 0.7f * twk), Color.Transparent),
-                    center = Offset(x, y),
-                    radius = r * 3f,
-                ),
-                radius = r * 3f,
-                center = Offset(x, y),
-            )
-        }
+        val b = 0.5f + 0.5f * kotlin.math.sin(breath)
+
+        // Five GAUZE-thin ribbons, not three heavy bands. Layering several sheer ones
+        // is what gives the depth — where two cross, the overlap does the shading by
+        // itself, the way real chiffon folds over itself.
+        drawPath(shawl(h * 0.52f, h * 0.15f, 2, 3, flow1, h * 0.085f, 0.09f), silk(deep, 0.30f + 0.05f * b, 0f))
+        drawPath(shawl(h * 0.46f, h * 0.12f, 1, 2, flow2, h * 0.065f, -0.06f), silk(mid, 0.26f + 0.05f * (1f - b), 0.18f))
+        drawPath(shawl(h * 0.57f, h * 0.10f, 3, 1, flow3, h * 0.050f, 0.05f), silk(pale, 0.20f + 0.04f * b, -0.22f))
+        drawPath(shawl(h * 0.41f, h * 0.13f, 1, 3, flow2, h * 0.038f, 0.03f), silk(pale, 0.17f + 0.04f * (1f - b), 0.34f))
+        drawPath(shawl(h * 0.63f, h * 0.09f, 2, 1, flow1, h * 0.030f, -0.04f), silk(mid, 0.15f + 0.03f * b, -0.40f))
     }
 }
 
-/** Frosts a colour toward white for a translucent glassmorphism tint. */
-private fun glassify(c: Color): Color = Color(
-    red = c.red * 0.5f + 0.5f,
-    green = c.green * 0.5f + 0.5f,
-    blue = c.blue * 0.5f + 0.5f,
+/** Blends a colour toward [target] — used to shade one theme hue into the deep and
+ *  pale tones of the same cloth, instead of rotating it to a different colour. */
+private fun shadeToward(c: Color, target: Color, amount: Float): Color = Color(
+    red = c.red + (target.red - c.red) * amount,
+    green = c.green + (target.green - c.green) * amount,
+    blue = c.blue + (target.blue - c.blue) * amount,
     alpha = 1f,
 )
-
-/** Rotates a colour's hue, keeping saturation and value — used to derive the aurora's
- *  secondary ribbon tints from whatever accent the theme supplies. */
-private fun shiftHue(color: Color, degrees: Float): Color {
-    val hsv = FloatArray(3)
-    android.graphics.Color.colorToHSV(color.toArgb(), hsv)
-    hsv[0] = (hsv[0] + degrees + 360f) % 360f
-    return Color(android.graphics.Color.HSVToColor(hsv))
-}
 
 // ---------------------------------------------------------------------------
 // Conversation row

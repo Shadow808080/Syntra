@@ -26,7 +26,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CloudDownload
@@ -248,36 +247,24 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
             }
 
             item {
-                Box(
+                // Plain text, nothing else. It used to be a full-width red-filled slab
+                // with an icon — the loudest element on a screen of quiet rows, for the
+                // one action nobody comes to Settings to perform. The colour alone is
+                // enough to mark it as the destructive one.
+                Text(
+                    "Keluar akun",
+                    color = Color(0xFFFF5D5D),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 18.dp),
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(DangerFill, RoundedCornerShape(16.dp))
-                            .clickable(
-                                indication = null,
-                                interactionSource = remember { MutableInteractionSource() },
-                            ) { confirmSignOut = true }
-                            .padding(vertical = 15.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Logout, null,
-                            tint = Color(0xFFFF5D5D), modifier = Modifier.size(19.dp),
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            "Keluar akun",
-                            color = Color(0xFFFF5D5D),
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                }
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { confirmSignOut = true }
+                        .padding(horizontal = 16.dp, vertical = 22.dp),
+                )
             }
 
             item {
