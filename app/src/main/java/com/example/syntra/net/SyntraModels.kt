@@ -222,6 +222,10 @@ data class NetReelComment(
     val replyToId: String? = null,
     val replyToUsername: String = "",
     val replyToBody: String = "",
+    /** Jumlah suka pada komentar ini. */
+    val likeCount: Int = 0,
+    /** True bila PEMAKAI saat ini sudah menyukai komentar ini. */
+    val likedByMe: Boolean = false,
 )
 
 // Calls (audio & video) — docs/api.md §Calls. Audio/video ride LiveKit; the

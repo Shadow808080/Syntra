@@ -772,8 +772,16 @@ object SyntraClient {
                 replyToId = it.optString("reply_to_comment_id", "").ifBlank { null },
                 replyToUsername = it.optString("reply_to_username", ""),
                 replyToBody = it.optString("reply_to_body", ""),
+                likeCount = it.optInt("like_count", 0),
+                likedByMe = it.optBoolean("liked", false),
             )
         }
+
+    /** Menyukai / batal menyukai sebuah komentar reel. */
+    suspend fun likeReelComment(reelId: String, commentId: String, like: Boolean) {
+        if (like) putData("/api/v1/reels/$reelId/comments/$commentId/like", JSONObject())
+        else delete("/api/v1/reels/$reelId/comments/$commentId/like")
+    }
 
     suspend fun postReelComment(
         reelId: String,

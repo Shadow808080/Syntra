@@ -2726,6 +2726,29 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
         }
     }
 
+    // Suka / batal suka sebuah komentar. Optimistis: perbarui baris seketika, lalu
+    // kirim ke server; kalau gagal, kembalikan ke keadaan semula supaya angka tak
+    // berbohong. Diketik ulang penuh (copy) karena NetReelComment immutable.
+    fun toggleCommentLike(c: NetReelComment) {
+        val idx = comments.indexOfFirst { it.id == c.id }
+        if (idx < 0) return
+        val liked = !comments[idx].likedByMe
+        comments[idx] = comments[idx].copy(
+            likedByMe = liked,
+            likeCount = (comments[idx].likeCount + if (liked) 1 else -1).coerceAtLeast(0),
+        )
+        scope.launch {
+            runCatching { SyntraClient.likeReelComment(reel.id, c.id, liked) }
+                .onFailure {
+                    val j = comments.indexOfFirst { it.id == c.id }
+                    if (j >= 0) comments[j] = comments[j].copy(
+                        likedByMe = !liked,
+                        likeCount = (comments[j].likeCount + if (liked) -1 else 1).coerceAtLeast(0),
+                    )
+                }
+        }
+    }
+
     fun send() {
         if (sending) return
         val body = input.trim()
@@ -2838,6 +2861,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                                 isMine = c.authorId.isNotBlank() && c.authorId == myId,
                                 onLongPress = { pendingDelete = c },
                                 onReply = { replyingTo = c; focusRequester.requestFocus() },
+                                onToggleLike = { toggleCommentLike(c) },
                             )
                         }
                     }
@@ -2998,6 +3022,7 @@ private fun CommentRow(
     isMine: Boolean = false,
     onLongPress: () -> Unit = {},
     onReply: () -> Unit = {},
+    onToggleLike: () -> Unit = {},
 ) {
     val name = if (isMine) "Komentar Anda" else c.displayName.ifBlank { c.username }.ifBlank { "pengguna" }
     Row(
@@ -3139,6 +3164,36 @@ private fun CommentRow(
                         onClick = onReply,
                     ),
             )
+        }
+        // Trailing heart, like TikTok/Instagram: tap to like, the count sits under it.
+        // Filled red when I've liked it, hollow otherwise. Small hit target of its own.
+        Spacer(Modifier.width(8.dp))
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .align(Alignment.Top)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onToggleLike,
+                )
+                .padding(top = 2.dp, start = 2.dp, end = 2.dp),
+        ) {
+            Icon(
+                imageVector = if (c.likedByMe) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                contentDescription = if (c.likedByMe) "Batal suka" else "Suka",
+                tint = if (c.likedByMe) Color(0xFFFF3B5C) else NexusTextSecondary,
+                modifier = Modifier.size(if (isReply) 15.dp else 17.dp),
+            )
+            if (c.likeCount > 0) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    compactCount(c.likeCount),
+                    color = NexusTextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
         }
     }
 }
