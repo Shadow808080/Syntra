@@ -7,9 +7,11 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -42,6 +44,10 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PersonOff
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkRemove
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -58,6 +64,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -96,6 +103,7 @@ import com.example.syntra.net.BlockStore
 import com.example.syntra.net.BlockedByStore
 import com.example.syntra.net.NetUser
 import com.example.syntra.net.ProfileCache
+import com.example.syntra.net.ReelDownloader
 import com.example.syntra.net.NetVisitor
 import com.example.syntra.net.SyntraClient
 import com.example.syntra.net.VideoCache
@@ -149,6 +157,10 @@ fun ProfileScreen(
     val saved = remember(username) { mutableStateListOf<NetReel>() }
     var tab by remember(username) { mutableStateOf(ProfileTab.SHORTS) }
     var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
+    // Short whose long-press action sheet is open (null = none).
+    var optionsFor by remember { mutableStateOf<NetReel?>(null) }
+    // Reel awaiting a report reason.
+    var reportFor by remember { mutableStateOf<NetReel?>(null) }
     // When set, opens the full-screen swipeable reel viewer at this index.
     var viewerAt by remember { mutableStateOf<Int?>(null) }
     var following by remember(username) { mutableStateOf(false) }
@@ -487,8 +499,7 @@ fun ProfileScreen(
                 itemsIndexed(list, key = { _, r -> r.id }) { index, reel ->
                     ReelThumb(
                         reel = reel,
-                        deletable = isMe && tab == ProfileTab.SHORTS,
-                        onDelete = { pendingDelete = reel },
+                        onLongPress = { optionsFor = reel },
                         onOpen = { viewerAt = index },
                     )
                 }
@@ -515,6 +526,65 @@ fun ProfileScreen(
         if (list.isNotEmpty()) {
             ReelViewer(reels = list.toList(), startIndex = start, onClose = { viewerAt = null })
         }
+    }
+
+    // Long-press actions for a single short.
+    optionsFor?.let { reel ->
+        val mine = isMe && reel.authorId.let { it.isBlank() || it == SyntraClient.myUserId }
+        ReelOptionsSheet(
+            reel = reel,
+            isMine = mine,
+            inSavedTab = tab == ProfileTab.SAVED,
+            onDelete = { optionsFor = null; pendingDelete = reel },
+            onDownload = {
+                optionsFor = null
+                android.widget.Toast.makeText(context, "Mengunduh video…", android.widget.Toast.LENGTH_SHORT).show()
+                scope.launch {
+                    val ok = ReelDownloader.saveVideo(context, reel.mediaUrl, "syntra-${reel.id}.mp4")
+                    android.widget.Toast.makeText(
+                        context,
+                        if (ok) "Tersimpan di galeri (Movies/Syntra)" else "Gagal mengunduh video",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            },
+            onToggleSave = {
+                optionsFor = null
+                // In the Saved tab this is always an un-save, so the tile leaves the
+                // grid straight away rather than lingering until the next refresh.
+                val now = if (tab == ProfileTab.SAVED) false else !reel.isSaved
+                if (!now) saved.removeAll { it.id == reel.id }
+                val i = shorts.indexOfFirst { it.id == reel.id }
+                if (i >= 0) shorts[i] = shorts[i].copy(isSaved = now)
+                scope.launch {
+                    runCatching { SyntraClient.saveReel(reel.id, now) }
+                        .onFailure {
+                            android.widget.Toast.makeText(context, "Gagal: ${it.message}", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                }
+                android.widget.Toast.makeText(
+                    context,
+                    if (now) "Disimpan" else "Dihapus dari simpanan",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+            },
+            onReport = { optionsFor = null; reportFor = reel },
+            onDismiss = { optionsFor = null },
+        )
+    }
+
+    reportFor?.let { reel ->
+        ReportReelDialog(
+            onDismiss = { reportFor = null },
+            onSubmit = { reason ->
+                reportFor = null
+                scope.launch {
+                    runCatching { SyntraClient.reportReel(reel.id, reason) }
+                        .onSuccess { android.widget.Toast.makeText(context, "Laporan terkirim. Terima kasih.", android.widget.Toast.LENGTH_SHORT).show() }
+                        .onFailure { android.widget.Toast.makeText(context, "Gagal mengirim laporan: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
+                }
+            },
+        )
     }
 
     pendingDelete?.let { reel ->
@@ -1210,17 +1280,23 @@ private fun TabCell(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ReelThumb(reel: NetReel, deletable: Boolean, onDelete: () -> Unit, onOpen: () -> Unit) {
+private fun ReelThumb(reel: NetReel, onLongPress: () -> Unit, onOpen: () -> Unit) {
     Box(
         modifier = Modifier
             .padding(1.dp)
             .aspectRatio(0.66f)
             .background(NexusSurface)
-            .clickable(
+            // Tap opens, press-and-hold opens the actions. The delete affordance used
+            // to be a red badge stamped on every one of your own tiles — permanent
+            // clutter over the artwork, and the single most destructive action was the
+            // easiest one to hit by accident while scrolling.
+            .combinedClickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onOpen,
+                onLongClick = onLongPress,
             ),
     ) {
         AsyncImage(
@@ -1237,23 +1313,107 @@ private fun ReelThumb(reel: NetReel, deletable: Boolean, onDelete: () -> Unit, o
             Spacer(Modifier.width(2.dp))
             Text("${reel.viewCount}", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         }
-        if (deletable) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(5.dp)
-                    .size(24.dp)
-                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                        onClick = onDelete,
-                    ),
-                contentAlignment = Alignment.Center,
+    }
+}
+
+/**
+ * Actions for one short, opened by pressing and holding its tile.
+ *
+ * What's offered depends on whose reel it is and which tab you're on, so the sheet
+ * never shows something that would just fail: only the owner gets "Hapus", only the
+ * Saved tab gets "Hapus dari simpanan", and reporting is pointless on your own post.
+ */
+@Composable
+private fun ReelOptionsSheet(
+    reel: NetReel,
+    isMine: Boolean,
+    inSavedTab: Boolean,
+    onDelete: () -> Unit,
+    onDownload: () -> Unit,
+    onToggleSave: () -> Unit,
+    onReport: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurface, RoundedCornerShape(22.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
+                .padding(vertical = 18.dp),
+        ) {
+            // Header: which short this is, plus how it's doing. The numbers are the
+            // reason most people long-press their own post in the first place.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp),
             ) {
-                Icon(Icons.Filled.Delete, "Hapus", tint = Color(0xFFFF6B6B), modifier = Modifier.size(15.dp))
+                AsyncImage(
+                    model = reel.mediaUrl,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(46.dp, 60.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(NexusSurfaceElevated),
+                )
+                Spacer(Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        reel.caption.ifBlank { "Tanpa keterangan" },
+                        color = NexusTextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        ReelStat(Icons.Filled.Visibility, reel.viewCount)
+                        Spacer(Modifier.width(12.dp))
+                        ReelStat(Icons.Filled.Favorite, reel.likeCount)
+                        Spacer(Modifier.width(12.dp))
+                        ReelStat(Icons.Filled.ChatBubbleOutline, reel.commentCount)
+                    }
+                }
             }
+            Spacer(Modifier.height(14.dp))
+            HorizontalDivider(color = NexusStroke)
+            Spacer(Modifier.height(4.dp))
+
+            CoverOptionRow(Icons.Filled.Download, "Unduh video", NexusTextPrimary, onDownload)
+            if (inSavedTab) {
+                CoverOptionRow(
+                    Icons.Filled.BookmarkRemove,
+                    "Hapus dari simpanan",
+                    NexusTextPrimary,
+                    onToggleSave,
+                )
+            } else if (!isMine) {
+                CoverOptionRow(
+                    if (reel.isSaved) Icons.Filled.BookmarkRemove else Icons.Filled.Bookmark,
+                    if (reel.isSaved) "Hapus dari simpanan" else "Simpan",
+                    NexusTextPrimary,
+                    onToggleSave,
+                )
+            }
+            if (!isMine) {
+                CoverOptionRow(Icons.Filled.Flag, "Laporkan", NexusTextPrimary, onReport)
+            }
+            if (isMine && !inSavedTab) {
+                CoverOptionRow(Icons.Filled.Delete, "Hapus short", Color(0xFFFF5D5D), onDelete)
+            }
+            CoverOptionRow(Icons.Filled.Close, "Batal", NexusTextSecondary, onDismiss)
         }
+    }
+}
+
+@Composable
+private fun ReelStat(icon: androidx.compose.ui.graphics.vector.ImageVector, value: Int) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = NexusTextSecondary, modifier = Modifier.size(13.dp))
+        Spacer(Modifier.width(3.dp))
+        Text(formatCount(value), color = NexusTextSecondary, fontSize = 11.sp)
     }
 }
 
