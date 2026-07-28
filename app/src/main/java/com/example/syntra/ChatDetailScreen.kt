@@ -2041,26 +2041,9 @@ fun ChatDetailScreen(
         ChatVideoPreviewScreen(
             uri = uri,
             onCancel = { pendingVideo = null },
-            onSend = { caption ->
+            onSend = { bytes, ext, mime, caption ->
                 pendingVideo = null
-                scope.launch {
-                    val mime = context.contentResolver.getType(uri) ?: "video/mp4"
-                    val bytes = withContext(Dispatchers.IO) {
-                        runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
-                    }
-                    if (bytes == null) {
-                        Toast.makeText(context, "Tidak bisa membuka video.", Toast.LENGTH_SHORT).show()
-                    } else {
-                        val ext = when {
-                            mime.contains("webm") -> "webm"
-                            mime.contains("3gp") || mime.contains("3gpp") -> "3gp"
-                            mime.contains("quicktime") -> "mov"
-                            mime.contains("matroska") -> "mkv"
-                            else -> "mp4"
-                        }
-                        sendMedia("video", ext, mime, bytes, caption = caption)
-                    }
-                }
+                sendMedia("video", ext, mime, bytes, caption = caption)
             },
         )
     }
