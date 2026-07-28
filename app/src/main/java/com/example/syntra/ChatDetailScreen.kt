@@ -440,6 +440,8 @@ fun ChatDetailScreen(
     // A picked/captured photo waiting in the edit-before-send screen. Non-null shows
     // that editor; sending clears it.
     var pendingImage by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    // A picked video waiting in its own edit-before-send screen (preview + caption).
+    var pendingVideo by remember { mutableStateOf<android.net.Uri?>(null) }
     // View-once photos already opened on this device (locked as "Dibuka" afterwards).
     val viewOnceOpened = remember(conversation) { mutableStateListOf<String>() }
     // Whether we've told the peer we're typing (so we don't re-send start per key),
@@ -1074,12 +1076,10 @@ fun ChatDetailScreen(
         if (uri == null) return@rememberLauncherForActivityResult
         val mime = context.contentResolver.getType(uri) ?: ""
         if (mime.startsWith("video")) {
-            // Video: no bitmap editor — read the bytes and send straight through the
-            // media pipeline (the same one photos/voice notes use). The bubble shows a
-            // "mengirim" clock immediately, then swaps to the bucket URL once uploaded.
+            // Video: open the edit-before-send screen (preview + caption); nothing is
+            // sent until the user confirms there. Reject an oversized clip up front so
+            // the editor never opens on something that can't be sent anyway.
             scope.launch {
-                // Reject an oversized clip BEFORE reading it all into memory, so a huge
-                // pick can't OOM the app just to be rejected by sendMedia afterwards.
                 val size = withContext(Dispatchers.IO) {
                     runCatching {
                         context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
@@ -1087,22 +1087,8 @@ fun ChatDetailScreen(
                 }
                 if (size > 100L * 1024 * 1024) {
                     Toast.makeText(context, "Video terlalu besar (maks 100 MB).", Toast.LENGTH_LONG).show()
-                    return@launch
-                }
-                val bytes = withContext(Dispatchers.IO) {
-                    runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
-                }
-                if (bytes == null) {
-                    Toast.makeText(context, "Tidak bisa membuka video.", Toast.LENGTH_SHORT).show()
                 } else {
-                    val ext = when {
-                        mime.contains("webm") -> "webm"
-                        mime.contains("3gp") || mime.contains("3gpp") -> "3gp"
-                        mime.contains("quicktime") -> "mov"
-                        mime.contains("matroska") -> "mkv"
-                        else -> "mp4"
-                    }
-                    sendMedia("video", ext, mime, bytes)
+                    pendingVideo = uri
                 }
             }
         } else scope.launch {
@@ -2046,6 +2032,37 @@ fun ChatDetailScreen(
     // Fullscreen video player — tap a chat video to play it edge-to-edge.
     fullscreenVideo?.let { url ->
         FullscreenVideoPlayer(url = url, onClose = { fullscreenVideo = null })
+    }
+
+    // Edit-before-send screen for a picked video: preview + caption, then send. The
+    // bytes are read (off-main) only once the user confirms, and routed through the
+    // same media pipeline photos use.
+    pendingVideo?.let { uri ->
+        ChatVideoPreviewScreen(
+            uri = uri,
+            onCancel = { pendingVideo = null },
+            onSend = { caption ->
+                pendingVideo = null
+                scope.launch {
+                    val mime = context.contentResolver.getType(uri) ?: "video/mp4"
+                    val bytes = withContext(Dispatchers.IO) {
+                        runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+                    }
+                    if (bytes == null) {
+                        Toast.makeText(context, "Tidak bisa membuka video.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val ext = when {
+                            mime.contains("webm") -> "webm"
+                            mime.contains("3gp") || mime.contains("3gpp") -> "3gp"
+                            mime.contains("quicktime") -> "mov"
+                            mime.contains("matroska") -> "mkv"
+                            else -> "mp4"
+                        }
+                        sendMedia("video", ext, mime, bytes, caption = caption)
+                    }
+                }
+            },
+        )
     }
 
     // Edit-before-send screen for a picked/captured photo. Sending compresses the
