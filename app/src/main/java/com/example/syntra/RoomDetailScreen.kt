@@ -801,14 +801,10 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                     loudspeaker = !loudspeaker
                     VoiceEngine.setLoudspeaker(loudspeaker)
                 },
-                // Membalik kamera TIDAK menutup sheet — kamu bisa membalik berkali-kali
-                // tanpa harus membuka menu lagi. Toast singkat memberi konfirmasi bahwa
-                // aksinya jalan (tanpa itu, di sebagian perangkat pergantian lensa nyaris
-                // tak terlihat dan menu terasa "tak melakukan apa-apa").
-                onSwitchCamera = {
-                    VoiceEngine.switchCamera()
-                    Toast.makeText(context, "Kamera dibalik", Toast.LENGTH_SHORT).show()
-                },
+                // Balik kamera LALU tutup sheet: menu titik-3 yang menutup itulah
+                // tanda pergantian kamera berhasil (perilaku yang diminta). Sama pola
+                // dengan opsi lain di sini yang menutup sheet begitu dipilih.
+                onSwitchCamera = { showMore = false; VoiceEngine.switchCamera() },
                 onVoiceMode = { showMore = false; showVoiceModes = true },
                 onVtuber = {
                     if (canPublish) { showMore = false; showVtuber = true }
@@ -1733,7 +1729,7 @@ private fun RoomVtuberSheet(
             if (enabled) {
                 SheetAction("Matikan VTuber", Icons.Filled.Close, Color(0xFFFF5D5D), onTurnOff)
             }
-            SheetAction("Tutup", Icons.Filled.Close, NexusTextSecondary, onDismiss)
+            // Tombol "Tutup" dihapus: mengetuk di luar kartu sudah menutup sheet ini.
         }
     }
 }
