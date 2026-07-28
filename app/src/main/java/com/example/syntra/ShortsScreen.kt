@@ -48,8 +48,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -593,6 +597,7 @@ fun ShortsScreen(
                     VerticalPager(
                         state = pager,
                         modifier = Modifier.fillMaxSize(),
+                        flingBehavior = rememberReelFling(pager),
                         // The neighbour IS composed now, so its caption, avatar and
                         // action rail are already measured when you swipe — that
                         // layout pass was a visible hitch on a slow phone. What used
@@ -1570,6 +1575,29 @@ private fun formatClock(ms: Int): String {
 }
 
 /**
+ * Fling tuned for a full-screen reel feed, shared by the main feed and the profile
+ * viewer so both swipe identically.
+ *
+ * Two departures from the default make the scroll feel smoother:
+ *  - a lower `snapPositionalThreshold` (0.3 vs 0.5), so a short lazy flick still
+ *    carries to the next reel instead of springing back — the stiff "won't let go"
+ *    feeling people read as jank; and
+ *  - a critically-damped (no-bounce) medium-stiffness settle, so the page glides
+ *    into place quickly without the springy overshoot the default snap can show.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun rememberReelFling(pager: PagerState) =
+    PagerDefaults.flingBehavior(
+        state = pager,
+        snapAnimationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMedium,
+        ),
+        snapPositionalThreshold = 0.3f,
+    )
+
+/**
  * Loops the reel's video while [playing]; pauses otherwise (off-screen or tapped).
  *
  * Uses a [TextureView] rather than `VideoView`: a VideoView is backed by a
@@ -1860,7 +1888,12 @@ fun ReelViewer(
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         // Same prewarm shape as the main feed — see the pager there for the reasoning.
-        VerticalPager(state = pager, beyondViewportPageCount = 1, modifier = Modifier.fillMaxSize()) { page ->
+        VerticalPager(
+            state = pager,
+            beyondViewportPageCount = 1,
+            flingBehavior = rememberReelFling(pager),
+            modifier = Modifier.fillMaxSize(),
+        ) { page ->
             val reel = items[page]
             ReelPage(
                 reel = reel,
