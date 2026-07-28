@@ -491,20 +491,24 @@ private fun MainTabs(onSignOut: () -> Unit) {
      * Moves to [target] without dragging every tab in between across the screen.
      *
      * `animateScrollToPage` scrolls through the real distance, so tapping Rooms from
-     * Calls composed AND drew Music and Shorts on the way past — two video/audio
+     * Chat composed AND drew Music and Shorts on the way past — two video/audio
      * screens spun up for a few frames each, purely as scenery. That is the lag when
      * jumping between far-apart tabs.
      *
-     * Landing next door instantly and animating only the final page keeps the sense
-     * of movement while touching exactly one neighbour.
+     * So: an ADJACENT tab still animates — that slide is cheap and the neighbour is
+     * already composed. A FAR tab jumps straight there with NO animation, so nothing
+     * in between is ever composed. The previous version animated the last hop, which
+     * meant first landing on target∓1 — and for Chat→Rooms that neighbour IS Shorts,
+     * whose player spun up just to slide off. Jumping outright skips it entirely.
      */
     suspend fun jumpTo(target: Int) {
         val current = pager.currentPage
         if (target == current || target !in tabOrder.indices) return
-        if (kotlin.math.abs(target - current) > 1) {
-            pager.scrollToPage(if (target > current) target - 1 else target + 1)
+        if (kotlin.math.abs(target - current) == 1) {
+            pager.animateScrollToPage(target)
+        } else {
+            pager.scrollToPage(target)
         }
-        pager.animateScrollToPage(target)
     }
 
     fun goTo(tab: NexusTab) {
