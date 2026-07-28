@@ -730,6 +730,15 @@ fun ChatDetailScreen(
                 if (com.example.syntra.net.AppForeground.openConversationId == conversation.id) {
                     com.example.syntra.net.AppForeground.openConversationId = null
                 }
+                // Re-mark the chat read on exit. message.read rides the socket (at-most-once),
+                // so a read sent on open can be lost, and any message that arrived WHILE viewing
+                // (skipped when read receipts are off) would otherwise leave the server's
+                // unread_count > 0 — the badge then "comes back" on the next home refresh. A
+                // final read of the newest real message clears it reliably. Groups feel this
+                // most because they receive the most messages mid-view.
+                messages.lastOrNull { !it.id.startsWith(LOCAL_ID_PREFIX) }?.let {
+                    SyntraClient.messageRead(conversation.id, it.id)
+                }
             }
         }
         DisposableEffect(conversation.id) {
