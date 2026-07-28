@@ -1,5 +1,6 @@
 package com.example.syntra.net
 
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -9,15 +10,14 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.os.Handler
 import android.os.HandlerThread
-import android.view.Surface
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import livekit.org.webrtc.CapturerObserver
+import livekit.org.webrtc.JavaI420Buffer
 import livekit.org.webrtc.SurfaceTextureHelper
 import livekit.org.webrtc.VideoCapturer
 import livekit.org.webrtc.VideoFrame
-import livekit.org.webrtc.VideoSink
 import kotlin.math.sin
 
 /**
@@ -309,13 +309,22 @@ class AvatarRenderer {
 }
 
 /**
- * A WebRTC [VideoCapturer] whose frames are the drawn avatar, not a camera. LiveKit
- * calls [initialize] with a [SurfaceTextureHelper] wired to the room's shared EGL
- * context; we draw onto a [Surface] over that helper's SurfaceTexture with a plain
- * software Canvas, and each posted frame flows to the encoder like any camera frame.
+ * A WebRTC [VideoCapturer] whose frames are the drawn avatar, not a camera.
  *
- * Rendering runs on its own [HandlerThread] at a modest frame rate — cheap enough for
- * a mid-range phone, since it's flat 2D shapes at 480×480.
+ * It draws each frame onto an ordinary [Bitmap] with a software [Canvas], converts that
+ * to an **I420** [VideoFrame], and hands it straight to the [CapturerObserver] — the
+ * same buffer shape a real camera frame arrives in, so it rides the normal encode/render
+ * path and every participant's grid shows it like a camera.
+ *
+ * Why NOT the obvious route (a [Surface] over the helper's SurfaceTexture, `lockCanvas`):
+ * that SurfaceTexture is consumed by the room's GL context, and a CPU-written
+ * (`lockCanvas`) buffer handed to a GL consumer comes out **black** on a lot of devices —
+ * the buffer's usage flags don't line up, so nothing is ever sampled. Producing the I420
+ * buffer ourselves and pushing it to the observer sidesteps GL entirely, which is what
+ * made the avatar actually appear instead of a black tile.
+ *
+ * Rendering runs on its own [HandlerThread] at a modest frame rate — cheap enough for a
+ * mid-range phone, since it's flat 2D shapes at 480×480 plus one ARGB→I420 pass.
  */
 class AvatarVideoCapturer(
     private val width: Int = 480,
@@ -323,31 +332,28 @@ class AvatarVideoCapturer(
     private val fps: Int = 24,
 ) : VideoCapturer {
 
-    private var helper: SurfaceTextureHelper? = null
     private var observer: CapturerObserver? = null
-    private var surface: Surface? = null
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
     @Volatile private var running = false
     private val startNs = System.nanoTime()
     private val renderer = AvatarRenderer()
 
+    // Reused every frame so we don't allocate a bitmap/pixel buffer 24× a second.
+    private val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    private val canvas = Canvas(bitmap)
+    private val pixels = IntArray(width * height)
+
     override fun initialize(sth: SurfaceTextureHelper, ctx: android.content.Context?, obs: CapturerObserver) {
-        helper = sth
+        // We don't use the SurfaceTexture path (see the class note) — only the observer.
         observer = obs
     }
 
     override fun startCapture(w: Int, h: Int, framerate: Int) {
         if (running) return // LiveKit may start us; ignore a redundant second call
-        val sth = helper ?: return
-        sth.setTextureSize(width, height)
-        // The helper turns each posted buffer into a texture-backed VideoFrame; forward
-        // it straight to the encoder observer.
-        sth.startListening(VideoSink { frame: VideoFrame -> observer?.onFrameCaptured(frame) })
-        surface = Surface(sth.surfaceTexture)
+        running = true
         observer?.onCapturerStarted(true)
 
-        running = true
         val t = HandlerThread("AvatarRender").apply { start() }
         thread = t
         val hnd = Handler(t.looper)
@@ -363,39 +369,61 @@ class AvatarVideoCapturer(
     }
 
     private fun drawOneFrame() {
-        val s = surface ?: return
-        val canvas = runCatching { s.lockCanvas(null) }.getOrNull() ?: return
-        runCatching {
-            val tMs = (System.nanoTime() - startNs) / 1_000_000L
-            renderer.draw(canvas, width, height, VtuberFx.avatar, VtuberFx.level, tMs)
+        val obs = observer ?: return
+        val tMs = (System.nanoTime() - startNs) / 1_000_000L
+        runCatching { renderer.draw(canvas, width, height, VtuberFx.avatar, VtuberFx.level, tMs) }
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        val buffer = JavaI420Buffer.allocate(width, height)
+        argbToI420(pixels, width, height, buffer)
+        // Own reference passes to the frame; releasing the frame releases the buffer.
+        val frame = VideoFrame(buffer, 0, System.nanoTime())
+        runCatching { obs.onFrameCaptured(frame) }
+        frame.release()
+    }
+
+    /**
+     * Packs an ARGB pixel array into a pre-allocated I420 buffer (BT.601 full path).
+     * Luma is written per pixel; chroma is 2×2-subsampled, sampled at the block's
+     * top-left pixel — plenty for a flat cartoon, and it halves the chroma work.
+     */
+    private fun argbToI420(argb: IntArray, w: Int, h: Int, out: JavaI420Buffer) {
+        val dataY = out.dataY
+        val dataU = out.dataU
+        val dataV = out.dataV
+        val strideY = out.strideY
+        val strideU = out.strideU
+        val strideV = out.strideV
+        for (y in 0 until h) {
+            val row = y * w
+            val yLine = y * strideY
+            val even = (y and 1) == 0
+            val uLine = (y / 2) * strideU
+            val vLine = (y / 2) * strideV
+            for (x in 0 until w) {
+                val c = argb[row + x]
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                val yy = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
+                dataY.put(yLine + x, yy.coerceIn(16, 235).toByte())
+                if (even && (x and 1) == 0) {
+                    val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
+                    val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
+                    dataU.put(uLine + (x / 2), u.coerceIn(16, 240).toByte())
+                    dataV.put(vLine + (x / 2), v.coerceIn(16, 240).toByte())
+                }
+            }
         }
-        runCatching { s.unlockCanvasAndPost(canvas) }
     }
 
     override fun stopCapture() {
         if (!running && handler == null) return // already stopped / never started
         running = false
         val h = handler
-        val sth = helper
-        val s = surface
-        surface = null
-        // CRITICAL: tear the helper/surface down ON the render thread, not on the caller.
-        // stopListening() blocks the caller until the helper thread idles; running it on
-        // the main thread (from VoiceEngine.disconnect on leave) while a frame was still
-        // being produced deadlocked lockCanvas ⇄ the consumer → the room froze on exit.
-        // Posting it to the render handler runs it AFTER any in-flight frame, off-main.
-        if (h != null) {
-            h.removeCallbacksAndMessages(null)
-            h.post {
-                runCatching { sth?.stopListening() }
-                runCatching { s?.release() }
-            }
-        } else {
-            runCatching { sth?.stopListening() }
-            runCatching { s?.release() }
-        }
+        if (h != null) h.removeCallbacksAndMessages(null)
         observer?.onCapturerStopped()
-        thread?.quitSafely() // processes the posted teardown, then quits
+        thread?.quitSafely()
         thread = null
         handler = null
     }
@@ -404,6 +432,7 @@ class AvatarVideoCapturer(
 
     override fun dispose() {
         runCatching { stopCapture() }
+        runCatching { bitmap.recycle() }
     }
 
     override fun isScreencast(): Boolean = false

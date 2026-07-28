@@ -801,7 +801,14 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                     loudspeaker = !loudspeaker
                     VoiceEngine.setLoudspeaker(loudspeaker)
                 },
-                onSwitchCamera = { VoiceEngine.switchCamera() },
+                // Membalik kamera TIDAK menutup sheet — kamu bisa membalik berkali-kali
+                // tanpa harus membuka menu lagi. Toast singkat memberi konfirmasi bahwa
+                // aksinya jalan (tanpa itu, di sebagian perangkat pergantian lensa nyaris
+                // tak terlihat dan menu terasa "tak melakukan apa-apa").
+                onSwitchCamera = {
+                    VoiceEngine.switchCamera()
+                    Toast.makeText(context, "Kamera dibalik", Toast.LENGTH_SHORT).show()
+                },
                 onVoiceMode = { showMore = false; showVoiceModes = true },
                 onVtuber = {
                     if (canPublish) { showMore = false; showVtuber = true }
@@ -1580,7 +1587,8 @@ private fun RoomMoreSheet(
             if (isHost) {
                 SheetAction("Akhiri room", Icons.Filled.CallEnd, Color(0xFFFF5D5D), onEndRoom)
             }
-            SheetAction("Tutup", Icons.Filled.Close, NexusTextSecondary, onDismiss)
+            // Tombol "Tutup" dihapus: mengetuk di luar kartu sudah menutup sheet ini,
+            // jadi baris itu hanya menduplikasi gestur yang sudah ada.
         }
     }
 }
