@@ -226,9 +226,15 @@ data class NetReelComment(
     val likeCount: Int = 0,
     /** True bila PEMAKAI saat ini sudah menyukai komentar ini. */
     val likedByMe: Boolean = false,
-    /** URL lampiran gambar opsional pada komentar (null bila tak ada). */
+    /** URL lampiran GIF opsional pada komentar (null bila tak ada). Untuk komentar
+     *  yang masih dikirim, ini berisi uri/URL lokal supaya GIF-nya sudah terlihat
+     *  sebelum server menjawab. */
     val mediaUrl: String? = null,
     val mediaKind: String = "",
+    /** True selama komentar ini baru ada di layar dan BELUM dikonfirmasi server.
+     *  Baris seperti ini digambar redup dengan progres sekali-jalan, lalu tergantikan
+     *  oleh salinan asli dari server begitu terkirim. */
+    val pending: Boolean = false,
 )
 
 // Calls (audio & video) — docs/api.md §Calls. Audio/video ride LiveKit; the

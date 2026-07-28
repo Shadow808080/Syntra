@@ -41,6 +41,15 @@ object ReelCache {
     private const val DIR = "reel_media"
     private const val MAX_BYTES = 1024L * 1024 * 1024 // 1 GB ceiling, then LRU
 
+/**
+ * How much of an upcoming reel to pull ahead of time — the head of the file only.
+ *
+ * ~1.5 MB covers the container header plus the first couple of seconds at reel
+ * bitrates, which is all that "starts instantly" needs. Caching entire files ahead
+ * was costing far more in contention than it ever saved in start-up.
+ */
+private const val PREFETCH_BYTES = 1_500_000L
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val prefetching = ConcurrentHashMap.newKeySet<String>()
 
@@ -94,7 +103,21 @@ object ReelCache {
         scope.launch {
             runCatching {
                 val source = cacheDataSourceFactory(app).createDataSource()
-                CacheWriter(source, DataSpec(Uri.parse(url)), null, null).cache()
+                // Only the OPENING of the clip, not the whole file.
+                //
+                // An unbounded DataSpec makes CacheWriter download the entire next
+                // video — and the feed warms TWO of them — while the reel you are
+                // actually watching is still streaming. Three full-rate downloads
+                // competing for one radio, one disk and one CPU is felt directly as
+                // stutter on a slow phone, which is the opposite of what prefetching
+                // is for. [PREFETCH_BYTES] is enough for playback to start instantly;
+                // ExoPlayer streams the remainder once the reel is actually on screen.
+                CacheWriter(
+                    source,
+                    DataSpec(Uri.parse(url), 0, PREFETCH_BYTES),
+                    null,
+                    null,
+                ).cache()
             }
             prefetching.remove(url)
         }

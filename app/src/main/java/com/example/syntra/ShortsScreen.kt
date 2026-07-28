@@ -1,14 +1,19 @@
 package com.example.syntra
 
-import android.graphics.SurfaceTexture
 import android.content.Context
 import android.net.Uri
 import android.view.Surface
-import android.view.TextureView
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -70,6 +75,8 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Gif
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.People
@@ -84,7 +91,6 @@ import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.AlternateEmail
-import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.ModeComment
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -114,9 +120,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.layout.onSizeChanged
@@ -231,7 +234,12 @@ fun ShortsScreen(
     // come through here — the pages release their players to the pool on their own and
     // an idle player holds no codec, so returning to the feed stays instant.
     DisposableEffect(Unit) {
-        onDispose { com.example.syntra.net.ReelPlayerPool.releaseAll() }
+        onDispose {
+            com.example.syntra.net.ReelPlayerPool.releaseAll()
+            // Don't leave full-screen armed for the next visit: coming back to a feed
+            // with no header and no bottom bar reads as a broken screen, not a mode.
+            com.example.syntra.net.CleanScreen.on = false
+        }
     }
     // Seed from the feed cache so entering Shorts is instant — from memory on a tab
     // switch, and from DISK on a cold start, which is the case that used to mean a
@@ -256,6 +264,14 @@ fun ShortsScreen(
     var pendingVideo by remember { mutableStateOf<Uri?>(null) }
     var trimmedVideo by remember { mutableStateOf<Uri?>(null) }
     var commentsFor by remember { mutableStateOf<NetReel?>(null) }
+    // "Layar penuh": every piece of chrome off, just the clip. One flag drives it, so
+    // the button on the feed and "Layar bersih" in the long-press sheet are the same
+    // mode rather than two lookalikes that can disagree.
+    val fullscreen = com.example.syntra.net.CleanScreen.on
+    // Auto-advance is suspended while the comment sheet is up: the video the comments
+    // belong to must not slide away underneath them mid-read. The reel loops instead
+    // (ReelVideo keeps repeatMode in sync live), so playback never just stops dead.
+    val autoScrollActive = autoScroll && commentsFor == null
     // Reel the owner asked to delete, pending confirmation.
     var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
     // Author whose profile is open (tapped their avatar), null = feed.
@@ -566,9 +582,18 @@ fun ShortsScreen(
                 var prevPage by remember { mutableStateOf(0) }
                 LaunchedEffect(pager.currentPage) {
                     val p = pager.currentPage
-                    if (p > prevPage) BottomBarVisibility.visible = false
-                    else if (p < prevPage) BottomBarVisibility.visible = true
+                    // In full-screen the bar stays down regardless of direction —
+                    // otherwise scrolling back up would pop it into a mode whose whole
+                    // point is that nothing but the video is on screen.
+                    if (!com.example.syntra.net.CleanScreen.on) {
+                        if (p > prevPage) BottomBarVisibility.visible = false
+                        else if (p < prevPage) BottomBarVisibility.visible = true
+                    }
                     prevPage = p
+                }
+                // Entering full-screen hides the bar; leaving restores it.
+                LaunchedEffect(fullscreen) {
+                    if (fullscreen) BottomBarVisibility.visible = false else BottomBarVisibility.visible = true
                 }
                 DisposableEffect(Unit) { onDispose { BottomBarVisibility.visible = true } }
                 // Count a view whenever a reel settles on screen.
@@ -632,12 +657,14 @@ fun ShortsScreen(
                             onOpenProfile = {
                                 if (reel.creatorUsername.isNotBlank()) openProfileUser = reel.creatorUsername
                             },
-                            autoScroll = autoScroll,
+                            autoScroll = autoScrollActive,
                             speed = playbackSpeed,
                             onVideoEnded = {
                                 // Auto-advance only when there's a next reel; the last
                                 // one just stops (its own player already replayed once).
-                                if (autoScroll && page < displayReels.lastIndex) {
+                                // Re-checked here as well as in `autoScrollActive`: the
+                                // sheet can open between the clip ending and this firing.
+                                if (autoScrollActive && page < displayReels.lastIndex) {
                                     scope.launch { pager.animateScrollToPage(page + 1) }
                                 }
                             },
@@ -648,22 +675,24 @@ fun ShortsScreen(
             }
         }
 
-        // Header floats over the feed.
-        ShortsHeader(
-            following = showFollowing,
-            onSelectFollowing = { showFollowing = it },
-            onPost = {
-                if (posting) return@ShortsHeader
-                pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-            },
-        )
+        // Header floats over the feed — gone entirely in full-screen.
+        if (!fullscreen) {
+            ShortsHeader(
+                following = showFollowing,
+                onSelectFollowing = { showFollowing = it },
+                onPost = {
+                    if (posting) return@ShortsHeader
+                    pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                },
+            )
+        }
 
         // Fixed upload card at the very top. Stays while the reel uploads, then
         // fills the bar and disappears. Only ever visible on this (Shorts) screen.
         LaunchedEffect(posting) {
             if (!posting && uploadCardVisible) { delay(900); uploadCardVisible = false }
         }
-        if (uploadCardVisible) {
+        if (uploadCardVisible && !fullscreen) {
             UploadReelCard(
                 thumb = uploadThumb,
                 startMs = uploadStartMs,
@@ -673,17 +702,29 @@ fun ShortsScreen(
             )
         }
 
-        // "Back to top" — appears once you've scrolled past the first reel, jumps
-        // straight back to the top video. Sits just under the header on the left.
-        if (displayReels.isNotEmpty() && pager.currentPage > 0 && !uploadCardVisible) {
+        // "Ke atas" — appears once you've scrolled past the first reel and jumps back
+        // to the top video.
+        //
+        // It used to be a bare circle pinned to the top-LEFT, which read as a stray
+        // back arrow floating over the video and sat off-balance against the centred
+        // tabs. It is now a labelled pill directly under those tabs — centred, so it
+        // belongs to the feed rather than hovering beside it — and it slides in
+        // instead of appearing out of nowhere mid-scroll.
+        AnimatedVisibility(
+            visible = displayReels.isNotEmpty() && pager.currentPage > 0 &&
+                !uploadCardVisible && !fullscreen,
+            enter = fadeIn(tween(180)) + slideInVertically(tween(220)) { -it / 2 },
+            exit = fadeOut(tween(140)) + slideOutVertically(tween(180)) { -it / 2 },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(top = 62.dp),
+        ) {
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(start = 16.dp, top = 60.dp)
-                    .size(40.dp)
-                    .background(Color.Black.copy(alpha = 0.42f), CircleShape)
-                    .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                    .size(36.dp)
+                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                    .border(1.dp, Color.White.copy(alpha = 0.16f), CircleShape)
                     .clickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
@@ -694,7 +735,43 @@ fun ShortsScreen(
                     imageVector = Icons.Filled.KeyboardArrowUp,
                     contentDescription = "Ke video teratas",
                     tint = Color.White,
-                    modifier = Modifier.size(24.dp),
+                    modifier = Modifier.size(21.dp),
+                )
+            }
+        }
+
+        // Full-screen toggle. The SAME button in both states — it swaps its icon (and
+        // label) for the exit affordance once the chrome is gone, so there is always
+        // exactly one visible way back out. Sits opposite the "Ke atas" pill.
+        if (displayReels.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(end = 16.dp, top = 60.dp)
+                    .size(40.dp)
+                    // Dimmer in full-screen: it must stay findable without becoming
+                    // the thing you look at instead of the video.
+                    .background(
+                        Color.Black.copy(alpha = if (fullscreen) 0.32f else 0.45f),
+                        CircleShape,
+                    )
+                    .border(
+                        1.dp,
+                        Color.White.copy(alpha = if (fullscreen) 0.14f else 0.18f),
+                        CircleShape,
+                    )
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { com.example.syntra.net.CleanScreen.on = !fullscreen },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                    contentDescription = if (fullscreen) "Keluar layar penuh" else "Layar penuh",
+                    tint = Color.White.copy(alpha = if (fullscreen) 0.75f else 1f),
+                    modifier = Modifier.size(23.dp),
                 )
             }
         }
@@ -872,10 +949,12 @@ private fun ReelPage(
     // reset here — once on, it stays on across every reel until a tap brings it back.
     LaunchedEffect(active) { if (!active) paused = false }
 
-    // Pinch-to-zoom: two fingers scale the video up to 4×; lifting them springs it
-    // back. Reset when the reel scrolls off so it never comes back mid-zoom.
-    val zoom = remember(reel.id) { Animatable(1f) }
-    LaunchedEffect(active) { if (!active) runCatching { zoom.snapTo(1f) } }
+    // Pinch-to-zoom is GONE, deliberately. It only ever worked because the video was
+    // drawn through the app's own GPU canvas, and that is exactly what was costing
+    // 17–23 ms of GPU time per frame here (86% janky frames on the RMX2180). The feed
+    // now hands frames straight to the system compositor, which cannot be scaled by a
+    // graphicsLayer — so leaving the gesture in would have left a control that quietly
+    // did nothing. See the note in [ReelVideo].
     // While in the floating PiP window, strip everything but the video.
     val inPip = PipController.inPip
     // "Layar bersih": same idea, on demand — hide all chrome for a clean view.
@@ -895,43 +974,12 @@ private fun ReelPage(
             playing = active && !paused && !scrubbing,
             prewarm = prewarm,
             speed = speed,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    scaleX = zoom.value
-                    scaleY = zoom.value
-                },
+            modifier = Modifier.fillMaxSize(),
             loop = !autoScroll,
             seekToMs = seekReq,
             onDuration = { durMs = it },
             onPosition = { if (!scrubbing) posMs = it },
             onEnded = onVideoEnded,
-        )
-
-        // Pinch-to-zoom layer, on top so it sees the gesture first — but it only
-        // consumes when TWO fingers are down, so a single tap/double-tap/long-press
-        // still falls through to the tap layer below. Lifting the fingers springs
-        // the zoom back to 1×.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(reel.id) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        do {
-                            val event = awaitPointerEvent()
-                            if (event.changes.size >= 2) {
-                                val factor = event.calculateZoom()
-                                if (factor != 1f) {
-                                    val next = (zoom.value * factor).coerceIn(1f, 4f)
-                                    scope.launch { zoom.snapTo(next) }
-                                    event.changes.forEach { it.consume() }
-                                }
-                            }
-                        } while (event.changes.any { it.pressed })
-                        if (zoom.value != 1f) scope.launch { zoom.animateTo(1f, spring()) }
-                    }
-                },
         )
 
         // Tap layer over the upper video area only. The bottom strip (caption,
@@ -951,13 +999,11 @@ private fun ReelPage(
                 .padding(bottom = 200.dp)
                 .pointerInput(Unit) {
                     detectTapGestures(
-                        // In clean-screen mode a tap brings the chrome back; otherwise it
-                        // toggles play/pause as usual. Read the flag live so the gesture
-                        // block (keyed on Unit) never acts on a stale value.
-                        onTap = {
-                            if (com.example.syntra.net.CleanScreen.on) com.example.syntra.net.CleanScreen.on = false
-                            else paused = !paused
-                        },
+                        // Always play/pause — including in full-screen. Leaving that mode
+                        // is the toggle button's job now; when a stray tap could also do
+                        // it, half the taps meant to pause dropped you out of full-screen
+                        // instead.
+                        onTap = { paused = !paused },
                         onLongPress = { onLongPress() },
                         onDoubleTap = { offset ->
                             // Always show the heart; only send a like when it isn't
@@ -976,8 +1022,10 @@ private fun ReelPage(
             }
         }
 
-        // Paused indicator.
-        if (paused && active && !inPip && !cleanScreen) {
+        // Paused indicator. Shown in full-screen too: it only exists while you have
+        // deliberately paused, so it is feedback for an action rather than chrome, and
+        // pausing with no acknowledgement at all reads as the tap not registering.
+        if (paused && active && !inPip) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -1031,6 +1079,7 @@ private fun ReelPage(
                         onShare = onShare,
                         onDelete = onDelete,
                         onOpenProfile = onOpenProfile,
+                        active = active,
                         modifier = Modifier.padding(end = 12.dp, bottom = 14.dp),
                     )
                 }
@@ -1376,7 +1425,7 @@ private fun ReelActionRow(
  * which is both simpler and how most short-video apps do a first-pass report.
  */
 @Composable
-private fun ReportReelDialog(onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
+internal fun ReportReelDialog(onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
     val reasons = listOf(
         "Spam atau menyesatkan",
         "Konten seksual",
@@ -1604,10 +1653,16 @@ private fun rememberReelFling(pager: PagerState) =
 /**
  * Loops the reel's video while [playing]; pauses otherwise (off-screen or tapped).
  *
- * Uses a [TextureView] rather than `VideoView`: a VideoView is backed by a
- * SurfaceView, which owns its own window layer and on many devices draws *on top
- * of* everything — including the neighbouring tab while the pager is mid-swipe.
- * A TextureView composites like an ordinary view, so it stays inside its page.
+ * Renders into a `SurfaceView`, which gets its own hardware-composited layer instead
+ * of being drawn through the app's GPU canvas every frame.
+ *
+ * This file used a `TextureView` for a long time, on the reasoning that a SurfaceView
+ * owns a window layer and can draw over its neighbours mid-swipe. That trade was
+ * measured on the target device and is not worth it: at 86% janky frames the GPU was
+ * spending 17 ms (median) to 23 ms (p90) per frame against a 16.7 ms budget, almost
+ * all of it uploading and compositing a full-screen video texture. Since Android 10
+ * the compositor keeps a SurfaceView's position in step with its view, so the old
+ * mid-swipe artefact is largely historical.
  *
  * Playback is ExoPlayer (Media3) reading through [ReelCache]'s CacheDataSource, so
  * a clip is downloaded once and replays from disk.
@@ -1752,51 +1807,51 @@ private fun ReelVideo(
     }
 
     BoxWithConstraints(modifier = modifier.clipToBounds(), contentAlignment = Alignment.Center) {
-        // Show the WHOLE video without distorting or cropping: scale the stretched
-        // surface back to the video's real aspect ratio and fit it inside the page
-        // ("contain"). A 9:16 clip still fills edge-to-edge; other ratios get black
-        // bars instead of having their edges cut off.
-        val boxW = maxWidth.value
-        val boxH = maxHeight.value
-        val scaleX: Float
-        val scaleY: Float
-        if (videoW > 0 && videoH > 0 && boxW > 0f && boxH > 0f) {
-            val fit = minOf(boxW / videoW, boxH / videoH)
-            scaleX = videoW * fit / boxW
-            scaleY = videoH * fit / boxH
+        // Aspect-fit by SIZING the view, not by scaling it.
+        //
+        // This used to stretch the surface across the whole page and then squash it
+        // back with a graphicsLayer. Two costs came with that: a full-screen offscreen
+        // render target every frame, and — because only a TextureView's contents follow
+        // such a transform — it forced the heavier of Android's two video views.
+        //
+        // Measured on the RMX2180 before this change: 86% janky frames, with the GPU
+        // alone taking 17 ms at the median and 23 ms at p90 against a 16.7 ms budget.
+        // GPU-bound, not CPU-bound: a full-screen video texture was being uploaded and
+        // composited by the app every single frame.
+        //
+        // A SurfaceView instead hands the frames to the system compositor, which puts
+        // them on their own hardware layer and never routes them through our canvas.
+        val boxW = maxWidth
+        val boxH = maxHeight
+        val fitted = if (videoW > 0 && videoH > 0) {
+            val fit = minOf(boxW.value / videoW, boxH.value / videoH)
+            androidx.compose.ui.unit.DpSize((videoW * fit).dp, (videoH * fit).dp)
         } else {
-            scaleX = 1f
-            scaleY = 1f
+            androidx.compose.ui.unit.DpSize(boxW, boxH)
         }
 
         AndroidView(
             factory = { ctx ->
-                TextureView(ctx).apply {
-                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                            surface = Surface(st)
+                android.view.SurfaceView(ctx).apply {
+                    holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                        override fun surfaceCreated(h: android.view.SurfaceHolder) {
+                            surface = h.surface
                         }
 
-                        override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) = Unit
-                        override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                            // Drop it from the player FIRST, then release the buffer —
-                            // the other order hands ExoPlayer a dead surface.
-                            surface?.let { old ->
-                                surface = null
-                                runCatching { old.release() }
-                            }
-                            return true
+                        override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {
+                            surface = h.surface
                         }
-                        override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
-                    }
+
+                        override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
+                            // Detach from the player BEFORE the system tears the surface
+                            // down; the other order hands ExoPlayer a dead surface.
+                            // The holder owns this one, so we must NOT release it here.
+                            surface = null
+                        }
+                    })
                 }
             },
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    this.scaleX = scaleX
-                    this.scaleY = scaleY
-                },
+            modifier = Modifier.size(fitted.width, fitted.height),
         )
 
         if (!ready && !prewarm) {
@@ -1961,6 +2016,37 @@ private val ShortsTeal = Color(0xFF20D5C4)
  * videos never reveal a black/empty void mid-load. Animates alpha only (no layout),
  * so it's cheap and honours the motion discipline.
  */
+/**
+ * A loading placeholder whose highlight sweeps across exactly ONCE, then settles
+ * into a flat block.
+ *
+ * The looping kind is the reflex, but a shimmer that never stops stops meaning
+ * "loading" — it becomes wallpaper, and on a cheap phone it keeps an animation clock
+ * running for as long as the row is composed. One pass announces the wait; the flat
+ * block that remains is enough to say the space is still reserved.
+ */
+@Composable
+private fun OneShotSkeleton(modifier: Modifier = Modifier) {
+    val sweep = remember { Animatable(-0.6f) }
+    LaunchedEffect(Unit) { sweep.animateTo(1.6f, tween(1150, easing = LinearEasing)) }
+    androidx.compose.foundation.Canvas(modifier) {
+        drawRect(Color.White.copy(alpha = 0.07f))
+        val w = size.width
+        val x = sweep.value * w
+        drawRect(
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color.Transparent,
+                    Color.White.copy(alpha = 0.14f),
+                    Color.Transparent,
+                ),
+                start = Offset(x - w * 0.34f, 0f),
+                end = Offset(x + w * 0.34f, 0f),
+            ),
+        )
+    }
+}
+
 @Composable
 fun ShimmerFill(modifier: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "shimmer")
@@ -2093,6 +2179,8 @@ private fun ReelActions(
     onShare: () -> Unit,
     onDelete: (() -> Unit)? = null,
     onOpenProfile: () -> Unit = {},
+    /** False for a page held ready off-screen — stops its record spinning. */
+    active: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -2190,7 +2278,7 @@ private fun ReelActions(
                 onClick = onDelete,
             )
         }
-        SpinningMusicDisc(avatarUrl = reel.creatorAvatarUrl)
+        SpinningMusicDisc(avatarUrl = reel.creatorAvatarUrl, spinning = active)
     }
 
     if (showFollowSheet) {
@@ -2287,16 +2375,28 @@ private fun RailItem(icon: ImageVector, tint: Color, label: String, onClick: () 
     }
 }
 
-/** The little record that spins at the bottom of the action rail. */
+/**
+ * The little record that spins at the bottom of the action rail.
+ *
+ * Only spins while [spinning]. The pager keeps the neighbouring page composed so its
+ * layout is ready before you swipe onto it, which meant TWO of these were driving a
+ * frame every 16 ms forever — including one for a page nobody was looking at. An
+ * animation running off-screen still forces the whole frame to be produced.
+ */
 @Composable
-private fun SpinningMusicDisc(avatarUrl: String?) {
-    val transition = rememberInfiniteTransition(label = "disc")
-    val angle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(4500, easing = LinearEasing), RepeatMode.Restart),
-        label = "spin",
-    )
+private fun SpinningMusicDisc(avatarUrl: String?, spinning: Boolean = true) {
+    val angle = if (spinning) {
+        val transition = rememberInfiniteTransition(label = "disc")
+        val a by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(4500, easing = LinearEasing), RepeatMode.Restart),
+            label = "spin",
+        )
+        a
+    } else {
+        0f
+    }
     Box(
         modifier = Modifier
             .size(38.dp)
@@ -2688,13 +2788,15 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
     // The comment being replied to (null = a normal top-level comment).
     var replyingTo by remember { mutableStateOf<NetReelComment?>(null) }
     val focusRequester = remember { FocusRequester() }
-    // An image chosen to attach to the next comment (null = text-only comment).
-    var pendingImage by remember { mutableStateOf<android.net.Uri?>(null) }
+    // A GIF chosen to ride along with the next comment (null = text-only comment).
+    // Two sources, so both are held: a content:// uri when it came from the phone's
+    // gallery, an https url when it came from GIPHY. Only ever one at a time.
+    var pendingGifUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var pendingGifUrl by remember { mutableStateOf<String?>(null) }
+    val hasGif = pendingGifUri != null || pendingGifUrl != null
+    var showGifPicker by remember { mutableStateOf(false) }
     // Tag picker: pick a person to @mention so they're pinged to watch this reel.
     var showTagPicker by remember { mutableStateOf(false) }
-    val pickCommentImage = androidx.activity.compose.rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia(),
-    ) { uri -> if (uri != null) pendingImage = uri }
 
     suspend fun refresh() {
         runCatching { SyntraClient.getReelComments(reel.id) }
@@ -2763,9 +2865,10 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
     fun send() {
         if (sending) return
         val body = input.trim()
-        val image = pendingImage
-        // A comment needs at least text OR a photo.
-        if (body.isEmpty() && image == null) return
+        val gifUri = pendingGifUri
+        val gifUrl = pendingGifUrl
+        // A comment needs at least text OR a GIF.
+        if (body.isEmpty() && gifUri == null && gifUrl == null) return
         // 1-level threading: a reply always attaches to the top-level ancestor, so
         // replying to a reply still lands in the same thread (not a deeper level).
         // replyTo keeps the EXACT comment answered (even a reply inside the thread)
@@ -2776,12 +2879,46 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
         sending = true
         input = ""
         replyingTo = null
-        pendingImage = null
+        pendingGifUri = null
+        pendingGifUrl = null
+
+        // Show the comment IMMEDIATELY, marked pending. Uploading a GIF and waiting for
+        // the round-trip takes long enough that posting used to look like it had done
+        // nothing at all: the box emptied and the list sat unchanged until the refresh
+        // landed. The local uri/url goes straight into mediaUrl so the GIF is on screen
+        // before the server has ever seen it.
+        val tempId = "pending-" + System.nanoTime()
+        comments.add(
+            NetReelComment(
+                id = tempId,
+                authorId = myId.orEmpty(),
+                username = "",
+                displayName = "Anda",
+                body = body,
+                createdAt = java.time.Instant.now().toString(),
+                parentId = parent,
+                replyToId = replyTo,
+                replyToUsername = target?.username.orEmpty(),
+                replyToBody = target?.body.orEmpty(),
+                mediaUrl = gifUri?.toString() ?: gifUrl,
+                mediaKind = if (gifUri != null || gifUrl != null) "image" else "",
+                pending = true,
+            ),
+        )
+        // Keep the keyboard up. Emptying the field drops the send button out of the
+        // row, and that relayout was taking focus with it — so every comment closed
+        // the keyboard and a second one meant tapping back into the field first.
+        runCatching { focusRequester.requestFocus() }
+
         scope.launch {
             runCatching {
-                // Upload the attached photo first (if any), then post the comment
+                // Upload the attached GIF first (if any), then post the comment
                 // referencing the confirmed media id.
-                val mediaId = image?.let { uploadCommentImage(context, it) }
+                val mediaId = when {
+                    gifUri != null -> uploadCommentGif(context, gifUri)
+                    gifUrl != null -> uploadCommentGifFromUrl(gifUrl)
+                    else -> null
+                }
                 SyntraClient.postReelComment(reel.id, body, parent, replyTo, mediaId)
             }
                 .onSuccess {
@@ -2789,8 +2926,10 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                     refresh()  // pull the server copy (correct name/time/id/parent)
                 }
                 .onFailure {
+                    comments.removeAll { it.id == tempId }
                     input = body // restore so the text isn't lost
-                    pendingImage = image // keep the photo too
+                    pendingGifUri = gifUri // keep the GIF too
+                    pendingGifUrl = gifUrl
                     Toast.makeText(context, "Gagal: ${it.message}", Toast.LENGTH_SHORT).show()
                 }
             sending = false
@@ -2944,17 +3083,17 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                     )
                 }
             }
-            // Attached-photo preview — a thumbnail with a remove button, shown just
-            // above the input so it's clear a picture will ride along with the comment.
-            pendingImage?.let { uri ->
+            // Attached-GIF preview — plays right here (the app-wide Coil loader has the
+            // GIF decoder registered), so what you see is what gets posted.
+            if (hasGif) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box {
                         AsyncImage(
-                            model = uri,
-                            contentDescription = "Foto komentar",
+                            model = pendingGifUri ?: pendingGifUrl,
+                            contentDescription = "GIF komentar",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .size(64.dp)
@@ -2969,14 +3108,14 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                                 .clickable(
                                     indication = null,
                                     interactionSource = remember { MutableInteractionSource() },
-                                ) { pendingImage = null },
+                                ) { pendingGifUri = null; pendingGifUrl = null },
                             contentAlignment = Alignment.Center,
                         ) {
-                            Icon(Icons.Filled.Close, "Hapus foto", tint = Color.White, modifier = Modifier.size(13.dp))
+                            Icon(Icons.Filled.Close, "Hapus GIF", tint = Color.White, modifier = Modifier.size(13.dp))
                         }
                     }
                     Spacer(Modifier.width(10.dp))
-                    Text("Foto terlampir", color = NexusTextSecondary, fontSize = 12.sp)
+                    Text("GIF terlampir", color = NexusTextSecondary, fontSize = 12.sp)
                 }
             }
             // Input row.
@@ -2984,20 +3123,17 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Attach a photo.
+                // Attach a GIF — the same picker chat uses (gallery / GIPHY search /
+                // animated text), so there is one GIF experience in the app, not two.
                 Icon(
-                    Icons.Outlined.Image, "Lampirkan foto",
-                    tint = NexusTextSecondary,
+                    Icons.Filled.Gif, "Lampirkan GIF",
+                    tint = if (hasGif) NexusAccentSoft else NexusTextSecondary,
                     modifier = Modifier
-                        .size(26.dp)
+                        .size(30.dp)
                         .clickable(
                             indication = null,
                             interactionSource = remember { MutableInteractionSource() },
-                        ) {
-                            pickCommentImage.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                            )
-                        },
+                        ) { showGifPicker = true },
                 )
                 Spacer(Modifier.width(10.dp))
                 // Tag someone (@mention) so they're pinged to watch this reel.
@@ -3033,8 +3169,8 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                         modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
                     )
                 }
-                // Sendable as soon as there's text OR an attached photo.
-                if (input.isNotBlank() || pendingImage != null) {
+                // Sendable as soon as there's text OR an attached GIF.
+                if (input.isNotBlank() || hasGif) {
                     Spacer(Modifier.width(10.dp))
                     Box(
                         modifier = Modifier
@@ -3054,6 +3190,24 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                 }
             }
         }
+    }
+
+    // GIF picker — reuses the chat one, so gallery GIFs, GIPHY search and generated
+    // animated text all work here without a second implementation to keep in step.
+    if (showGifPicker) {
+        GifPickerSheet(
+            // Focus comes back to the field after picking, so you can type a caption
+            // with the GIF attached instead of having to tap into the box again.
+            onGif = { url ->
+                pendingGifUrl = url; pendingGifUri = null; showGifPicker = false
+                runCatching { focusRequester.requestFocus() }
+            },
+            onGifDevice = { uri ->
+                pendingGifUri = uri; pendingGifUrl = null; showGifPicker = false
+                runCatching { focusRequester.requestFocus() }
+            },
+            onDismiss = { showGifPicker = false },
+        )
     }
 
     // Tag picker: search users and insert @username into the comment box, so the
@@ -3128,9 +3282,12 @@ private fun CommentRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // A not-yet-confirmed comment is drawn back a little, so it reads as "on
+            // its way" rather than as a comment that is already there.
+            .alpha(if (c.pending) 0.55f else 1f)
             // Long-press my own comment to delete it.
             .then(
-                if (canDelete) {
+                if (canDelete && !c.pending) {
                     Modifier.combinedClickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
@@ -3253,32 +3410,71 @@ private fun CommentRow(
                 Spacer(Modifier.height(3.dp))
                 Text(c.body, color = NexusTextPrimary.copy(alpha = 0.92f), fontSize = 14.sp, lineHeight = 19.sp)
             }
-            // Attached photo, if any — a rounded, height-capped thumbnail.
-            c.mediaUrl?.let { photo ->
+            // Attached GIF, if any — a rounded, height-capped thumbnail. A skeleton
+            // holds the space (at a sane placeholder size) until the GIF decodes, so
+            // the row doesn't jolt when it finally lands.
+            c.mediaUrl?.let { gif ->
                 Spacer(Modifier.height(6.dp))
-                AsyncImage(
-                    model = photo,
-                    contentDescription = "Foto komentar",
-                    contentScale = ContentScale.Crop,
+                var loaded by remember(gif) { mutableStateOf(false) }
+                Box(
                     modifier = Modifier
-                        .heightIn(max = 180.dp)
-                        .widthIn(max = 220.dp)
+                        .then(if (loaded) Modifier else Modifier.size(width = 160.dp, height = 112.dp))
                         .clip(RoundedCornerShape(12.dp)),
-                )
+                ) {
+                    if (!loaded) OneShotSkeleton(Modifier.matchParentSize())
+                    AsyncImage(
+                        model = gif,
+                        contentDescription = "GIF komentar",
+                        contentScale = ContentScale.Crop,
+                        onState = { st -> loaded = st is coil.compose.AsyncImagePainter.State.Success },
+                        modifier = Modifier
+                            .heightIn(max = 180.dp)
+                            .widthIn(max = 220.dp),
+                    )
+                }
             }
             Spacer(Modifier.height(5.dp))
-            Text(
-                "Balas",
-                color = NexusTextSecondary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                        onClick = onReply,
-                    ),
-            )
+            if (c.pending) {
+                // Waiting for the server. A determinate bar that eases to nearly-full
+                // ONCE and stops there — deliberately not a looping spinner, which
+                // says "still working" forever and never says "almost done".
+                val progress = remember { Animatable(0f) }
+                LaunchedEffect(Unit) {
+                    progress.animateTo(0.92f, tween(2600, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Mengirim…", color = NexusTextSecondary, fontSize = 12.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(72.dp)
+                            .height(2.5.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(Color.White.copy(alpha = 0.10f)),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(progress.value)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(NexusAccentSoft),
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    "Balas",
+                    color = NexusTextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onReply,
+                        ),
+                )
+            }
         }
         // Trailing heart, like TikTok/Instagram: tap to like, the count sits under it.
         // Filled red when I've liked it, hollow otherwise. Small hit target of its own.
@@ -3361,25 +3557,35 @@ private fun CommentFilterChip(label: String, active: Boolean, onClick: () -> Uni
 }
 
 /**
- * Reads [uri] into a downsampled JPEG (aspect kept, max ~1280px) and uploads it as
- * an image, returning the confirmed media id — the same shape a group icon or story
- * photo takes. Runs off the main thread. Returns null if the image can't be read.
+ * Uploads a GIF picked from the phone and returns the confirmed media id.
+ *
+ * The bytes are sent **verbatim**. Decoding to a Bitmap and re-encoding — which is
+ * what the old photo path did — keeps only the first frame, so the GIF would arrive
+ * as a still image. It goes up as `kind=image` because that is what the backend's
+ * `add_reel_comment` accepts for a comment attachment; the `.gif` extension and
+ * mime are what make it animate on the way back down.
  */
-private suspend fun uploadCommentImage(context: android.content.Context, uri: android.net.Uri): String? =
+private suspend fun uploadCommentGif(context: android.content.Context, uri: android.net.Uri): String? =
     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-        val cr = context.contentResolver
-        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@withContext null
-        val maxDim = 1280
-        var sample = 1
-        while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
-        val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
-        val bmp = cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, opts) }
-            ?: return@withContext null
-        val out = java.io.ByteArrayOutputStream()
-        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
-        SyntraClient.uploadMedia("image", "jpg", "image/jpeg", out.toByteArray(), bmp.width, bmp.height)
+        val bytes = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull() ?: return@withContext null
+        if (bytes.isEmpty()) return@withContext null
+        SyntraClient.uploadMedia("image", "gif", "image/gif", bytes)
+    }
+
+/**
+ * Same, for a GIF chosen from GIPHY: fetch the bytes, then push them through our own
+ * media pipeline so the comment points at our bucket rather than a third-party URL
+ * that can rot or be blocked.
+ */
+private suspend fun uploadCommentGifFromUrl(url: String): String? =
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val bytes = runCatching {
+            java.net.URL(url).openStream().use { it.readBytes() }
+        }.getOrNull() ?: return@withContext null
+        if (bytes.isEmpty()) return@withContext null
+        SyntraClient.uploadMedia("image", "gif", "image/gif", bytes)
     }
 
 /**
