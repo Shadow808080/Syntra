@@ -212,12 +212,33 @@ object VoiceEngine {
         val lp = room?.localParticipant ?: return
         if (enabled) {
             if (_avatarOn.value) return
-            // Free the CAMERA source if the real camera happens to be on.
-            if (_cameraOn.value) runCatching { lp.setCameraEnabled(false) }.also { _cameraOn.value = false }
-            runCatching {
+            val id = lp.identity?.value
+            // Fully free the CAMERA source BEFORE republishing the avatar under it.
+            //
+            // The camera (high-level lp.setCameraEnabled) and the avatar (manual
+            // publishVideoTrack) share Track.Source.CAMERA. From a cold start that is
+            // clean, but turning the camera ON and THEN switching to the avatar RACED:
+            // the camera's teardown wasn't finished when the avatar publish landed, the
+            // publish was refused, and the now-dead camera track kept being rendered —
+            // a black tile that stayed black even after toggling the camera off.
+            //
+            // So: check for a real camera publication (not just the _cameraOn flag,
+            // which can drift), disable it, drop it from the grid at once, and let
+            // LiveKit settle before publishing under the freed source.
+            val hadCamera = _cameraOn.value ||
+                lp.getTrackPublication(Track.Source.CAMERA)?.track is LocalVideoTrack
+            if (hadCamera) {
+                runCatching { lp.setCameraEnabled(false) }
+                _cameraOn.value = false
+                if (id != null) {
+                    val cur = HashMap(_videoTracks.value); cur.remove(id); _videoTracks.value = cur
+                }
+                delay(150)
+            }
+            val ok = runCatching {
                 val capturer = AvatarVideoCapturer()
                 val track = lp.createVideoTrack(name = "avatar", capturer = capturer)
-                runCatching { track.startCapture() }
+                track.startCapture()
                 lp.publishVideoTrack(
                     track,
                     io.livekit.android.room.participant.VideoTrackPublishOptions(
@@ -228,12 +249,16 @@ object VoiceEngine {
                 _avatarOn.value = true
                 VtuberFx.enabled = true
                 // Show my own avatar in the grid immediately (the poll also picks it up).
-                val id = lp.identity?.value
                 if (id != null) {
                     val cur = HashMap(_videoTracks.value)
                     cur[id] = track
                     _videoTracks.value = cur
                 }
+            }
+            // If the publish failed, make sure no stale/dead track is left rendering as
+            // a black tile — clear my slot so it falls back to the avatar-off cover.
+            if (ok.isFailure && id != null) {
+                val cur = HashMap(_videoTracks.value); cur.remove(id); _videoTracks.value = cur
             }
         } else {
             if (!_avatarOn.value && avatarTrack == null) return
