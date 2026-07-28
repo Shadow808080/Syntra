@@ -149,10 +149,13 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -802,6 +805,12 @@ fun ShortsScreen(
             onPosted = {
                 val i = reels.indexOfFirst { it.id == reel.id }
                 if (i >= 0) reels[i] = reels[i].copy(commentCount = reels[i].commentCount + 1)
+            },
+            // Close the sheet first — the profile is full-screen, and leaving the sheet
+            // stacked under it means backing out lands you on comments you'd finished.
+            onOpenUser = { uname ->
+                commentsFor = null
+                if (uname.isNotBlank()) openProfileUser = uname
             },
         )
     }
@@ -1923,6 +1932,9 @@ fun ReelViewer(
             ReelCache.prefetch(context, it)
         }
     }
+    // Profile opened by tapping an @mention in a comment (null = viewer only).
+    var openProfileUser by remember { mutableStateOf<String?>(null) }
+
     fun toggleLike(reel: NetReel) {
         val idx = items.indexOfFirst { it.id == reel.id }
         if (idx < 0) return
@@ -2000,7 +2012,16 @@ fun ReelViewer(
                 val i = items.indexOfFirst { it.id == reel.id }
                 if (i >= 0) items[i] = items[i].copy(commentCount = items[i].commentCount + 1)
             },
+            onOpenUser = { uname ->
+                commentsFor = null
+                if (uname.isNotBlank()) openProfileUser = uname
+            },
         )
+    }
+
+    // A mention tapped inside the viewer opens that profile over it.
+    openProfileUser?.let { uname ->
+        ProfileScreen(username = uname, onClose = { openProfileUser = null })
     }
 }
 
@@ -2165,6 +2186,45 @@ private fun highlightHashtags(caption: String) = buildAnnotatedString {
             withStyle(SpanStyle(color = ShortsTeal, fontWeight = FontWeight.SemiBold)) { append(token) }
         } else {
             append(token)
+        }
+        if (i < tokens.lastIndex) append(" ")
+    }
+}
+
+/**
+ * Marks up body text: `@username` becomes a tappable link in the theme accent,
+ * `#hashtag` keeps the feed's teal.
+ *
+ * The mention is what the tag button writes, and until now it was plain grey text —
+ * indistinguishable from the rest of the sentence, and dead. It carries a real
+ * notification to a real account, so it should look like it points somewhere and
+ * actually go there.
+ *
+ * Trailing punctuation is stripped from the username but kept in the visible text, so
+ * "cek @reza, mantap" links to `reza` and still reads with its comma.
+ */
+private fun mentionedText(
+    text: String,
+    mentionColour: Color,
+    onOpenUser: (String) -> Unit,
+) = buildAnnotatedString {
+    val tokens = text.split(" ")
+    tokens.forEachIndexed { i, token ->
+        val handle = token.removePrefix("@").trimEnd('.', ',', '!', '?', ':', ';', ')', '"', '\'')
+        when {
+            token.startsWith("@") && handle.isNotEmpty() -> withLink(
+                LinkAnnotation.Clickable(
+                    tag = "mention:$handle",
+                    styles = TextLinkStyles(
+                        style = SpanStyle(color = mentionColour, fontWeight = FontWeight.SemiBold),
+                    ),
+                ) { onOpenUser(handle) },
+            ) { append(token) }
+
+            token.startsWith("#") && token.length > 1 ->
+                withStyle(SpanStyle(color = ShortsTeal, fontWeight = FontWeight.SemiBold)) { append(token) }
+
+            else -> append(token)
         }
         if (i < tokens.lastIndex) append(" ")
     }
@@ -2769,7 +2829,13 @@ private fun PostReelDialog(onDismiss: () -> Unit, onPost: (String) -> Unit) {
 
 @Composable
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: () -> Unit = {}) {
+private fun ReelCommentsSheet(
+    reel: NetReel,
+    onDismiss: () -> Unit,
+    onPosted: () -> Unit = {},
+    /** Tapping an `@username` in a comment opens that person's profile. */
+    onOpenUser: (String) -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val comments = remember { mutableStateListOf<NetReelComment>() }
@@ -2788,6 +2854,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
     // The comment being replied to (null = a normal top-level comment).
     var replyingTo by remember { mutableStateOf<NetReelComment?>(null) }
     val focusRequester = remember { FocusRequester() }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     // A GIF chosen to ride along with the next comment (null = text-only comment).
     // Two sources, so both are held: a content:// uri when it came from the phone's
     // gallery, an https url when it came from GIPHY. Only ever one at a time.
@@ -2905,10 +2972,9 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                 pending = true,
             ),
         )
-        // Keep the keyboard up. Emptying the field drops the send button out of the
-        // row, and that relayout was taking focus with it — so every comment closed
-        // the keyboard and a second one meant tapping back into the field first.
-        runCatching { focusRequester.requestFocus() }
+        // Put the keyboard away once the comment is on its way, so the list it was
+        // covering is visible again the moment the comment appears in it.
+        keyboard?.hide()
 
         scope.launch {
             runCatching {
@@ -3021,6 +3087,7 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                                 onLongPress = { pendingDelete = c },
                                 onReply = { replyingTo = c; focusRequester.requestFocus() },
                                 onToggleLike = { toggleCommentLike(c) },
+                                onOpenUser = onOpenUser,
                             )
                         }
                     }
@@ -3277,6 +3344,8 @@ private fun CommentRow(
     onLongPress: () -> Unit = {},
     onReply: () -> Unit = {},
     onToggleLike: () -> Unit = {},
+    /** Tapping an `@username` inside the body opens that person's profile. */
+    onOpenUser: (String) -> Unit = {},
 ) {
     val name = if (isMine) "Komentar Anda" else c.displayName.ifBlank { c.username }.ifBlank { "pengguna" }
     Row(
@@ -3408,7 +3477,12 @@ private fun CommentRow(
             }
             if (c.body.isNotBlank()) {
                 Spacer(Modifier.height(3.dp))
-                Text(c.body, color = NexusTextPrimary.copy(alpha = 0.92f), fontSize = 14.sp, lineHeight = 19.sp)
+                Text(
+                    mentionedText(c.body, NexusAccentSoft, onOpenUser),
+                    color = NexusTextPrimary.copy(alpha = 0.92f),
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp,
+                )
             }
             // Attached GIF, if any — a rounded, height-capped thumbnail. A skeleton
             // holds the space (at a sane placeholder size) until the GIF decodes, so
@@ -3416,9 +3490,17 @@ private fun CommentRow(
             c.mediaUrl?.let { gif ->
                 Spacer(Modifier.height(6.dp))
                 var loaded by remember(gif) { mutableStateOf(false) }
+                // FIXED frame, and the image fills it.
+                //
+                // Sizing this from the image's own intrinsic size deadlocked: an
+                // unloaded painter measures 0×0, Coil resolves a 0×0 target and never
+                // runs the request, so `loaded` never flips and the frame never gets a
+                // size. The GIF uploaded and the comment posted — nothing was ever
+                // drawn. A definite box also means the skeleton is exactly the size of
+                // what replaces it, so nothing jumps.
                 Box(
                     modifier = Modifier
-                        .then(if (loaded) Modifier else Modifier.size(width = 160.dp, height = 112.dp))
+                        .size(width = 168.dp, height = 118.dp)
                         .clip(RoundedCornerShape(12.dp)),
                 ) {
                     if (!loaded) OneShotSkeleton(Modifier.matchParentSize())
@@ -3427,9 +3509,7 @@ private fun CommentRow(
                         contentDescription = "GIF komentar",
                         contentScale = ContentScale.Crop,
                         onState = { st -> loaded = st is coil.compose.AsyncImagePainter.State.Success },
-                        modifier = Modifier
-                            .heightIn(max = 180.dp)
-                            .widthIn(max = 220.dp),
+                        modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
