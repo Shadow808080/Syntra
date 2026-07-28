@@ -1787,18 +1787,18 @@ private fun JoinGate(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = when (state) {
-                    JoinState.CONNECTING ->
-                        "Menyambungkan ke room…\nMenunggu izin dan jalur suara siap."
-                    else -> error ?: "Gagal bergabung."
-                },
-                color = NexusTextSecondary,
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
-                textAlign = TextAlign.Center,
-            )
+            // Saat menyambung: cukup spinner + judul room, tanpa teks "Menyambungkan…"
+            // (diminta user). Teks hanya muncul kalau GAGAL, untuk menerangkan kenapa.
+            if (state == JoinState.FAILED) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = error ?: "Gagal bergabung.",
+                    color = NexusTextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    textAlign = TextAlign.Center,
+                )
+            }
             Spacer(Modifier.height(28.dp))
             if (state == JoinState.FAILED) {
                 Box(
