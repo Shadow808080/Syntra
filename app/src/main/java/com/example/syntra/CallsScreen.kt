@@ -240,7 +240,20 @@ fun CallsScreen(
                     list.filter { it.type == "direct" }.forEach { c ->
                         val pid = c.counterpartId ?: return@forEach
                         contacts.add(c.title to pid)
-                        c.avatarMediaId?.takeIf { it.isNotBlank() }?.let { avatars[pid] = it }
+                        // Only real http URLs are loadable. A bare media id stored here would
+                        // win the first branch in CallAvatar and BLOCK the AvatarCache fallback,
+                        // leaving the row on the placeholder — the "foto tidak muncul" bug. Store
+                        // usable URLs both in the row map and the shared cache (keyed by id,
+                        // username, and name) so the log shows photos the chat home already knows.
+                        val photo = c.avatarMediaId?.takeIf { it.startsWith("http") }
+                        if (photo != null) {
+                            avatars[pid] = photo
+                            com.example.syntra.net.AvatarCache.put(context, pid, photo)
+                            c.counterpartUsername?.takeIf { it.isNotBlank() }
+                                ?.let { com.example.syntra.net.AvatarCache.put(context, it, photo) }
+                            c.title.takeIf { it.isNotBlank() }
+                                ?.let { com.example.syntra.net.AvatarCache.put(context, it, photo) }
+                        }
                         c.counterpartUsername?.takeIf { it.isNotBlank() }?.let { usernames[pid] = it }
                     }
                 }
@@ -816,7 +829,9 @@ private fun CallRow(
 @Composable
 private fun CallAvatar(avatarUrl: String?, name: String, peerId: String, size: androidx.compose.ui.unit.Dp) {
     val ctx = LocalContext.current
-    val resolved = avatarUrl?.takeIf { it.isNotBlank() }
+    // Accept only a real URL here: a non-http value (a bare media id) is not loadable
+    // and, worse, would short-circuit this chain and hide the cached photo below it.
+    val resolved = avatarUrl?.takeIf { it.startsWith("http") }
         ?: peerId.takeIf { it.isNotBlank() }?.let { com.example.syntra.net.AvatarCache.get(ctx, it) }
         ?: name.takeIf { it.isNotBlank() }?.let { com.example.syntra.net.AvatarCache.get(ctx, it) }
     GradientAvatar(
