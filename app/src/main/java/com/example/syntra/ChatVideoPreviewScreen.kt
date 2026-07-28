@@ -373,7 +373,10 @@ private fun TrimBar(
     onEnd: (Float) -> Unit,
 ) {
     val accent = Color(0xFFFFC24B)
-    val minGap = 600f // never let the selection collapse below ~0.6s
+    // Never let the selection collapse below ~0.6s — but for a clip shorter than that,
+    // shrink the gap to the whole duration so the coerce bounds can't invert (min>max),
+    // which would crash on the first drag of a very short video.
+    val minGap = 600f.coerceAtMost(durationMs)
     var barWidthPx by remember { mutableFloatStateOf(0f) }
     val handleW = 16.dp
 
@@ -453,7 +456,7 @@ private fun TrimBar(
                 offsetX = { (startX - insetPx).roundToInt() },
                 onDrag = { dx ->
                     if (trackW > 0f && durationMs > 0f) {
-                        val next = (startMs + dx / trackW * durationMs).coerceIn(0f, endMs - minGap)
+                        val next = (startMs + dx / trackW * durationMs).coerceIn(0f, (endMs - minGap).coerceAtLeast(0f))
                         onStart(next)
                     }
                 },
@@ -465,7 +468,7 @@ private fun TrimBar(
                 offsetX = { (endX - insetPx).roundToInt() },
                 onDrag = { dx ->
                     if (trackW > 0f && durationMs > 0f) {
-                        val next = (endMs + dx / trackW * durationMs).coerceIn(startMs + minGap, durationMs)
+                        val next = (endMs + dx / trackW * durationMs).coerceIn((startMs + minGap).coerceAtMost(durationMs), durationMs)
                         onEnd(next)
                     }
                 },

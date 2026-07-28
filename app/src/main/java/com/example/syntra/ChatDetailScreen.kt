@@ -3584,14 +3584,26 @@ private fun FullscreenVideoPlayer(url: String, onClose: () -> Unit) {
     var videoH by remember(url) { mutableFloatStateOf(0f) }
     val player = remember(url) {
         androidx.media3.exoplayer.ExoPlayer.Builder(context).build().apply {
-            // Play the cached copy if it's already on disk; otherwise stream the URL now
-            // and warm the cache in the background so a replay is instant and offline-safe.
-            val src = if (url.startsWith("http")) {
-                VideoCache.cachedFile(context, url)?.absolutePath ?: url.also { VideoCache.prefetch(context, url) }
-            } else {
-                url
+            // Build a proper Uri for each source kind. A bare filesystem path (a video you
+            // JUST sent, still on disk as its local copy) has no scheme, so Uri.parse would
+            // hand ExoPlayer something it can't open and the screen plays black — it needs
+            // Uri.fromFile. Http streams as-is (cached copy preferred, else warm the cache).
+            val item = when {
+                url.startsWith("http") -> {
+                    val cached = VideoCache.cachedFile(context, url)
+                    if (cached != null) {
+                        androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(cached))
+                    } else {
+                        VideoCache.prefetch(context, url)
+                        androidx.media3.common.MediaItem.fromUri(url)
+                    }
+                }
+                url.startsWith("content:") || url.startsWith("file:") ->
+                    androidx.media3.common.MediaItem.fromUri(android.net.Uri.parse(url))
+                else ->
+                    androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(java.io.File(url)))
             }
-            setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.parse(src)))
+            setMediaItem(item)
             playWhenReady = true
             prepare()
         }
