@@ -774,6 +774,8 @@ object SyntraClient {
                 replyToBody = it.optString("reply_to_body", ""),
                 likeCount = it.optInt("like_count", 0),
                 likedByMe = it.optBoolean("liked", false),
+                mediaUrl = it.optString("media_url", "").ifBlank { null },
+                mediaKind = it.optString("media_kind", ""),
             )
         }
 
@@ -788,11 +790,14 @@ object SyntraClient {
         body: String,
         parentId: String? = null,
         replyToId: String? = null,
+        mediaId: String? = null,
     ) {
         val payload = JSONObject().put("body", body)
         if (!parentId.isNullOrBlank()) payload.put("parent_id", parentId)
         // The exact comment being answered — lets the reply render a quote of it.
         if (!replyToId.isNullOrBlank()) payload.put("reply_to_id", replyToId)
+        // Optional image attachment (already uploaded & confirmed via uploadMedia).
+        if (!mediaId.isNullOrBlank()) payload.put("media_id", mediaId)
         postData("/api/v1/reels/$reelId/comments", payload)
     }
 

@@ -226,6 +226,9 @@ data class NetReelComment(
     val likeCount: Int = 0,
     /** True bila PEMAKAI saat ini sudah menyukai komentar ini. */
     val likedByMe: Boolean = false,
+    /** URL lampiran gambar opsional pada komentar (null bila tak ada). */
+    val mediaUrl: String? = null,
+    val mediaKind: String = "",
 )
 
 // Calls (audio & video) — docs/api.md §Calls. Audio/video ride LiveKit; the

@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
@@ -43,6 +44,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -81,6 +83,8 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.ModeComment
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -2684,6 +2688,13 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
     // The comment being replied to (null = a normal top-level comment).
     var replyingTo by remember { mutableStateOf<NetReelComment?>(null) }
     val focusRequester = remember { FocusRequester() }
+    // An image chosen to attach to the next comment (null = text-only comment).
+    var pendingImage by remember { mutableStateOf<android.net.Uri?>(null) }
+    // Tag picker: pick a person to @mention so they're pinged to watch this reel.
+    var showTagPicker by remember { mutableStateOf(false) }
+    val pickCommentImage = androidx.activity.compose.rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> if (uri != null) pendingImage = uri }
 
     suspend fun refresh() {
         runCatching { SyntraClient.getReelComments(reel.id) }
@@ -2752,7 +2763,9 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
     fun send() {
         if (sending) return
         val body = input.trim()
-        if (body.isEmpty()) return
+        val image = pendingImage
+        // A comment needs at least text OR a photo.
+        if (body.isEmpty() && image == null) return
         // 1-level threading: a reply always attaches to the top-level ancestor, so
         // replying to a reply still lands in the same thread (not a deeper level).
         // replyTo keeps the EXACT comment answered (even a reply inside the thread)
@@ -2763,14 +2776,21 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
         sending = true
         input = ""
         replyingTo = null
+        pendingImage = null
         scope.launch {
-            runCatching { SyntraClient.postReelComment(reel.id, body, parent, replyTo) }
+            runCatching {
+                // Upload the attached photo first (if any), then post the comment
+                // referencing the confirmed media id.
+                val mediaId = image?.let { uploadCommentImage(context, it) }
+                SyntraClient.postReelComment(reel.id, body, parent, replyTo, mediaId)
+            }
                 .onSuccess {
                     onPosted() // bump the rail's comment count live
                     refresh()  // pull the server copy (correct name/time/id/parent)
                 }
                 .onFailure {
                     input = body // restore so the text isn't lost
+                    pendingImage = image // keep the photo too
                     Toast.makeText(context, "Gagal: ${it.message}", Toast.LENGTH_SHORT).show()
                 }
             sending = false
@@ -2924,11 +2944,74 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                     )
                 }
             }
+            // Attached-photo preview — a thumbnail with a remove button, shown just
+            // above the input so it's clear a picture will ride along with the comment.
+            pendingImage?.let { uri ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box {
+                        AsyncImage(
+                            model = uri,
+                            contentDescription = "Foto komentar",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(RoundedCornerShape(12.dp)),
+                        )
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(3.dp)
+                                .size(20.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) { pendingImage = null },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Filled.Close, "Hapus foto", tint = Color.White, modifier = Modifier.size(13.dp))
+                        }
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text("Foto terlampir", color = NexusTextSecondary, fontSize = 12.sp)
+                }
+            }
             // Input row.
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // Attach a photo.
+                Icon(
+                    Icons.Outlined.Image, "Lampirkan foto",
+                    tint = NexusTextSecondary,
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) {
+                            pickCommentImage.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
+                )
+                Spacer(Modifier.width(10.dp))
+                // Tag someone (@mention) so they're pinged to watch this reel.
+                Icon(
+                    Icons.Filled.AlternateEmail, "Tandai seseorang",
+                    tint = NexusTextSecondary,
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { showTagPicker = true },
+                )
+                Spacer(Modifier.width(10.dp))
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -2950,7 +3033,8 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                         modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
                     )
                 }
-                if (input.isNotBlank()) {
+                // Sendable as soon as there's text OR an attached photo.
+                if (input.isNotBlank() || pendingImage != null) {
                     Spacer(Modifier.width(10.dp))
                     Box(
                         modifier = Modifier
@@ -2970,6 +3054,22 @@ private fun ReelCommentsSheet(reel: NetReel, onDismiss: () -> Unit, onPosted: ()
                 }
             }
         }
+    }
+
+    // Tag picker: search users and insert @username into the comment box, so the
+    // tagged person gets pinged (mention notification + deeplink) to watch this reel.
+    if (showTagPicker) {
+        TagPeopleSheet(
+            onDismiss = { showTagPicker = false },
+            onPick = { username ->
+                showTagPicker = false
+                if (username.isNotBlank()) {
+                    val prefix = if (input.isEmpty() || input.endsWith(" ")) "" else " "
+                    input = input + prefix + "@" + username + " "
+                    focusRequester.requestFocus()
+                }
+            },
+        )
     }
 
     // Confirm before deleting a comment.
@@ -3149,8 +3249,23 @@ private fun CommentRow(
                     }
                 }
             }
-            Spacer(Modifier.height(3.dp))
-            Text(c.body, color = NexusTextPrimary.copy(alpha = 0.92f), fontSize = 14.sp, lineHeight = 19.sp)
+            if (c.body.isNotBlank()) {
+                Spacer(Modifier.height(3.dp))
+                Text(c.body, color = NexusTextPrimary.copy(alpha = 0.92f), fontSize = 14.sp, lineHeight = 19.sp)
+            }
+            // Attached photo, if any — a rounded, height-capped thumbnail.
+            c.mediaUrl?.let { photo ->
+                Spacer(Modifier.height(6.dp))
+                AsyncImage(
+                    model = photo,
+                    contentDescription = "Foto komentar",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .heightIn(max = 180.dp)
+                        .widthIn(max = 220.dp)
+                        .clip(RoundedCornerShape(12.dp)),
+                )
+            }
             Spacer(Modifier.height(5.dp))
             Text(
                 "Balas",
@@ -3242,6 +3357,151 @@ private fun CommentFilterChip(label: String, active: Boolean, onClick: () -> Uni
             fontSize = 12.sp,
             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
         )
+    }
+}
+
+/**
+ * Reads [uri] into a downsampled JPEG (aspect kept, max ~1280px) and uploads it as
+ * an image, returning the confirmed media id — the same shape a group icon or story
+ * photo takes. Runs off the main thread. Returns null if the image can't be read.
+ */
+private suspend fun uploadCommentImage(context: android.content.Context, uri: android.net.Uri): String? =
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val cr = context.contentResolver
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@withContext null
+        val maxDim = 1280
+        var sample = 1
+        while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
+        val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+        val bmp = cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, opts) }
+            ?: return@withContext null
+        val out = java.io.ByteArrayOutputStream()
+        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+        SyntraClient.uploadMedia("image", "jpg", "image/jpeg", out.toByteArray(), bmp.width, bmp.height)
+    }
+
+/**
+ * Bottom sheet to tag (@mention) a person into a comment. Searches users by name /
+ * username; picking one hands the username back so it's inserted as "@username" —
+ * that person then gets a mention notification + deeplink to watch this reel.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun TagPeopleSheet(onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var query by remember { mutableStateOf("") }
+    val results = remember { mutableStateListOf<com.example.syntra.net.NetUser>() }
+    var loading by remember { mutableStateOf(false) }
+
+    // Debounced search. Empty query shows the people you follow as a starting point.
+    LaunchedEffect(query) {
+        loading = true
+        delay(280)
+        val fetched = runCatching {
+            if (query.isBlank()) SyntraClient.getFollowing()
+            else SyntraClient.searchUsers(query.trim())
+        }.getOrDefault(emptyList())
+        results.clear(); results.addAll(fetched)
+        loading = false
+    }
+
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = NexusSurface,
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
+            Text(
+                "Tandai seseorang",
+                color = NexusTextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 4.dp),
+            )
+            Text(
+                "Mereka akan diberi tahu untuk menonton video ini.",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp),
+            )
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = 20.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(NexusBackground)
+                    .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Search, null, tint = NexusTextSecondary, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(10.dp))
+                Box(modifier = Modifier.weight(1f)) {
+                    if (query.isEmpty()) Text("Cari nama atau username…", color = NexusTextSecondary, fontSize = 14.sp)
+                    BasicTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        singleLine = true,
+                        textStyle = TextStyle(color = NexusTextPrimary, fontSize = 14.sp),
+                        cursorBrush = SolidColor(NexusAccentSoft),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Box(modifier = Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
+                when {
+                    loading && results.isEmpty() -> Box(
+                        Modifier.fillMaxWidth().padding(vertical = 28.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp) }
+                    results.isEmpty() -> Text(
+                        if (query.isBlank()) "Belum ada orang yang kamu ikuti." else "Tidak ada yang cocok.",
+                        color = NexusTextSecondary,
+                        fontSize = 13.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 28.dp),
+                    )
+                    else -> LazyColumn(Modifier.fillMaxWidth()) {
+                        items(results, key = { it.id }) { u ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { onPick(u.username) }
+                                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                CommentAvatar(
+                                    url = u.avatarMediaId?.takeIf { it.startsWith("http") },
+                                    name = u.displayName.ifBlank { u.username },
+                                    size = 40.dp,
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        u.displayName.ifBlank { u.username },
+                                        color = NexusTextPrimary,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    if (u.username.isNotBlank()) {
+                                        Text("@${u.username}", color = NexusTextSecondary, fontSize = 12.sp, maxLines = 1)
+                                    }
+                                }
+                                Icon(Icons.Filled.AlternateEmail, null, tint = NexusAccentSoft, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
