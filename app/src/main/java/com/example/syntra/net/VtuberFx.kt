@@ -357,7 +357,7 @@ class AvatarVideoCapturer(
             override fun run() {
                 if (!running) return
                 drawOneFrame()
-                hnd.postDelayed(this, frameMs)
+                if (running) hnd.postDelayed(this, frameMs)
             }
         })
     }
@@ -373,15 +373,31 @@ class AvatarVideoCapturer(
     }
 
     override fun stopCapture() {
+        if (!running && handler == null) return // already stopped / never started
         running = false
-        handler?.removeCallbacksAndMessages(null)
-        runCatching { helper?.stopListening() }
+        val h = handler
+        val sth = helper
+        val s = surface
+        surface = null
+        // CRITICAL: tear the helper/surface down ON the render thread, not on the caller.
+        // stopListening() blocks the caller until the helper thread idles; running it on
+        // the main thread (from VoiceEngine.disconnect on leave) while a frame was still
+        // being produced deadlocked lockCanvas ⇄ the consumer → the room froze on exit.
+        // Posting it to the render handler runs it AFTER any in-flight frame, off-main.
+        if (h != null) {
+            h.removeCallbacksAndMessages(null)
+            h.post {
+                runCatching { sth?.stopListening() }
+                runCatching { s?.release() }
+            }
+        } else {
+            runCatching { sth?.stopListening() }
+            runCatching { s?.release() }
+        }
         observer?.onCapturerStopped()
-        thread?.quitSafely()
+        thread?.quitSafely() // processes the posted teardown, then quits
         thread = null
         handler = null
-        runCatching { surface?.release() }
-        surface = null
     }
 
     override fun changeCaptureFormat(w: Int, h: Int, framerate: Int) { /* fixed format */ }

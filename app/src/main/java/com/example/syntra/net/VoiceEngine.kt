@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Thin wrapper around the LiveKit room used for voice AND video rooms.
@@ -240,15 +241,19 @@ object VoiceEngine {
             avatarTrack = null
             _avatarOn.value = false
             VtuberFx.enabled = false
-            if (track != null) {
-                runCatching { lp.unpublishTrack(track) }
-                runCatching { track.stopCapture() }
-                runCatching { track.dispose() }
-            }
             val id = lp.identity?.value
             if (id != null) {
                 val cur = HashMap(_videoTracks.value)
                 if (cur[id] === track) { cur.remove(id); _videoTracks.value = cur }
+            }
+            // Unpublish + dispose off the main thread: the video-pipeline teardown can
+            // block, and this runs on the UI scope from the room sheet.
+            if (track != null) {
+                withContext(Dispatchers.Default) {
+                    runCatching { lp.unpublishTrack(track) }
+                    runCatching { track.stopCapture() }
+                    runCatching { track.dispose() }
+                }
             }
         }
     }
@@ -271,10 +276,17 @@ object VoiceEngine {
         scope = null
         // A voice disguise is per-session — the next room starts as your real voice.
         RoomVoiceFx.reset()
-        // Tear down the avatar capturer/track if it was running.
-        runCatching { avatarTrack?.stopCapture() }
-        runCatching { avatarTrack?.dispose() }
+        // Tear down the avatar capturer/track OFF the main thread. Doing it inline here
+        // (disconnect runs on the caller — leaving the room does it on the UI thread)
+        // could block on the video pipeline and freeze the app on exit.
+        val at = avatarTrack
         avatarTrack = null
+        if (at != null) {
+            Thread {
+                runCatching { at.stopCapture() }
+                runCatching { at.dispose() }
+            }.start()
+        }
         VtuberFx.reset()
         _avatarOn.value = false
         _audioLevels.value = emptyMap()
