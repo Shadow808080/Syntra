@@ -159,6 +159,8 @@ fun ProfileScreen(
     var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
     // Short whose long-press action sheet is open (null = none).
     var optionsFor by remember { mutableStateOf<NetReel?>(null) }
+    // Short whose caption is being edited (null = none).
+    var editCaptionFor by remember { mutableStateOf<NetReel?>(null) }
     // Reel awaiting a report reason.
     var reportFor by remember { mutableStateOf<NetReel?>(null) }
     // When set, opens the full-screen swipeable reel viewer at this index.
@@ -536,6 +538,7 @@ fun ProfileScreen(
             isMine = mine,
             inSavedTab = tab == ProfileTab.SAVED,
             onDelete = { optionsFor = null; pendingDelete = reel },
+            onEdit = { optionsFor = null; editCaptionFor = reel },
             onDownload = {
                 optionsFor = null
                 android.widget.Toast.makeText(context, "Mengunduh video…", android.widget.Toast.LENGTH_SHORT).show()
@@ -570,6 +573,32 @@ fun ProfileScreen(
             },
             onReport = { optionsFor = null; reportFor = reel },
             onDismiss = { optionsFor = null },
+        )
+    }
+
+    editCaptionFor?.let { reel ->
+        EditCaptionDialog(
+            initial = reel.caption,
+            onDismiss = { editCaptionFor = null },
+            onSave = { text ->
+                editCaptionFor = null
+                // Optimistic: the grid and any open viewer show the new caption at
+                // once, and it goes back if the server refuses.
+                val before = reel.caption
+                val i = shorts.indexOfFirst { it.id == reel.id }
+                if (i >= 0) shorts[i] = shorts[i].copy(caption = text)
+                scope.launch {
+                    runCatching { SyntraClient.updateReel(reel.id, caption = text) }
+                        .onSuccess {
+                            android.widget.Toast.makeText(context, "Keterangan diperbarui.", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        .onFailure { e ->
+                            val j = shorts.indexOfFirst { it.id == reel.id }
+                            if (j >= 0) shorts[j] = shorts[j].copy(caption = before)
+                            android.widget.Toast.makeText(context, "Gagal menyimpan: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                }
+            },
         )
     }
 
@@ -1329,6 +1358,7 @@ private fun ReelOptionsSheet(
     isMine: Boolean,
     inSavedTab: Boolean,
     onDelete: () -> Unit,
+    onEdit: () -> Unit,
     onDownload: () -> Unit,
     onToggleSave: () -> Unit,
     onReport: () -> Unit,
@@ -1381,6 +1411,9 @@ private fun ReelOptionsSheet(
             HorizontalDivider(color = NexusStroke)
             Spacer(Modifier.height(4.dp))
 
+            if (isMine && !inSavedTab) {
+                CoverOptionRow(Icons.Filled.Edit, "Edit keterangan", NexusTextPrimary, onEdit)
+            }
             CoverOptionRow(Icons.Filled.Download, "Unduh video", NexusTextPrimary, onDownload)
             if (inSavedTab) {
                 CoverOptionRow(
@@ -1404,6 +1437,91 @@ private fun ReelOptionsSheet(
                 CoverOptionRow(Icons.Filled.Delete, "Hapus short", Color(0xFFFF5D5D), onDelete)
             }
             CoverOptionRow(Icons.Filled.Close, "Batal", NexusTextSecondary, onDismiss)
+        }
+    }
+}
+
+/**
+ * Edits a short's caption in place.
+ *
+ * Only the caption. Visibility and comment settings are deliberately left out even
+ * though the endpoint accepts them — this dialog is reached from a long-press on a
+ * thumbnail, and quietly changing who can see a post is not something that should
+ * live one accidental tap away from "Hapus".
+ */
+@Composable
+private fun EditCaptionDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    val max = 2200
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NexusSurface, RoundedCornerShape(22.dp))
+                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
+                .padding(20.dp),
+        ) {
+            Text("Edit keterangan", color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(14.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 96.dp)
+                    .background(NexusSurfaceElevated, RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
+                if (text.isEmpty()) {
+                    Text("Tulis keterangan…", color = NexusTextSecondary, fontSize = 14.sp)
+                }
+                androidx.compose.foundation.text.BasicTextField(
+                    value = text,
+                    onValueChange = { if (it.length <= max) text = it },
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        color = NexusTextPrimary,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                    ),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(NexusAccentSoft),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "${text.length} / $max",
+                color = NexusTextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.End),
+            )
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Batal",
+                    color = NexusTextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onDismiss,
+                        )
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    "Simpan",
+                    color = if (text.trim() == initial.trim()) NexusTextSecondary else NexusAccentSoft,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clickable(
+                            enabled = text.trim() != initial.trim(),
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { onSave(text.trim()) }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+            }
         }
     }
 }

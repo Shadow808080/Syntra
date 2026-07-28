@@ -487,8 +487,28 @@ private fun MainTabs(onSignOut: () -> Unit) {
     // True while a full-screen call is up (not minimized) — used to pause Shorts.
     val callBusy = CallController.isBusy
 
+    /**
+     * Moves to [target] without dragging every tab in between across the screen.
+     *
+     * `animateScrollToPage` scrolls through the real distance, so tapping Rooms from
+     * Calls composed AND drew Music and Shorts on the way past — two video/audio
+     * screens spun up for a few frames each, purely as scenery. That is the lag when
+     * jumping between far-apart tabs.
+     *
+     * Landing next door instantly and animating only the final page keeps the sense
+     * of movement while touching exactly one neighbour.
+     */
+    suspend fun jumpTo(target: Int) {
+        val current = pager.currentPage
+        if (target == current || target !in tabOrder.indices) return
+        if (kotlin.math.abs(target - current) > 1) {
+            pager.scrollToPage(if (target > current) target - 1 else target + 1)
+        }
+        pager.animateScrollToPage(target)
+    }
+
     fun goTo(tab: NexusTab) {
-        scope.launch { pager.animateScrollToPage(tabOrder.indexOf(tab)) }
+        scope.launch { jumpTo(tabOrder.indexOf(tab)) }
     }
 
     // Android back button: instead of quitting from any tab, retrace the tabs you
@@ -518,7 +538,7 @@ private fun MainTabs(onSignOut: () -> Unit) {
     androidx.activity.compose.BackHandler(enabled = pager.currentPage != chatIndex) {
         val target = if (tabHistory.isNotEmpty()) tabHistory.removeAt(tabHistory.lastIndex) else chatIndex
         poppingBack = true
-        scope.launch { pager.animateScrollToPage(target) }
+        scope.launch { jumpTo(target) }
     }
 
     // A tapped message notification asks to open a specific chat: jump to the CHAT

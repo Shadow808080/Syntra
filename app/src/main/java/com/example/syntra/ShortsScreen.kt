@@ -69,7 +69,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -2851,10 +2853,16 @@ private fun ReelCommentsSheet(
     val myId = SyntraClient.myUserId
     val iOwnReel = reel.authorId.isNotBlank() && reel.authorId == myId
     var pendingDelete by remember { mutableStateOf<NetReelComment?>(null) }
+    // Long-press menu on my own comment (edit / delete).
+    var actionsFor by remember { mutableStateOf<NetReelComment?>(null) }
+    // The comment being edited (null = writing a new one). Reuses the same composer
+    // rather than a second text box — one input, two modes, like the reply flow.
+    var editing by remember { mutableStateOf<NetReelComment?>(null) }
     // The comment being replied to (null = a normal top-level comment).
     var replyingTo by remember { mutableStateOf<NetReelComment?>(null) }
     val focusRequester = remember { FocusRequester() }
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     // A GIF chosen to ride along with the next comment (null = text-only comment).
     // Two sources, so both are held: a content:// uri when it came from the phone's
     // gallery, an https url when it came from GIPHY. Only ever one at a time.
@@ -2929,7 +2937,34 @@ private fun ReelCommentsSheet(
         }
     }
 
+    /** Saves an edit in place: the row updates at once and rolls back if refused. */
+    fun saveEdit() {
+        val target = editing ?: return
+        val body = input.trim()
+        if (body.isEmpty() && target.mediaUrl == null) return
+        editing = null
+        input = ""
+        focusManager.clearFocus(force = true)
+        keyboard?.hide()
+
+        val before = target.body
+        val i = comments.indexOfFirst { it.id == target.id }
+        // Stamp editedAt locally so the "diedit" marker appears immediately; the
+        // refresh below replaces it with the server's own timestamp.
+        if (i >= 0) comments[i] = comments[i].copy(body = body, editedAt = "now")
+        scope.launch {
+            runCatching { SyntraClient.updateReelComment(reel.id, target.id, body) }
+                .onSuccess { refresh() }
+                .onFailure { e ->
+                    val j = comments.indexOfFirst { it.id == target.id }
+                    if (j >= 0) comments[j] = comments[j].copy(body = before, editedAt = target.editedAt)
+                    Toast.makeText(context, "Gagal menyimpan: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+        }
+    }
+
     fun send() {
+        if (editing != null) { saveEdit(); return }
         if (sending) return
         val body = input.trim()
         val gifUri = pendingGifUri
@@ -2972,8 +3007,13 @@ private fun ReelCommentsSheet(
                 pending = true,
             ),
         )
-        // Put the keyboard away once the comment is on its way, so the list it was
-        // covering is visible again the moment the comment appears in it.
+        // Put the keyboard away once the comment is on its way.
+        //
+        // BOTH calls are needed. Hiding the IME alone does not stick: the text field
+        // still holds focus, and a focused editor is exactly what makes Android bring
+        // the keyboard straight back up. Focus has to be dropped first, and `force`
+        // is required because this sheet is its own focus owner.
+        focusManager.clearFocus(force = true)
         keyboard?.hide()
 
         scope.launch {
@@ -3084,7 +3124,7 @@ private fun ReelCommentsSheet(
                                 isReply = isReply,
                                 canDelete = iOwnReel || (c.authorId.isNotBlank() && c.authorId == myId),
                                 isMine = c.authorId.isNotBlank() && c.authorId == myId,
-                                onLongPress = { pendingDelete = c },
+                                onLongPress = { actionsFor = c },
                                 onReply = { replyingTo = c; focusRequester.requestFocus() },
                                 onToggleLike = { toggleCommentLike(c) },
                                 onOpenUser = onOpenUser,
@@ -3094,6 +3134,40 @@ private fun ReelCommentsSheet(
                 }
             }
             Spacer(Modifier.height(8.dp))
+            // "Editing" banner, with its own way out. Without it the composer would
+            // look identical to writing a new comment while actually about to
+            // overwrite an old one.
+            if (editing != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(NexusAccentSoft.copy(alpha = 0.12f))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Edit, null, tint = NexusAccentSoft, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Mengedit komentar",
+                        color = NexusAccentSoft,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Icon(
+                        Icons.Filled.Close, "Batal edit",
+                        tint = NexusTextSecondary,
+                        modifier = Modifier
+                            .size(17.dp)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { editing = null; input = "" },
+                    )
+                }
+            }
             // "Replying to …" banner — a quoted preview of the exact comment being
             // answered (accent bar + @name + a snippet of its text), so it's clear
             // which message you're replying to, even a specific reply inside a thread.
@@ -3223,7 +3297,11 @@ private fun ReelCommentsSheet(
                 ) {
                     if (input.isEmpty()) {
                         Text(
-                            if (replyingTo != null) "Tulis balasan…" else "Tambahkan komentar…",
+                            when {
+                                editing != null -> "Ubah komentar…"
+                                replyingTo != null -> "Tulis balasan…"
+                                else -> "Tambahkan komentar…"
+                            },
                             color = NexusTextSecondary, fontSize = 14.sp,
                         )
                     }
@@ -3236,8 +3314,9 @@ private fun ReelCommentsSheet(
                         modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
                     )
                 }
-                // Sendable as soon as there's text OR an attached GIF.
-                if (input.isNotBlank() || hasGif) {
+                // Sendable as soon as there's text OR an attached GIF. While editing,
+                // a comment that already has a GIF may legitimately be emptied of text.
+                if (input.isNotBlank() || hasGif || (editing != null && editing?.mediaUrl != null)) {
                     Spacer(Modifier.width(10.dp))
                     Box(
                         modifier = Modifier
@@ -3250,11 +3329,42 @@ private fun ReelCommentsSheet(
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            Icons.AutoMirrored.Filled.Send, "Kirim",
+                            if (editing != null) Icons.Filled.Check else Icons.AutoMirrored.Filled.Send,
+                            if (editing != null) "Simpan" else "Kirim",
                             tint = Color.White, modifier = Modifier.size(18.dp),
                         )
                     }
                 }
+            }
+        }
+    }
+
+    // Long-press actions. Edit is offered only to the AUTHOR: the reel owner may
+    // delete a comment on their post (moderation) but must never be able to rewrite
+    // someone else's words.
+    actionsFor?.let { c ->
+        val mine = c.authorId.isNotBlank() && c.authorId == myId
+        androidx.compose.ui.window.Dialog(onDismissRequest = { actionsFor = null }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(NexusSurfaceElevated, RoundedCornerShape(20.dp))
+                    .padding(vertical = 10.dp),
+            ) {
+                if (mine) {
+                    CommentActionRow(Icons.Filled.Edit, "Edit komentar", NexusTextPrimary) {
+                        actionsFor = null
+                        editing = c
+                        replyingTo = null
+                        input = c.body
+                        runCatching { focusRequester.requestFocus() }
+                    }
+                }
+                CommentActionRow(Icons.Filled.Delete, "Hapus komentar", Color(0xFFFF5D5D)) {
+                    actionsFor = null
+                    pendingDelete = c
+                }
+                CommentActionRow(Icons.Filled.Close, "Batal", NexusTextSecondary) { actionsFor = null }
             }
         }
     }
@@ -3542,18 +3652,31 @@ private fun CommentRow(
                     }
                 }
             } else {
-                Text(
-                    "Balas",
-                    color = NexusTextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .clickable(
-                            indication = null,
-                            interactionSource = remember { MutableInteractionSource() },
-                            onClick = onReply,
-                        ),
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Balas",
+                        color = NexusTextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                                onClick = onReply,
+                            ),
+                    )
+                    // A comment that can change silently after it has been replied to
+                    // is a way to rewrite what a conversation meant. The marker is what
+                    // makes an edit a correction rather than a quiet revision.
+                    if (c.editedAt != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "diedit",
+                            color = NexusTextSecondary.copy(alpha = 0.7f),
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
             }
         }
         // Trailing heart, like TikTok/Instagram: tap to like, the count sits under it.
@@ -3590,6 +3713,30 @@ private fun CommentRow(
 }
 
 /** Round avatar with a colour-from-name fallback when there's no photo. */
+@Composable
+private fun CommentActionRow(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    onClick: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 22.dp, vertical = 14.dp),
+    ) {
+        Icon(icon, null, tint = tint, modifier = Modifier.size(19.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(label, color = tint, fontSize = 15.sp)
+    }
+}
+
 @Composable
 private fun CommentAvatar(url: String?, name: String, size: androidx.compose.ui.unit.Dp) {
     Box(

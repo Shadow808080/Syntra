@@ -223,7 +223,11 @@ fun NexusBottomBar(
     onSelect: (NexusTab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier = modifier.fillMaxWidth().background(NexusSurface)) {
+    // The bar sits on the page background, not on a raised surface. NexusSurface is a
+    // step lighter than the page, so the bar drew as a distinct slab with a visible
+    // seam along its top edge on every screen — most obvious on themes where the two
+    // are far apart. Using the background itself makes it read as part of the page.
+    Column(modifier = modifier.fillMaxWidth().background(NexusBackground)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()

@@ -702,6 +702,26 @@ object SyntraClient {
     /** Deletes my own reel (soft delete). Owner only — others get 403. */
     suspend fun deleteReel(reelId: String) = delete("/api/v1/reels/$reelId")
 
+    /**
+     * Edits my own short. Owner only — others get 403.
+     *
+     * Only non-null arguments are sent, and the backend treats an absent field as
+     * "leave this alone". Sending the whole object every time would mean editing a
+     * private reel's caption quietly republishes it, so don't add defaults here.
+     */
+    suspend fun updateReel(
+        reelId: String,
+        caption: String? = null,
+        visibility: String? = null,
+        commentsEnabled: Boolean? = null,
+    ) {
+        val payload = JSONObject()
+        if (caption != null) payload.put("caption", caption)
+        if (visibility != null) payload.put("visibility", visibility)
+        if (commentsEnabled != null) payload.put("comments_enabled", commentsEnabled)
+        patchData("/api/v1/reels/$reelId", payload)
+    }
+
     suspend fun getReels(): List<NetReel> =
         (getData("/api/v1/reels") as JSONArray).mapObjects { it.toReel() }
 
@@ -776,8 +796,14 @@ object SyntraClient {
                 likedByMe = it.optBoolean("liked", false),
                 mediaUrl = it.optString("media_url", "").ifBlank { null },
                 mediaKind = it.optString("media_kind", ""),
+                editedAt = it.optString("edited_at", "").ifBlank { null },
             )
         }
+
+    /** Edits my own comment. Author only — the backend enforces it. */
+    suspend fun updateReelComment(reelId: String, commentId: String, body: String) {
+        patchData("/api/v1/reels/$reelId/comments/$commentId", JSONObject().put("body", body))
+    }
 
     /** Menyukai / batal menyukai sebuah komentar reel. */
     suspend fun likeReelComment(reelId: String, commentId: String, like: Boolean) {

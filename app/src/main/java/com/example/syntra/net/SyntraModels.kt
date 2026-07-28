@@ -231,6 +231,9 @@ data class NetReelComment(
      *  sebelum server menjawab. */
     val mediaUrl: String? = null,
     val mediaKind: String = "",
+    /** Terisi kalau komentar ini pernah diubah setelah dikirim — app menandainya
+     *  "diedit" di bawah badan komentar. */
+    val editedAt: String? = null,
     /** True selama komentar ini baru ada di layar dan BELUM dikonfirmasi server.
      *  Baris seperti ini digambar redup dengan progres sekali-jalan, lalu tergantikan
      *  oleh salinan asli dari server begitu terkirim. */

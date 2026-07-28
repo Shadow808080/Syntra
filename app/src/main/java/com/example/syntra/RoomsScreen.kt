@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Search
@@ -345,6 +346,26 @@ fun RoomsScreen(
                     // narrowed by a query nobody can see any more.
                     if (!searchOpen) searchQuery = ""
                 },
+                onCreate = {
+                    if (!ApiConfig.ENABLED) {
+                        Toast.makeText(context, "Backend belum dikonfigurasi.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        // Never create a room as a side effect of a tap — that is how
+                        // empty "Room baru" ghosts end up on everyone's list.
+                        showCreate = true
+                    }
+                },
+                onShuffle = {
+                    // Pick from what's actually joinable and on screen, not from the
+                    // raw list: offering a room the filter has hidden, or one the SFU
+                    // can't take you into, is a dead end dressed as a feature.
+                    val pick = visibleRooms.randomOrNull()
+                    when {
+                        !sfuReady -> Toast.makeText(context, "Media server belum siap.", Toast.LENGTH_SHORT).show()
+                        pick == null -> Toast.makeText(context, "Belum ada room untuk dimasuki.", Toast.LENGTH_SHORT).show()
+                        else -> openedRoom = pick
+                    }
+                },
             )
             PullToRefreshBox(
                 isRefreshing = loading,
@@ -370,7 +391,7 @@ fun RoomsScreen(
                             when {
                                 searchQuery.isNotBlank() -> "Tidak ada room yang cocok dengan \"$searchQuery\"."
                                 selectedFilter != 0 -> "Belum ada room di kategori ${filters[selectedFilter]}."
-                                else -> "Belum ada room yang aktif.\nBuat satu lewat tombol + di bawah."
+                                else -> "Belum ada room yang aktif.\nBuat satu lewat tombol mikrofon di atas."
                             },
                         )
                     }
@@ -398,39 +419,6 @@ fun RoomsScreen(
                 }
             }
             }
-        }
-
-        // Floating "create room" button — round, with a mic icon (its function:
-        // start a voice room), distinct from the home story button.
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 20.dp, bottom = 24.dp)
-                .size(56.dp)
-                .background(
-                    brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
-                    shape = CircleShape,
-                )
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                ) {
-                    if (!ApiConfig.ENABLED) {
-                        Toast.makeText(context, "Backend belum dikonfigurasi.", Toast.LENGTH_SHORT).show()
-                    } else {
-                        // Never create a room as a side effect of a tap — that is how
-                        // empty "Room baru" ghosts end up on everyone's list.
-                        showCreate = true
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Mic,
-                contentDescription = "Buat voice room",
-                tint = Color.White,
-                modifier = Modifier.size(26.dp),
-            )
         }
 
         if (showCreate) {
@@ -608,45 +596,34 @@ private fun RoomsHeader(
     query: String,
     onQueryChange: (String) -> Unit,
     onToggleSearch: () -> Unit,
+    onCreate: () -> Unit,
+    onShuffle: () -> Unit,
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(start = 20.dp, end = 16.dp, top = 18.dp, bottom = 6.dp),
+            .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 6.dp),
     ) {
+        // All actions, no prose.
+        //
+        // The header used to spend its whole width on the word "Rooms" plus a line
+        // restating the count that the list underneath already shows. Meanwhile the
+        // one thing people come here to DO — start a room — was a floating button in
+        // the bottom corner, sitting on top of the last card in the list.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "Rooms",
-                    color = NexusTextPrimary,
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    maxLines = 1,
-                )
-                Spacer(Modifier.height(2.dp))
-                // The subtitle now carries a FACT that changes, not a slogan.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (liveCount > 0) {
-                        LivePulseDot()
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    Text(
-                        text = if (liveCount > 0) {
-                            "$liveCount room sedang berlangsung"
-                        } else {
-                            "Belum ada room aktif"
-                        },
-                        color = NexusTextSecondary,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            // Search only. The bell that used to sit here duplicated a switch that
-            // already lives in Settings → Notifikasi, and a header action that just
-            // opens a settings toggle earns its space nowhere.
+            CreateRoomButton(onClick = onCreate)
+            Spacer(Modifier.weight(1f))
+            // Drop into a random live room — the reason a hub like this exists is to
+            // find rooms you weren't looking for. Disabled when there is nothing live,
+            // rather than being offered and then doing nothing.
+            HeaderIcon(
+                icon = Icons.Filled.Shuffle,
+                description = "Gabung room acak",
+                enabled = liveCount > 0,
+                onClick = onShuffle,
+            )
+            Spacer(Modifier.width(2.dp))
             HeaderIcon(
                 icon = if (searchOpen) Icons.Filled.Close else Icons.Filled.Search,
                 description = if (searchOpen) "Tutup pencarian" else "Cari room",
@@ -709,12 +686,61 @@ private fun RoomsHeader(
     }
 }
 
+/**
+ * The primary action, promoted out of the bottom corner into the header.
+ *
+ * A mic says "voice room"; the small `+` welded to its corner says "make one" — the
+ * bare mic on the old floating button read just as easily as "mute" or "talk".
+ */
+@Composable
+private fun CreateRoomButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(42.dp)
+            .background(
+                brush = Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent)),
+                shape = CircleShape,
+            )
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Mic,
+            contentDescription = "Buat voice room",
+            tint = Color.White,
+            modifier = Modifier.size(22.dp),
+        )
+        // The badge carries a ring in the button's own gradient colour so the plus
+        // reads as attached to the mic instead of floating over it.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .offset(x = 1.dp, y = 1.dp)
+                .size(16.dp)
+                .background(Color.White, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Add,
+                contentDescription = null,
+                tint = NexusAccent,
+                modifier = Modifier.size(12.dp),
+            )
+        }
+    }
+}
+
 /** A tappable header action with a proper hit target and a pressed state. */
 @Composable
 private fun HeaderIcon(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     description: String,
     active: Boolean = false,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     Box(
@@ -723,6 +749,7 @@ private fun HeaderIcon(
             .clip(CircleShape)
             .background(if (active) NexusAccent.copy(alpha = 0.18f) else Color.Transparent)
             .clickable(
+                enabled = enabled,
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onClick,
@@ -732,7 +759,11 @@ private fun HeaderIcon(
         Icon(
             icon,
             description,
-            tint = if (active) NexusAccentSoft else NexusTextPrimary,
+            tint = when {
+                !enabled -> NexusTextSecondary.copy(alpha = 0.35f)
+                active -> NexusAccentSoft
+                else -> NexusTextPrimary
+            },
             modifier = Modifier.size(21.dp),
         )
     }

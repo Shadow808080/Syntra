@@ -267,17 +267,6 @@ fun SettingsScreen(onClose: () -> Unit, onSignedOut: () -> Unit) {
                 )
             }
 
-            item {
-                Text(
-                    text = "Pengaturan di atas tersimpan di perangkat ini. Server belum " +
-                        "menyediakan sinkronisasi profil, jadi perubahan tidak ikut " +
-                        "berpindah ke perangkat lain.",
-                    color = NexusTextSecondary.copy(alpha = 0.8f),
-                    fontSize = 11.sp,
-                    lineHeight = 16.sp,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-            }
         }
     }
 

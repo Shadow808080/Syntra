@@ -1839,7 +1839,21 @@ private fun ActiveRow(
         // avatars (drawn first, so it never covers the story UI — only peeks through
         // the gaps between profiles).
         Box(modifier = Modifier.fillMaxWidth()) {
-            StoryAuroraBackground(modifier = Modifier.matchParentSize())
+            // The cloth is drawn TALLER than the rail and offset upward, so it runs up
+            // behind the "Cerita" header and the app bar above it instead of starting
+            // abruptly at the top of the avatars. Clipping it to the rail's own height
+            // cut the drape off at exactly the point it should be flowing past.
+            StoryAuroraBackground(
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer {
+                        // Grown and lifted rather than re-laid-out: the canvas keeps the
+                        // rail's own bounds (so nothing below shifts) while the drape it
+                        // paints extends well past the top of that box.
+                        scaleY = 2.6f
+                        translationY = -size.height * 0.55f
+                    },
+            )
             LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1851,9 +1865,11 @@ private fun ActiveRow(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     StoryAvatar(
                         photo = person.photo,
-                        // Photo matches the chat-row avatar (54dp): the ring adds a 10dp
-                        // inset, so 64dp total leaves a 54dp face like a conversation row.
-                        size = 64.dp,
+                        // The ring inset is a fixed 10dp, so the face is size − 10.
+                        // At 64dp that left a 54dp photo — the same as a chat row, which
+                        // made the rail read as a second list rather than the feature at
+                        // the top of the screen. 78dp gives a 68dp face with real presence.
+                        size = 78.dp,
                         posts = person.posts,
                         // Per-segment: watched stories dim, unwatched stay lit. Watching
                         // updates each item's `viewed`, so this reflects progress live.
@@ -1862,14 +1878,14 @@ private fun ActiveRow(
                     )
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        text = if (person.isMine) "Kamu" else person.name,
+                        text = if (person.isMine) "Anda" else person.name,
                         color = if (person.isMine) NexusTextPrimary else NexusTextSecondary,
                         fontSize = 12.sp,
                         fontWeight = if (person.isMine) FontWeight.SemiBold else FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.width(64.dp),
+                        modifier = Modifier.width(78.dp),
                     )
                 }
             }
