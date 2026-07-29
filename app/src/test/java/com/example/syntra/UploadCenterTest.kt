@@ -78,14 +78,19 @@ class UploadCenterTest {
     @Test
     fun `a second start while busy is ignored, not queued`() = runTest(dispatcher) {
         val gate = CompletableDeferred<Unit>()
+        // A flag, not a thrown sentinel: startReel catches Throwable, so `error(…)`
+        // in the second block would be swallowed into `reel.failed` and the test
+        // would still pass against an implementation that queued instead of dropping.
+        var secondRan = false
         UploadCenter.startReel("pertama", 1L) { gate.await() }
-        UploadCenter.startReel("kedua", 1L) { error("must not run") }
+        UploadCenter.startReel("kedua", 1L) { secondRan = true }
 
-        // The first upload keeps the slot; the second is dropped rather than
-        // clobbering the card or racing it.
         assertEquals("pertama", UploadCenter.reel?.label)
         gate.complete(Unit)
         advanceUntilIdle()
+
+        // The only assertion that can tell "dropped" from "queued".
+        assertFalse(secondRan)
     }
 
     @Test
@@ -116,6 +121,39 @@ class UploadCenterTest {
         UploadCenter.clearReel()
         assertNull(UploadCenter.reel)
         assertFalse(UploadCenter.reelBusy)
+    }
+
+    @Test
+    fun `a new upload can start once a failure is dismissed`() = runTest(dispatcher) {
+        // The reason any of this matters. `startReel` returns early while busy, so a
+        // failure left on screen used to occupy the slot for the life of the process
+        // and every later upload was dropped in silence.
+        UploadCenter.startReel("gagal", 1L) { throw IllegalStateException("boom") }
+        advanceUntilIdle()
+        assertTrue(UploadCenter.reelBusy)
+
+        UploadCenter.clearReel()
+
+        var secondRan = false
+        UploadCenter.startReel("berikutnya", 1L) { secondRan = true }
+        advanceUntilIdle()
+        assertTrue(secondRan)
+    }
+
+    @Test
+    fun `dismissing mid-flight does not stamp a failure on the next upload`() = runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        UploadCenter.startReel("pertama", 1L) { gate.await() }
+        // clearReel cancels the running job. The cancelled coroutine must not then
+        // write its CancellationException into whatever card exists by the time it
+        // unwinds — which is the SECOND upload's.
+        UploadCenter.clearReel()
+
+        UploadCenter.startReel("kedua", 1L) { }
+        advanceUntilIdle()
+
+        assertNull(UploadCenter.reel)
+        gate.complete(Unit)
     }
 
     @Test

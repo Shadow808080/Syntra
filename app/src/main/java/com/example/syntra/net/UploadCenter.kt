@@ -3,6 +3,7 @@ package com.example.syntra.net
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,7 +50,21 @@ object UploadCenter {
     var music by mutableStateOf<Progress?>(null)
         private set
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val supervisor = SupervisorJob()
+
+    /**
+     * A scope resolved at LAUNCH time, not once when this object is created.
+     *
+     * `Dispatchers.Main.immediate` snapshots whatever delegate is installed when it is
+     * evaluated. Holding it in a `val` meant the very first thing to touch this object
+     * fixed the dispatcher forever — which under a unit-test JVM (one fork for the
+     * whole source set) is whichever test class happened to load first, so a later
+     * `Dispatchers.setMain` was silently ignored and every upload assertion failed with
+     * "Module with the Main dispatcher had failed to initialize", pointing nowhere near
+     * the cause. They all share [supervisor], so cancellation still works as one unit.
+     */
+    private fun scope() = CoroutineScope(supervisor + Dispatchers.Main.immediate)
+
     private var reelJob: Job? = null
     private var musicJob: Job? = null
 
@@ -79,14 +94,17 @@ object UploadCenter {
     fun startReel(label: String, etaMs: Long, block: suspend () -> Unit) {
         if (reelBusy) return
         reel = Progress(label = label, etaMs = etaMs)
-        reelJob = scope.launch {
+        reelJob = scope().launch {
             try {
                 block()
                 reelCompleted++
                 reel = null
+            } catch (c: CancellationException) {
+                // Cancellation is [clearReel] dismissing this card, and it has already
+                // nulled `reel`. Writing a failure here would stamp it onto whatever
+                // upload started in the meantime.
+                throw c
             } catch (t: Throwable) {
-                // A cancellation here means the PROCESS is going away, not a screen —
-                // screens no longer own this job.
                 reel = reel?.copy(failed = t.message ?: "Gagal mengunggah")
             }
         }
@@ -96,10 +114,12 @@ object UploadCenter {
     fun startMusic(label: String, etaMs: Long, block: suspend () -> Unit) {
         if (musicBusy) return
         music = Progress(label = label, etaMs = etaMs)
-        musicJob = scope.launch {
+        musicJob = scope().launch {
             try {
                 block()
                 music = null
+            } catch (c: CancellationException) {
+                throw c
             } catch (t: Throwable) {
                 music = music?.copy(failed = t.message ?: "Gagal mengunggah")
             }

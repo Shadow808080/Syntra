@@ -692,15 +692,22 @@ fun ShortsScreen(
 
         // Fixed upload card at the very top. Stays while the reel uploads, then
         // fills the bar and disappears. Only ever visible on this (Shorts) screen.
-        LaunchedEffect(posting) {
-            if (!posting && uploadCardVisible) { delay(900); uploadCardVisible = false }
+        val uploadFailed = activeUpload?.failed
+        LaunchedEffect(posting, uploadFailed) {
+            // A failed card must NOT auto-hide — it is the only place the reason is
+            // shown, and dismissing it is what frees the upload slot.
+            if (!posting && uploadFailed == null && uploadCardVisible) {
+                delay(900); uploadCardVisible = false
+            }
         }
         if (uploadCardVisible && !fullscreen) {
             UploadReelCard(
                 thumb = uploadThumb,
                 startMs = uploadStartMs,
                 etaMs = uploadEtaMs,
-                uploading = posting,
+                uploading = posting && uploadFailed == null,
+                failed = uploadFailed,
+                onDismiss = { UploadCenter.clearReel(); uploadCardVisible = false },
                 modifier = Modifier.align(Alignment.TopCenter),
             )
         }
@@ -2234,26 +2241,43 @@ internal fun mentionedText(
     mentionColour: Color,
     onOpenUser: (String) -> Unit,
 ) = buildAnnotatedString {
-    val tokens = text.split(" ")
-    tokens.forEachIndexed { i, token ->
-        val handle = token.removePrefix("@").trimEnd('.', ',', '!', '?', ':', ';', ')', '"', '\'')
-        when {
-            token.startsWith("@") && handle.isNotEmpty() -> withLink(
+    // Scanned with a regex over the WHOLE string rather than split on " ".
+    //
+    // Splitting on a literal space was wrong twice over. Comment bodies come from the
+    // server and are not guaranteed single-line, so "@reza\nkeren" produced the handle
+    // "reza\nkeren" — a link to an account that cannot exist, with the rest of the line
+    // swallowed into it — while "keren\n@reza" was not detected as a mention at all.
+    // And rejoining the tokens with " " quietly collapsed any run of repeated spaces
+    // in someone's comment.
+    //
+    // The character class is also what makes trailing punctuation fall away on its own:
+    // "@reza," stops at the comma because a comma cannot be part of a handle. Only "."
+    // needs trimming afterwards, since it is legal inside a username but not at the end
+    // of a sentence.
+    val token = Regex("[@#][A-Za-z0-9_.]+")
+    var cursor = 0
+    for (m in token.findAll(text)) {
+        if (m.range.first > cursor) append(text.substring(cursor, m.range.first))
+        cursor = m.range.last + 1
+
+        val word = m.value
+        val handle = word.substring(1).trimEnd('.')
+        if (word[0] == '@' && handle.isNotEmpty()) {
+            withLink(
                 LinkAnnotation.Clickable(
                     tag = "mention:$handle",
                     styles = TextLinkStyles(
                         style = SpanStyle(color = mentionColour, fontWeight = FontWeight.SemiBold),
                     ),
                 ) { onOpenUser(handle) },
-            ) { append(token) }
-
-            token.startsWith("#") && token.length > 1 ->
-                withStyle(SpanStyle(color = ShortsTeal, fontWeight = FontWeight.SemiBold)) { append(token) }
-
-            else -> append(token)
+            ) { append(word) }
+        } else if (word[0] == '#' && handle.isNotEmpty()) {
+            withStyle(SpanStyle(color = ShortsTeal, fontWeight = FontWeight.SemiBold)) { append(word) }
+        } else {
+            append(word)
         }
-        if (i < tokens.lastIndex) append(" ")
     }
+    if (cursor < text.length) append(text.substring(cursor))
 }
 
 @Composable
@@ -2647,6 +2671,9 @@ private fun UploadReelCard(
     startMs: Long,
     etaMs: Long,
     uploading: Boolean,
+    /** Non-null when the upload failed — shows the reason and a way to dismiss it. */
+    failed: String? = null,
+    onDismiss: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -2718,21 +2745,54 @@ private fun UploadReelCard(
             }
         }
         Spacer(Modifier.height(if (expanded) 12.dp else 9.dp))
-        // ETA-shaped progress bar.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .clip(RoundedCornerShape(50))
-                .background(Color.White.copy(alpha = 0.10f)),
-        ) {
+        if (failed != null) {
+            // A failed upload has to be BOTH visible and dismissible.
+            //
+            // `failed` was written by UploadCenter and read by nothing, and clearReel()
+            // had no callers at all — so a reel that failed on a flaky network left the
+            // slot occupied forever. `startReel` returns early while busy, which meant
+            // every later upload was silently dropped while this card sat at ~100%
+            // claiming to still be working.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    failed,
+                    color = Color(0xFFFF6B6B),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "Tutup",
+                    color = NexusAccentSoft,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onDismiss,
+                    ),
+                )
+            }
+        } else {
+            // ETA-shaped progress bar.
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(frac)
-                    .fillMaxHeight()
+                    .fillMaxWidth()
+                    .height(4.dp)
                     .clip(RoundedCornerShape(50))
-                    .background(Brush.horizontalGradient(listOf(ShortsTeal, NexusAccentSoft))),
-            )
+                    .background(Color.White.copy(alpha = 0.10f)),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(frac)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(50))
+                        .background(Brush.horizontalGradient(listOf(ShortsTeal, NexusAccentSoft))),
+                )
+            }
         }
     }
 }

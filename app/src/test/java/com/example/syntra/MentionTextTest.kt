@@ -61,6 +61,41 @@ class MentionTextTest {
     }
 
     @Test
+    fun `a handle never contains an at sign`() {
+        // "@@budi" once yielded the handle "@budi" — a link to an account that cannot
+        // exist, because only ONE leading @ was stripped and @ was not treated as a
+        // terminator either.
+        assertEquals(listOf("budi"), handlesIn("@@budi"))
+        assertTrue(handlesIn("@@").isEmpty())
+    }
+
+    @Test
+    fun `a newline ends a handle instead of being swallowed into it`() {
+        // Comment bodies come from the server and are not guaranteed single-line.
+        // Splitting on a literal " " made "@reza\nkeren" one token, so the link
+        // carried the handle "reza\nkeren" and ate the rest of the line.
+        assertEquals(listOf("reza"), handlesIn("@reza\nkeren"))
+        assertEquals(listOf("reza"), handlesIn("halo\t@reza"))
+    }
+
+    @Test
+    fun `a mention after a newline is still found`() {
+        // The mirror image: the token did not start with "@", so it was not a mention
+        // at all and simply rendered as grey text.
+        assertEquals(listOf("reza"), handlesIn("keren\n@reza"))
+        assertEquals(listOf("budi", "rani"), handlesIn("@budi\n@rani"))
+    }
+
+    @Test
+    fun `the visible text is preserved byte for byte`() {
+        // Rejoining split tokens with " " quietly collapsed repeated spaces and turned
+        // newlines into spaces, silently rewriting what someone actually typed.
+        for (input in listOf("a  b", "@reza\nkeren", "halo\t@budi", "  spasi awal", "")) {
+            assertEquals(input, mentionedText(input, Color.Blue) {}.text)
+        }
+    }
+
+    @Test
     fun `hashtags are styled but never linked`() {
         assertTrue(handlesIn("#syntra keren").isEmpty())
     }
