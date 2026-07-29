@@ -25,11 +25,26 @@ import java.util.UUID
  */
 object StickerStore {
 
-    /** One saved sticker. [path] is an absolute file path; [animated] marks a GIF. */
-    data class Sticker(val id: String, val path: String, val animated: Boolean)
+    /**
+     * One saved sticker. [path] is an absolute file path; [animated] marks a GIF.
+     *
+     * [source] identifies WHERE it came from — a chat media URL, or the emoji itself
+     * for a big-emoji sticker. Without it the app could add the same sticker twice and
+     * could never tell a menu whether to offer "add" or "remove", because the saved
+     * copy has a fresh UUID with nothing linking it back to the message.
+     */
+    data class Sticker(
+        val id: String,
+        val path: String,
+        val animated: Boolean,
+        val source: String = "",
+    )
 
     private const val PREFS = "syntra_stickers"
     private const val KEY_ORDER = "order" // newline-separated "id.ext" filenames, newest first
+    // Filename -> source, as JSON. A separate key so the old KEY_ORDER format keeps
+    // loading unchanged for anyone who already has stickers saved.
+    private const val KEY_SOURCES = "sources"
     private const val MAX_DIM = 512       // WhatsApp-sized: stills are capped to this
 
     private var cache: SnapshotStateList<Sticker>? = null
@@ -43,20 +58,53 @@ object StickerStore {
     /** The live, newest-first list the picker renders. Loaded once, then observed. */
     fun stickers(context: Context): SnapshotStateList<Sticker> {
         cache?.let { return it }
+        val sources = runCatching {
+            org.json.JSONObject(prefs(context).getString(KEY_SOURCES, "{}").orEmpty())
+        }.getOrDefault(org.json.JSONObject())
         val list = mutableStateListOf<Sticker>()
         prefs(context).getString(KEY_ORDER, "").orEmpty()
             .split("\n").filter { it.isNotBlank() }
             .forEach { name ->
                 val f = File(dir(context), name)
-                if (f.exists()) list.add(Sticker(name.substringBeforeLast('.'), f.absolutePath, name.endsWith(".gif")))
+                if (f.exists()) {
+                    list.add(
+                        Sticker(
+                            id = name.substringBeforeLast('.'),
+                            path = f.absolutePath,
+                            animated = name.endsWith(".gif"),
+                            source = sources.optString(name, ""),
+                        ),
+                    )
+                }
             }
         cache = list
         return list
     }
 
+    /** The saved copy of [source], if it has already been favourited. */
+    fun findBySource(context: Context, source: String): Sticker? {
+        if (source.isBlank()) return null
+        val key = sourceKey(source)
+        return stickers(context).firstOrNull { it.source.isNotBlank() && it.source == key }
+    }
+
+    fun isSaved(context: Context, source: String): Boolean = findBySource(context, source) != null
+
+    /**
+     * Normalises a source so the same sticker is recognised across sends.
+     *
+     * Media URLs carry signed query strings that change every time they are handed
+     * out, so comparing whole URLs would treat one sticker as a different one on each
+     * refresh and let it be saved over and over.
+     */
+    private fun sourceKey(source: String): String = source.substringBefore('?')
+
     private fun persist(context: Context, list: List<Sticker>) {
+        val sources = org.json.JSONObject()
+        list.forEach { s -> if (s.source.isNotBlank()) sources.put(File(s.path).name, s.source) }
         prefs(context).edit()
             .putString(KEY_ORDER, list.joinToString("\n") { File(it.path).name })
+            .putString(KEY_SOURCES, sources.toString())
             .apply()
     }
 
@@ -83,9 +131,11 @@ object StickerStore {
      * reported mime: trusting the mime meant a real GIF got decoded to a single PNG
      * frame and sent as a still — the "sticker won't move" bug.
      */
-    suspend fun addFromBytes(context: Context, bytes: ByteArray?): Sticker? {
+    suspend fun addFromBytes(context: Context, bytes: ByteArray?, source: String = ""): Sticker? {
         if (bytes == null || bytes.isEmpty()) return null
         val list = stickers(context)
+        // Already favourited: hand back the existing one instead of making a duplicate.
+        findBySource(context, source)?.let { return it }
         val sticker = withContext(Dispatchers.IO) {
             val animated = looksLikeGif(bytes)
             val id = UUID.randomUUID().toString()
@@ -105,12 +155,17 @@ object StickerStore {
                 file.delete()
                 null
             } else {
-                Sticker(id, file.absolutePath, animated)
+                Sticker(id, file.absolutePath, animated, sourceKey(source))
             }
         } ?: return null
         list.add(0, sticker)
         persist(context, list)
         return sticker
+    }
+
+    /** Un-favourites whatever was saved from [source]. No-op if it wasn't. */
+    fun removeBySource(context: Context, source: String) {
+        findBySource(context, source)?.let { remove(context, it.id) }
     }
 
     /** GIF magic number: the file starts with the ASCII bytes "GIF" (GIF87a/GIF89a). */

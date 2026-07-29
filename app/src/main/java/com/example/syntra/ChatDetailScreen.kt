@@ -44,6 +44,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.heightIn
@@ -80,6 +81,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.AddReaction
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -537,6 +539,8 @@ fun ChatDetailScreen(
     // amount of undo for a wrong tap.
     BackHandler(enabled = selectedIds.isNotEmpty()) { selectedIds.clear() }
     var fullscreenImage by remember(conversation) { mutableStateOf<String?>(null) }
+    // A GIF opened for a closer look — a contained popup, not the full-screen viewer.
+    var gifPopup by remember(conversation) { mutableStateOf<String?>(null) }
     // A chat video opened for full-screen playback (its URL), or null.
     var fullscreenVideo by remember(conversation) { mutableStateOf<String?>(null) }
     // Caption shown with the full-screen photo. For a view-once photo this is the
@@ -1338,6 +1342,9 @@ fun ChatDetailScreen(
                                 u.endsWith(".jpeg") || u.endsWith(".webp")
                         } == true)
                     ),
+                singleIsFavorite = one?.let { m ->
+                    com.example.syntra.net.StickerStore.isSaved(context, m.media ?: m.sticker.orEmpty())
+                } == true,
                 singleIsPinned = one != null && pinnedId == one.id,
                 singleIsTranslated = one != null && translations.containsKey(one.id),
                 allStarred = picked.isNotEmpty() && picked.all { it.id in starredIds },
@@ -1406,20 +1413,29 @@ fun ChatDetailScreen(
                     val m = one
                     selectedIds.clear()
                     if (m != null) {
-                        scope.launch {
-                            val bytes = withContext(Dispatchers.IO) {
-                                when {
-                                    m.sticker != null -> emojiStickerPng(m.sticker!!)
-                                    m.media != null -> chatMediaBytes(context, m.media!!)
-                                    else -> null
+                        val store = com.example.syntra.net.StickerStore
+                        // The source is what identifies a sticker across sends: the
+                        // media URL, or the emoji itself for a big-emoji sticker.
+                        val source = m.media ?: m.sticker.orEmpty()
+                        if (store.isSaved(context, source)) {
+                            store.removeBySource(context, source)
+                            Toast.makeText(context, "Dihapus dari stiker favorit", Toast.LENGTH_SHORT).show()
+                        } else {
+                            scope.launch {
+                                val bytes = withContext(Dispatchers.IO) {
+                                    when {
+                                        m.sticker != null -> emojiStickerPng(m.sticker!!)
+                                        m.media != null -> chatMediaBytes(context, m.media!!)
+                                        else -> null
+                                    }
                                 }
+                                val ok = store.addFromBytes(context, bytes, source = source) != null
+                                Toast.makeText(
+                                    context,
+                                    if (ok) "Ditambahkan ke stiker favorit" else "Gagal menambahkan stiker.",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
                             }
-                            val ok = com.example.syntra.net.StickerStore.addFromBytes(context, bytes) != null
-                            Toast.makeText(
-                                context,
-                                if (ok) "Ditambahkan ke stiker favorit" else "Gagal menambahkan stiker.",
-                                Toast.LENGTH_SHORT,
-                            ).show()
                         }
                     }
                 },
@@ -1651,9 +1667,14 @@ fun ChatDetailScreen(
                             }
                         },
                         onImageClick = {
-                            // A video opens the player; a photo/GIF opens the image viewer.
-                            if (it.isVideoUrl()) fullscreenVideo = it
-                            else { fullscreenCaption = msg.text; fullscreenImage = it }
+                            // A video opens the player; a GIF gets its own contained
+                            // popup (it is a sticker-sized thing, and blowing it up to
+                            // fill the screen says "photo"); a photo opens the viewer.
+                            when {
+                                it.isVideoUrl() -> fullscreenVideo = it
+                                it.substringBefore('?').endsWith(".gif", ignoreCase = true) -> gifPopup = it
+                                else -> { fullscreenCaption = msg.text; fullscreenImage = it }
+                            }
                         },
                         onReply = { replyingTo = msg },
                         // Spent from THIS side's point of view: for a received photo that's
@@ -2130,6 +2151,31 @@ fun ChatDetailScreen(
     }
 
     // Fullscreen photo viewer — tap a chat photo to see it at screen size.
+    gifPopup?.let { url ->
+        GifPopup(
+            url = url,
+            saved = com.example.syntra.net.StickerStore.isSaved(context, url),
+            onToggleFavorite = {
+                val store = com.example.syntra.net.StickerStore
+                if (store.isSaved(context, url)) {
+                    store.removeBySource(context, url)
+                    Toast.makeText(context, "Dihapus dari favorit", Toast.LENGTH_SHORT).show()
+                } else {
+                    scope.launch {
+                        val bytes = withContext(Dispatchers.IO) { chatMediaBytes(context, url) }
+                        val ok = store.addFromBytes(context, bytes, source = url) != null
+                        Toast.makeText(
+                            context,
+                            if (ok) "Ditambahkan ke favorit" else "Gagal menambahkan.",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }
+            },
+            onDismiss = { gifPopup = null },
+        )
+    }
+
     fullscreenImage?.let { url ->
         androidx.activity.compose.BackHandler { fullscreenImage = null }
         Box(
@@ -2287,6 +2333,71 @@ private fun emojiStickerPng(emoji: String): ByteArray {
     return out.toByteArray()
 }
 
+/**
+ * A GIF opened for a closer look — contained, not full-screen.
+ *
+ * Tapping a GIF used to hand it to the photo viewer, which fills the display and
+ * offers save/share. A GIF in a chat is a sticker-sized reaction, not a photograph;
+ * blowing it up to the edges says the wrong thing about what it is. This shows it at
+ * its own scale on a dimmed backdrop, with the only two actions that make sense for
+ * one: keep it, or stop keeping it.
+ */
+@Composable
+private fun GifPopup(
+    url: String,
+    saved: Boolean,
+    onToggleFavorite: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(NexusSurfaceElevated)
+                .padding(10.dp),
+        ) {
+            AsyncImage(
+                model = url,
+                contentDescription = "GIF",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .sizeIn(maxWidth = 300.dp, maxHeight = 360.dp)
+                    .clip(RoundedCornerShape(14.dp)),
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        if (saved) Color(0xFFFF5D5D).copy(alpha = 0.14f) else NexusAccent.copy(alpha = 0.16f),
+                    )
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onToggleFavorite,
+                    )
+                    .padding(horizontal = 16.dp, vertical = 9.dp),
+            ) {
+                Icon(
+                    if (saved) Icons.Filled.Delete else Icons.Filled.Add,
+                    contentDescription = null,
+                    tint = if (saved) Color(0xFFFF5D5D) else NexusAccentSoft,
+                    modifier = Modifier.size(17.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (saved) "Hapus dari favorit" else "Tambahkan ke favorit",
+                    color = if (saved) Color(0xFFFF5D5D) else NexusAccentSoft,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
 /** The one colour a star is allowed to be, wherever it appears. */
 internal val StarGold = Color(0xFFFFC542)
 
@@ -2312,6 +2423,8 @@ private fun SelectionTopBar(
     singleCanEdit: Boolean,
     singleCanCopy: Boolean,
     singleCanFavorite: Boolean,
+    /** True when that sticker is ALREADY in the tray — flips the menu label. */
+    singleIsFavorite: Boolean,
     singleIsPinned: Boolean,
     singleIsTranslated: Boolean,
     allStarred: Boolean,
@@ -2389,7 +2502,15 @@ private fun SelectionTopBar(
                 }
                 if (single && singleCanFavorite) {
                     DropdownMenuItem(
-                        text = { Text("Tambahkan ke stiker favorit", color = NexusTextPrimary) },
+                        text = {
+                            Text(
+                                // Offering "add" for something already saved was an
+                                // action that could only produce a duplicate — or, once
+                                // duplicates were prevented, silently do nothing.
+                                if (singleIsFavorite) "Hapus dari stiker favorit" else "Tambahkan ke stiker favorit",
+                                color = if (singleIsFavorite) Color(0xFFFF5D5D) else NexusTextPrimary,
+                            )
+                        },
                         onClick = { open = false; onAddFavorite() },
                     )
                 }
@@ -2431,27 +2552,28 @@ private fun ReactionButton(
     Box {
         Box(
             modifier = Modifier
-                .size(26.dp)
+                .size(34.dp)
                 .clip(CircleShape)
-                .background(
-                    if (myReaction != null) NexusAccent.copy(alpha = 0.22f) else Color.Transparent,
-                )
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
                 ) { open = true },
             contentAlignment = Alignment.Center,
         ) {
-            if (myReaction != null) {
-                Text(myReaction, fontSize = 13.sp)
-            } else {
-                Icon(
-                    Icons.Filled.AddReaction,
-                    contentDescription = "Beri reaksi",
-                    tint = NexusTextSecondary.copy(alpha = 0.65f),
-                    modifier = Modifier.size(15.dp),
-                )
-            }
+            // Always the same icon, whatever you picked. The reaction you chose is
+            // already shown as a chip under the bubble; echoing it here made the
+            // control itself change shape after use, so the thing you reach for moved
+            // depending on what you had done last.
+            Icon(
+                Icons.Filled.AddReaction,
+                contentDescription = "Beri reaksi",
+                tint = if (myReaction != null) {
+                    NexusAccentSoft.copy(alpha = 0.9f)
+                } else {
+                    NexusTextSecondary.copy(alpha = 0.6f)
+                },
+                modifier = Modifier.size(20.dp),
+            )
         }
         if (open) {
             Popup(
@@ -3809,11 +3931,18 @@ private fun MessageBubble(
             // the screen and never off the edge. Not offered on a tombstone.
             if (!msg.isDeleted) {
                 Spacer(Modifier.width(2.dp))
-                ReactionButton(
-                    myReaction = myReaction,
-                    alignEnd = msg.fromMe,
-                    onReact = onReact,
-                )
+                Box(
+                    // The row is bottom-aligned so bubbles sit on a common baseline;
+                    // the button is centred against the bubble's full height instead,
+                    // which is where the hand goes for a message of any length.
+                    modifier = Modifier.align(Alignment.CenterVertically),
+                ) {
+                    ReactionButton(
+                        myReaction = myReaction,
+                        alignEnd = msg.fromMe,
+                        onReact = onReact,
+                    )
+                }
             }
             if (!msg.fromMe) Spacer(Modifier.weight(1f))
         }
