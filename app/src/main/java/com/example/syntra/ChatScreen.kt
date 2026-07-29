@@ -3081,28 +3081,50 @@ private fun StoryViewer(
         val m = person.items.getOrNull(segment)?.music
         if (m != null && m.previewUrl.isNotBlank()) {
             com.example.syntra.net.MusicPlayer.pauseForExternalAudio() // a story song takes over audio
-            runCatching {
-                storyPlayer.setDataSource(m.previewUrl)
-                // MANUAL loop, not isLooping: for a STREAMED preview url the built-in
-                // loop seek fails silently on many devices after the first pass, so the
-                // song "plays once then goes quiet". Restarting from the completion
-                // callback loops reliably for as long as the story is on screen.
-                storyPlayer.isLooping = false
-                storyPlayer.setOnCompletionListener { mp ->
-                    runCatching { mp.seekTo(0); if (!paused) mp.start() }
+
+            // Loop by RE-PREPARING, not by seeking.
+            //
+            // `isLooping` was dropped first because it failed on streamed preview urls;
+            // it was replaced with seekTo(0)+start() from the completion callback, which
+            // fails for the same underlying reason. Once a network stream reaches the
+            // end its buffer is spent, and a seek back to zero on a PlaybackCompleted
+            // player either throws or silently does nothing — the exception was
+            // swallowed by runCatching, so the song simply went quiet for the rest of
+            // the story with nothing in the log. Re-opening the source costs a short
+            // re-buffer and always works.
+            fun arm(mp: MediaPlayer) {
+                runCatching {
+                    mp.reset()
+                    mp.setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build(),
+                    )
+                    mp.setDataSource(m.previewUrl)
+                    mp.isLooping = false
+                    mp.setOnPreparedListener { p ->
+                        musicPrepared = true
+                        if (!paused) runCatching { p.start() }
+                    }
+                    mp.prepareAsync()
                 }
-                storyPlayer.setOnPreparedListener { mp ->
-                    musicPrepared = true
-                    if (!paused) runCatching { mp.start() }
-                }
-                storyPlayer.prepareAsync()
             }
+            storyPlayer.setOnCompletionListener { mp ->
+                musicPrepared = false
+                arm(mp)
+            }
+            arm(storyPlayer)
         }
     }
     // Holding a finger pauses the story — pause/resume the song with it. Only touch a
     // PREPARED player (start() on a resetting/preparing player throws and would leave
     // the song silent for the rest of the view).
-    LaunchedEffect(paused) {
+    //
+    // Keyed on `musicPrepared` as well as `paused`: keyed on `paused` alone, a prepare
+    // that finished while the finger was already down had nothing left to re-run, so
+    // releasing after a slow buffer left the song stopped for good.
+    LaunchedEffect(paused, musicPrepared) {
         if (!musicPrepared) return@LaunchedEffect
         runCatching {
             if (paused) {

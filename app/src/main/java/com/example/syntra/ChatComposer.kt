@@ -142,7 +142,11 @@ fun EmojiPicker(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // The user's own sticker tray (device-local), observed live.
-    val myStickers = StickerStore.stickers(context)
+    //
+    // STILLS only. A saved GIF belongs to the GIF sheet, which is where you go looking
+    // for GIFs — showing the same item in both places made "favorit" mean two different
+    // trays at once, and left the Stiker grid animating half its cells.
+    val myStickers = StickerStore.stickers(context).filterNot { it.animated }
     var removeTarget by remember { mutableStateOf<StickerStore.Sticker?>(null) }
     // Add-a-sticker: pick an image or GIF from the gallery, copy it into the tray.
     val addSticker = rememberLauncherForActivityResult(

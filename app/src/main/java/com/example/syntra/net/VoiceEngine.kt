@@ -117,15 +117,30 @@ object VoiceEngine {
                             levels[id] = lvl
                             // Drive the VTuber mouth from my own loudness.
                             if (_avatarOn.value) VtuberFx.feedLevel(lvl)
-                            (lp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack)
-                                ?.let { videos[id] = it }
+                            // Gate on INTENT, not on what LiveKit still reports.
+                            //
+                            // This is what kept the tile black. After unpublishing the
+                            // avatar (or disabling the camera) LiveKit keeps returning
+                            // the CAMERA publication for a short window, and this loop
+                            // runs every 80 ms — so it re-added the dead track faster
+                            // than setAvatarEnabled/setCameraEnabled could remove it,
+                            // and the grid went on rendering a track with no frames.
+                            if (_cameraOn.value || _avatarOn.value) {
+                                lp.getTrackPublication(Track.Source.CAMERA)
+                                    ?.takeIf { !it.muted }
+                                    ?.let { pub -> (pub.track as? VideoTrack)?.let { videos[id] = it } }
+                            }
                         }
                     }
                     rm.remoteParticipants.values.forEach { rp ->
                         val id = rp.identity?.value ?: return@forEach
                         levels[id] = rp.audioLevel.coerceIn(0f, 1f)
-                        (rp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack)
-                            ?.let { videos[id] = it }
+                        // Same for peers: a muted publication is someone who turned
+                        // their camera off, and rendering it leaves them as a black
+                        // rectangle instead of falling back to their avatar cover.
+                        rp.getTrackPublication(Track.Source.CAMERA)
+                            ?.takeIf { !it.muted }
+                            ?.let { pub -> (pub.track as? VideoTrack)?.let { videos[id] = it } }
                     }
                     _audioLevels.value = levels
                     // Emit video only on change (key set or track refs), to avoid
@@ -190,7 +205,14 @@ object VoiceEngine {
     suspend fun setCameraEnabled(enabled: Boolean) {
         val lp = room?.localParticipant ?: return
         // Camera and avatar both own the CAMERA source — only one at a time.
-        if (enabled && _avatarOn.value) setAvatarEnabled(enabled = false)
+        if (enabled && _avatarOn.value) {
+            setAvatarEnabled(enabled = false)
+            // Let LiveKit finish releasing the source before claiming it again. The
+            // avatar path already waits here for the mirror-image case; without the
+            // same wait, turning the camera ON straight after the avatar published a
+            // camera track that never produced a frame — a permanently black tile.
+            delay(150)
+        }
         runCatching { lp.setCameraEnabled(enabled) }
         _cameraOn.value = enabled
         val id = lp.identity?.value

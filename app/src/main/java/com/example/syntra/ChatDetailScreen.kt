@@ -82,6 +82,8 @@ import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.AddReaction
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -2365,33 +2367,33 @@ private fun GifPopup(
                     .sizeIn(maxWidth = 300.dp, maxHeight = 360.dp)
                     .clip(RoundedCornerShape(14.dp)),
             )
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
+            // A compact chip, not a slab. It used to be a wide pill with a 17dp icon
+            // and 13sp label sitting under a small GIF, so the button carried more
+            // weight than the thing it was about.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
-                    .background(
-                        if (saved) Color(0xFFFF5D5D).copy(alpha = 0.14f) else NexusAccent.copy(alpha = 0.16f),
-                    )
                     .clickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
                         onClick = onToggleFavorite,
                     )
-                    .padding(horizontal = 16.dp, vertical = 9.dp),
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 Icon(
-                    if (saved) Icons.Filled.Delete else Icons.Filled.Add,
+                    if (saved) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                     contentDescription = null,
-                    tint = if (saved) Color(0xFFFF5D5D) else NexusAccentSoft,
-                    modifier = Modifier.size(17.dp),
+                    tint = if (saved) Color(0xFFFF5D7A) else NexusTextSecondary,
+                    modifier = Modifier.size(14.dp),
                 )
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
                 Text(
                     if (saved) "Hapus dari favorit" else "Tambahkan ke favorit",
-                    color = if (saved) Color(0xFFFF5D5D) else NexusAccentSoft,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    color = if (saved) Color(0xFFFF5D7A) else NexusTextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
                 )
             }
         }
