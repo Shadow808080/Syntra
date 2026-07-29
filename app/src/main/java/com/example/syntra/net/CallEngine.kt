@@ -171,7 +171,7 @@ object CallEngine {
         runCatching { me.setMicrophoneEnabled(true) }
         micEnabled = true
         if (video) {
-            enableCameraWithBackground(me)
+            runCatching { me.setCameraEnabled(true) }
             cameraEnabled = true
         }
         // Pick up anyone already in the room and my freshly-published tracks.
@@ -255,48 +255,9 @@ object CallEngine {
     }
 
     suspend fun setCamera(enabled: Boolean) {
-        val lp = room?.localParticipant
-        if (enabled) {
-            enableCameraWithBackground(lp)
-        } else {
-            runCatching { lp?.setCameraEnabled(false) }
-            camTrack = null
-        }
+        runCatching { room?.localParticipant?.setCameraEnabled(enabled) }
         cameraEnabled = enabled
         refreshLocalVideo()
-    }
-
-    /** The camera track we published ourselves, so the effect can be attached to it. */
-    private var camTrack: io.livekit.android.room.track.LocalVideoTrack? = null
-
-    /**
-     * Publishes the camera through [CallBackground].
-     *
-     * `setCameraEnabled(true)` is the easy path, but it builds the track internally and
-     * gives no way to attach a video processor — and a processor is the only place the
-     * background can be applied ONCE, before encoding, rather than per viewer. So the
-     * track is created by hand with the processor already in it. The processor passes
-     * frames straight through while the mode is NONE, so a call with no background
-     * chosen pays nothing for this.
-     */
-    private suspend fun enableCameraWithBackground(
-        lp: io.livekit.android.room.participant.LocalParticipant?,
-    ) {
-        if (lp == null) return
-        val ok = runCatching {
-            val track = lp.createVideoTrack(videoProcessor = CallBackground)
-            track.startCapture()
-            lp.publishVideoTrack(
-                track,
-                io.livekit.android.room.participant.VideoTrackPublishOptions(
-                    source = io.livekit.android.room.track.Track.Source.CAMERA,
-                ),
-            )
-            camTrack = track
-        }.isSuccess
-        // If the manual path is refused for any reason, fall back to the plain camera.
-        // A call without a background is a small loss; a call without video is not.
-        if (!ok) runCatching { lp.setCameraEnabled(true) }
     }
 
     /** Toggle the mic from a plain (non-suspend) click handler. */
@@ -343,10 +304,6 @@ object CallEngine {
     }
 
     fun disconnect() {
-        // A background is a per-call choice, not a setting — the next call starts as
-        // yourself unless you say otherwise.
-        CallBackground.reset()
-        camTrack = null
         runCatching { scope?.cancel() }
         scope = null
         runCatching { room?.disconnect() }

@@ -151,10 +151,19 @@ object VoiceEngine {
                             // runs every 80 ms — so it re-added the dead track faster
                             // than setAvatarEnabled/setCameraEnabled could remove it,
                             // and the grid went on rendering a track with no frames.
+                            // NOTE: no `muted` check here, only intent.
+                            //
+                            // Adding one broke the VTuber outright. The avatar is
+                            // published by hand (publishVideoTrack) rather than through
+                            // the high-level camera API, so its publication reports
+                            // muted = true even while it is happily producing frames —
+                            // the flag tracks the high-level mute that was never set.
+                            // Filtering on it dropped the avatar every poll, so the tile
+                            // fell back to the profile picture and flickered as the
+                            // explicit set and the poll fought over the same slot.
                             if (_cameraOn.value || _avatarOn.value) {
-                                lp.getTrackPublication(Track.Source.CAMERA)
-                                    ?.takeIf { !it.muted }
-                                    ?.let { pub -> (pub.track as? VideoTrack)?.let { videos[id] = it } }
+                                (lp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack)
+                                    ?.let { videos[id] = it }
                             }
                         }
                     }

@@ -129,11 +129,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    // Selfie segmentation for video-call backgrounds. Bundled (not the Play-services
-    // variant) so a blur still works on a phone with no Play Services and needs no
-    // first-run model download mid-call.
-    implementation(libs.mlkit.segmentation.selfie)
-
     testImplementation(libs.junit)
     // UploadCenter and the socket layer are coroutine machinery; testing them without
     // a controllable dispatcher means testing them with sleeps, which is how you get a

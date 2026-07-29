@@ -46,7 +46,6 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Wallpaper
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
@@ -527,7 +526,6 @@ private fun CallSession(d: CallDescriptor) {
     // reflect people joining and leaving.
     val members = remember(d) { mutableStateListOf<SyntraClient.CallMember>() }
     var showInvite by remember(d) { mutableStateOf(false) }
-    var showBackgrounds by remember(d) { mutableStateOf(false) }
     LaunchedEffect(callId, CallEngine.remotePeers.size) {
         if (callId.isBlank() || !ApiConfig.ENABLED) return@LaunchedEffect
         runCatching { SyntraClient.callParticipants(callId) }
@@ -913,10 +911,6 @@ private fun CallSession(d: CallDescriptor) {
         CallController.end()
     }
 
-    if (showBackgrounds) {
-        BackgroundPickerDialog(onDismiss = { showBackgrounds = false })
-    }
-
     if (showInvite) {
         InvitePickerDialog(
             already = members.map { it.userId }.toSet(),
@@ -972,7 +966,6 @@ private fun CallSession(d: CallDescriptor) {
             // not worth showing.
             canInvite = phase == CallPhase.ONGOING && members.count { it.joined } < 5,
             onInvite = { showInvite = true },
-            onOpenBackgrounds = { showBackgrounds = true },
             phase = phase,
             statusLine = statusLine,
             elapsed = elapsed,
@@ -1000,7 +993,6 @@ private fun FullCallUi(
     isGroupCall: Boolean = false,
     canInvite: Boolean = false,
     onInvite: () -> Unit = {},
-    onOpenBackgrounds: () -> Unit = {},
     phase: CallPhase,
     statusLine: String,
     elapsed: Int,
@@ -1157,7 +1149,6 @@ private fun FullCallUi(
                         onToggleSpeaker = { CallEngine.setSpeaker(!CallEngine.speakerOn) },
                         onToggleCamera = { CallEngine.fireCamera(!CallEngine.cameraEnabled) },
                         onSwitchCamera = { CallEngine.switchCamera() },
-                        onOpenBackgrounds = onOpenBackgrounds,
                         onHangUp = onHangUp,
                     )
                 }
@@ -1690,19 +1681,29 @@ private fun OngoingControls(
     onToggleSpeaker: () -> Unit,
     onToggleCamera: () -> Unit,
     onSwitchCamera: () -> Unit,
-    onOpenBackgrounds: () -> Unit = {},
     onHangUp: () -> Unit,
 ) {
     // Aurora behind the controls: two slow counter-drifting bands of the theme accent,
     // drawn INSIDE the pill and clipped to it, under a glass wash. The bar used to be a
     // flat 7%-white rectangle — correct, and completely lifeless.
-    val aurora = rememberInfiniteTransition(label = "call-aurora")
-    val drift by aurora.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * Math.PI).toFloat(),
-        animationSpec = infiniteRepeatable(tween(6200, easing = LinearEasing), RepeatMode.Restart),
-        label = "call-aurora-drift",
-    )
+    //
+    // FROZEN on a video call. An infinite transition drives a frame every 16 ms for as
+    // long as it exists, and on a video call this pill sits on top of moving video —
+    // so the animation is invisible and competes with decode for exactly the frames
+    // that matter. On a voice call there is nothing else moving and nothing decoding,
+    // so it keeps its drift.
+    val drift = if (isVideo) {
+        0f
+    } else {
+        val aurora = rememberInfiniteTransition(label = "call-aurora")
+        val d by aurora.animateFloat(
+            initialValue = 0f,
+            targetValue = (2f * Math.PI).toFloat(),
+            animationSpec = infiniteRepeatable(tween(6200, easing = LinearEasing), RepeatMode.Restart),
+            label = "call-aurora-drift",
+        )
+        d
+    }
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(44.dp))
@@ -1768,13 +1769,6 @@ private fun OngoingControls(
                 onClick = onToggleCamera,
             )
             CallControl(icon = Icons.Rounded.Cameraswitch, description = "Balik kamera", onClick = onSwitchCamera)
-            CallControl(
-                icon = Icons.Rounded.Wallpaper,
-                description = "Ubah latar",
-                active = com.example.syntra.net.CallBackground.mode !=
-                    com.example.syntra.net.CallBackground.Mode.NONE,
-                onClick = onOpenBackgrounds,
-            )
         } else {
             CallControl(
                 icon = if (CallEngine.speakerOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff,
@@ -1797,94 +1791,6 @@ private fun OngoingControls(
         }
     }
     }
-}
-
-/**
- * Picks what sits behind you.
- *
- * Each option shows the thing itself rather than an icon — a blur swatch is blurred, a
- * night sky has stars in it. A row of identical squares with labels underneath would
- * make you read to find out what you are choosing.
- */
-@Composable
-private fun BackgroundPickerDialog(onDismiss: () -> Unit) {
-    val bg = com.example.syntra.net.CallBackground
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
-                .padding(20.dp),
-        ) {
-            Text("Latar video", color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Diterapkan sebelum dikirim, jadi semua orang di panggilan melihatnya.",
-                color = NexusTextSecondary,
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-            )
-            Spacer(Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                com.example.syntra.net.CallBackground.Mode.entries.forEach { m ->
-                    val selected = bg.mode == m
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable(
-                                indication = null,
-                                interactionSource = remember { MutableInteractionSource() },
-                            ) { bg.select(m); onDismiss() },
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(0.78f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(swatchBrush(m))
-                                .border(
-                                    width = if (selected) 2.dp else 1.dp,
-                                    color = if (selected) NexusAccentSoft else NexusStroke,
-                                    shape = RoundedCornerShape(12.dp),
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            if (m == com.example.syntra.net.CallBackground.Mode.NONE) {
-                                Icon(
-                                    Icons.Rounded.Close, null,
-                                    tint = NexusTextSecondary, modifier = Modifier.size(18.dp),
-                                )
-                            }
-                        }
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            m.label,
-                            color = if (selected) NexusAccentSoft else NexusTextSecondary,
-                            fontSize = 10.sp,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** A preview of each background, drawn with the same colours the processor uses. */
-private fun swatchBrush(m: com.example.syntra.net.CallBackground.Mode): Brush = when (m) {
-    com.example.syntra.net.CallBackground.Mode.NONE ->
-        Brush.verticalGradient(listOf(Color(0xFF2A2A2E), Color(0xFF1E1E22)))
-    com.example.syntra.net.CallBackground.Mode.BLUR ->
-        Brush.verticalGradient(listOf(Color(0xFF6E7A8A), Color(0xFF3C4552)))
-    com.example.syntra.net.CallBackground.Mode.ROOM ->
-        Brush.verticalGradient(listOf(Color(0xFF8A7A63), Color(0xFF4A4136)))
-    com.example.syntra.net.CallBackground.Mode.SPACE ->
-        Brush.verticalGradient(listOf(Color(0xFF0B0B18), Color(0xFF000006)))
-    com.example.syntra.net.CallBackground.Mode.GRADIENT ->
-        Brush.verticalGradient(listOf(NexusAccentSoft, NexusAccent))
 }
 
 @Composable
@@ -1976,15 +1882,19 @@ private fun RoundActionButton(icon: ImageVector, background: Color, onClick: () 
 
 @Composable
 private fun PulsingAvatar(photoUrl: String?, pulsing: Boolean) {
-    val transition = rememberInfiniteTransition(label = "ring")
-    val scale by transition.animateFloat(
-        initialValue = 1f,
-        targetValue = if (pulsing) 1.18f else 1f,
-        animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse),
-        label = "scale",
-    )
     Box(contentAlignment = Alignment.Center) {
         if (pulsing) {
+            // The transition is created INSIDE the `pulsing` branch. It used to be built
+            // unconditionally with targetValue = 1f when idle — animating 1f to 1f, which
+            // still runs the animation clock and still asks for a frame every 16 ms for
+            // the whole call, to draw a halo that isn't even composed.
+            val transition = rememberInfiniteTransition(label = "ring")
+            val scale by transition.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.18f,
+                animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse),
+                label = "scale",
+            )
             Box(modifier = Modifier.size((132 * scale).dp).background(NexusAccent.copy(alpha = 0.12f), CircleShape))
         }
         Box(
