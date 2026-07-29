@@ -1424,6 +1424,11 @@ private fun VideoRenderer(
                 TextureViewRenderer(ctx).apply {
                     CallEngine.initRenderer(this)
                     setMirror(mirror)
+                    // Scale on the GPU instead of the CPU. A remote stream almost never
+                    // arrives at exactly the tile's size, so every frame is resized;
+                    // doing that in software is pure CPU on the phone that can least
+                    // afford it. Off by default.
+                    runCatching { setEnableHardwareScaler(true) }
                     runCatching { track.addRenderer(this) }
                 }
             },

@@ -109,7 +109,43 @@ object CallEngine {
         appContext = app
         videoCall = video
         cameraSuspendedBySleep = false
-        val r = LiveKit.create(appContext = app)
+        // Video-call room options. Every one of these was at its default, and the
+        // defaults are tuned for a laptop on wifi, not an RMX2180 on mobile data.
+        val r = LiveKit.create(
+            appContext = app,
+            options = io.livekit.android.RoomOptions(
+                // Pause / downgrade a remote track whose tile is small or off-screen.
+                // Defaults to FALSE, so a five-person bento grid decoded five
+                // full-size streams to paint five thumbnails — and kept decoding the
+                // ones scrolled out of view. This is the single biggest lever here.
+                adaptiveStream = true,
+                // Stop sending layers nobody is subscribed to. Also default FALSE, so
+                // the phone encoded and uploaded quality nobody had asked for.
+                dynacast = true,
+                videoTrackCaptureDefaults = io.livekit.android.room.track.LocalVideoTrackOptions(
+                    // LiveKit captures 720p by default. On a phone tile that detail is
+                    // invisible, but the capture, encode and upload are all paid in
+                    // full — and on this class of device the encoder is the thing that
+                    // runs out first. 360p at 24fps is about a quarter of the work.
+                    captureParams = io.livekit.android.room.track.VideoCaptureParameter(
+                        width = 640,
+                        height = 360,
+                        maxFps = 24,
+                    ),
+                ),
+                videoTrackPublishDefaults = io.livekit.android.room.participant.VideoTrackPublishDefaults(
+                    videoEncoding = io.livekit.android.room.track.VideoEncoding(
+                        maxBitrate = 500_000,
+                        maxFps = 24,
+                    ),
+                    // Under pressure, shed pixels rather than frames. A call is faces
+                    // and lips; a sharp slideshow reads as broken where a soft but
+                    // smooth picture reads as a weak signal.
+                    degradationPreference =
+                    livekit.org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
+                ),
+            ),
+        )
         room = r
 
         val cs = CoroutineScope(Dispatchers.Main + SupervisorJob())

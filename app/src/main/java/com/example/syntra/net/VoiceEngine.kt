@@ -80,7 +80,33 @@ object VoiceEngine {
                 ),
             ),
         )
-        val r = LiveKit.create(appContext = context.applicationContext, overrides = overrides)
+        // Same tuning as a video call — a room can hold far more people, so the cost of
+        // the defaults is worse here, not better. See CallEngine.connect for why each
+        // one matters. The avatar capturer publishes through this too, so its frames
+        // ride the same 360p/24fps budget instead of a 720p one nobody can see.
+        val r = LiveKit.create(
+            appContext = context.applicationContext,
+            options = io.livekit.android.RoomOptions(
+                adaptiveStream = true,
+                dynacast = true,
+                videoTrackCaptureDefaults = io.livekit.android.room.track.LocalVideoTrackOptions(
+                    captureParams = io.livekit.android.room.track.VideoCaptureParameter(
+                        width = 640,
+                        height = 360,
+                        maxFps = 24,
+                    ),
+                ),
+                videoTrackPublishDefaults = io.livekit.android.room.participant.VideoTrackPublishDefaults(
+                    videoEncoding = io.livekit.android.room.track.VideoEncoding(
+                        maxBitrate = 500_000,
+                        maxFps = 24,
+                    ),
+                    degradationPreference =
+                    livekit.org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
+                ),
+            ),
+            overrides = overrides,
+        )
 
         // Route audio BEFORE connecting so the very first remote frames play out of
         // the loudspeaker instead of the (near-silent) earpiece.

@@ -2555,6 +2555,8 @@ private fun VideoTileRenderer(track: VideoTrack, mirror: Boolean, modifier: Modi
                 TextureViewRenderer(ctx).apply {
                     VoiceEngine.initRenderer(this)
                     setMirror(mirror)
+                    // Scale on the GPU, not the CPU — see the same call in CallScreen.
+                    runCatching { setEnableHardwareScaler(true) }
                     runCatching { track.addRenderer(this) }
                 }
             },
