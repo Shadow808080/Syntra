@@ -174,6 +174,17 @@ fun EmojiPicker(
         }
 
         if (mode == 1) {
+            // Same hint as the GIF favourites row: removing is a long-press, and a
+            // long-press nobody is told about is the same as no feature. It has been
+            // implemented here the whole time with nothing pointing at it.
+            if (myStickers.isNotEmpty()) {
+                Text(
+                    "Tekan lama stiker untuk menghapusnya",
+                    color = NexusTextSecondary,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(start = 18.dp, top = 6.dp),
+                )
+            }
             LazyVerticalGrid(
                 columns = GridCells.Fixed(5),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -367,6 +378,7 @@ fun GifPickerSheet(
     val gifs = remember { mutableStateListOf<GifItem>() }
     var loading by remember { mutableStateOf(GifClient.configured) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    var gifRemoveTarget by remember { mutableStateOf<StickerStore.Sticker?>(null) }
 
     // Animate the sheet down THEN remove it. Just flipping the host flag while the
     // sheet is at rest leaves it on screen (a Material3 quirk) — this is why it didn't
@@ -435,8 +447,10 @@ fun GifPickerSheet(
             // specifically the GIFs, and they already have the Stiker tab.
             val savedGifs = StickerStore.stickers(ctx).filter { it.animated }
             if (savedGifs.isNotEmpty()) {
+                // The hint is in the heading because removing is gesture-only: a
+                // long-press nobody is told about is the same as no feature.
                 Text(
-                    "Favorit kamu",
+                    "Favorit kamu · tekan lama untuk hapus",
                     color = NexusTextSecondary,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -460,11 +474,66 @@ fun GifPickerSheet(
                                 .size(72.dp)
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(NexusSurfaceElevated)
-                                .clickable(
+                                // Tap sends, press-and-hold removes — the same gesture
+                                // the Stiker tray already uses. Un-favouriting only from
+                                // the chat menu meant you had to find a message that
+                                // still had that GIF in it just to drop it.
+                                .combinedClickable(
                                     indication = null,
                                     interactionSource = remember { MutableInteractionSource() },
-                                ) { onGifDevice(Uri.fromFile(java.io.File(s.path))); dismiss() },
+                                    onClick = { onGifDevice(Uri.fromFile(java.io.File(s.path))); dismiss() },
+                                    onLongClick = { gifRemoveTarget = s },
+                                ),
                         )
+                    }
+                }
+            }
+
+            // Placed here, ABOVE the `return@Column` below: a favourites row can exist
+            // even when GIPHY is not configured, so a confirm placed after that early
+            // return would never be composed for the very users who can only have
+            // gallery favourites.
+            gifRemoveTarget?.let { s ->
+                Dialog(onDismissRequest = { gifRemoveTarget = null }) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(NexusSurfaceElevated, RoundedCornerShape(20.dp))
+                            .padding(20.dp),
+                    ) {
+                        Text("Hapus GIF favorit?", color = NexusTextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "GIF akan dihapus dari favoritmu di perangkat ini.",
+                            color = NexusTextSecondary, fontSize = 13.sp,
+                        )
+                        Spacer(Modifier.height(18.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            Text(
+                                "Batal",
+                                color = NexusTextSecondary,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { gifRemoveTarget = null }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "Hapus",
+                                color = DangerFill,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { StickerStore.remove(ctx, s.id); gifRemoveTarget = null }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                            )
+                        }
                     }
                 }
             }
