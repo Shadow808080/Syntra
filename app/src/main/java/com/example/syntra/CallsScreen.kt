@@ -6,6 +6,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -88,6 +90,7 @@ import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusOnline
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import com.example.syntra.ui.theme.SyntraTheme
@@ -214,6 +217,9 @@ fun CallsScreen(
     var showNewCall by remember { mutableStateOf(false) }
     // Long-press "Info" opens a call-detail sheet; "Kirim pesan" opens a chat.
     var detailEntry by remember { mutableStateOf<CallEntry?>(null) }
+    // Ids of the history rows currently selected — same model as the chat screen.
+    val selectedCalls = remember { mutableStateListOf<String>() }
+    androidx.activity.compose.BackHandler(enabled = selectedCalls.isNotEmpty()) { selectedCalls.clear() }
     var openChat by remember { mutableStateOf<Conversation?>(null) }
 
     // Opening a chat covers the whole screen — tell the host to hide the bottom bar.
@@ -312,6 +318,51 @@ fun CallsScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // App bar — plain page title, no wordmark. Search collapses in place.
+            // While rows are selected it is replaced by the same contextual bar the
+            // chat screen uses, so "select several, then act" means the same thing in
+            // both places instead of being a per-row menu here and a header there.
+            if (selectedCalls.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(NexusSurfaceElevated)
+                        .windowInsetsPadding(WindowInsets.statusBars)
+                        .padding(start = 6.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CallIconButton(Icons.Filled.Close, "Batal pilih") { selectedCalls.clear() }
+                    Text(
+                        "${selectedCalls.size}",
+                        color = NexusTextPrimary,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                    Spacer(Modifier.weight(1f))
+                    // Only offered for a single pick: calling back, messaging and the
+                    // detail sheet are all about ONE conversation, and picking an
+                    // arbitrary one of several would be worse than not offering it.
+                    if (selectedCalls.size == 1) {
+                        val one = history.firstOrNull { it.id == selectedCalls.first() }
+                        if (one != null) {
+                            CallIconButton(Icons.Filled.Call, "Panggil") {
+                                selectedCalls.clear(); placeCall(one.peerName, one.peerId, one.video)
+                            }
+                            CallIconButton(Icons.AutoMirrored.Filled.Message, "Kirim pesan") {
+                                selectedCalls.clear(); messagePeer(one)
+                            }
+                            CallIconButton(Icons.Filled.Info, "Info") {
+                                selectedCalls.clear(); detailEntry = one
+                            }
+                        }
+                    }
+                    CallIconButton(Icons.Filled.Delete, "Hapus") {
+                        val picked = selectedCalls.toList()
+                        selectedCalls.clear()
+                        picked.forEach { id -> history.firstOrNull { it.id == id }?.let { deleteEntry(it) } }
+                    }
+                }
+            } else {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -352,6 +403,7 @@ fun CallsScreen(
                     Spacer(Modifier.weight(1f))
                     CallIconButton(Icons.Filled.Search, "Cari") { searching = true }
                 }
+            }
             }
 
             // Segmented filter — quiet pill, not a gradient.
@@ -402,6 +454,19 @@ fun CallsScreen(
                             onMessage = { messagePeer(entry) },
                             onInfo = { detailEntry = entry },
                             onDelete = { deleteEntry(entry) },
+                            isSelected = entry.id in selectedCalls,
+                            onLongPress = {
+                                if (entry.id in selectedCalls) selectedCalls.remove(entry.id)
+                                else selectedCalls.add(entry.id)
+                            },
+                            onTapWhileSelecting = if (selectedCalls.isEmpty()) {
+                                null
+                            } else {
+                                {
+                                    if (entry.id in selectedCalls) selectedCalls.remove(entry.id)
+                                    else selectedCalls.add(entry.id)
+                                }
+                            },
                         )
                     }
                     if (query.isBlank()) {
@@ -728,6 +793,11 @@ private fun CallRow(
     onMessage: () -> Unit,
     onInfo: () -> Unit,
     onDelete: () -> Unit,
+    /** True while this row is part of the current selection. */
+    isSelected: Boolean = false,
+    onLongPress: (() -> Unit)? = null,
+    /** Non-null only while a selection is active: a plain tap toggles this row. */
+    onTapWhileSelecting: (() -> Unit)? = null,
 ) {
     val (icon, tint) = when (entry.direction) {
         CallDirection.OUTGOING -> Icons.AutoMirrored.Filled.CallMade to NexusOnline
@@ -735,18 +805,33 @@ private fun CallRow(
         CallDirection.MISSED -> Icons.AutoMirrored.Filled.CallMissed to Color(0xFFFF5D5D)
     }
     var menuOpen by remember { mutableStateOf(false) }
+    val selectTint by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
+        animationSpec = tween(160),
+        label = "call-select",
+    )
 
     Box {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                // Tap → call back; long-press → the context menu (Panggil, Pesan,
-                // Info, Hapus) — the phone-app gesture set.
+                // Same treatment as a selected chat message: the row lifts out of the
+                // list while it is picked, so a bulk delete can never be about a row
+                // you did not mean.
+                .then(
+                    if (selectTint > 0.01f) {
+                        Modifier.background(NexusAccent.copy(alpha = 0.16f * selectTint))
+                    } else {
+                        Modifier
+                    },
+                )
+                // Tap → call back (or toggle, while selecting); long-press → start a
+                // selection, falling back to the old per-row menu when there is none.
                 .combinedClickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
-                    onClick = onCallBack,
-                    onLongClick = { menuOpen = true },
+                    onClick = { if (onTapWhileSelecting != null) onTapWhileSelecting() else onCallBack() },
+                    onLongClick = { if (onLongPress != null) onLongPress() else menuOpen = true },
                 )
                 .padding(horizontal = 20.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,

@@ -119,6 +119,7 @@ import com.example.syntra.net.MusicBrowse
 import com.example.syntra.net.MusicClient
 import com.example.syntra.net.MusicPlayer
 import com.example.syntra.net.MusicPlaylist
+import androidx.compose.ui.graphics.toArgb
 import com.example.syntra.net.DeviceAudio
 import com.example.syntra.net.MusicTrack
 import com.example.syntra.ui.theme.NexusAccent
@@ -1406,6 +1407,7 @@ private fun TrackCard(
         Box {
             ArtworkImage(
                 url = localArt ?: track.artworkUrl,
+                seed = track.id,
                 modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)),
             )
             if (isCurrent) NowPlayingBadge(Modifier.align(Alignment.BottomEnd).padding(8.dp))
@@ -1424,7 +1426,7 @@ private fun PlaylistCard(p: MusicPlaylist, onClick: () -> Unit) {
             .width(150.dp)
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
     ) {
-        ArtworkImage(url = p.pictureUrl, modifier = Modifier.size(150.dp).clip(RoundedCornerShape(12.dp)))
+        ArtworkImage(url = p.pictureUrl, seed = p.id, modifier = Modifier.size(150.dp).clip(RoundedCornerShape(12.dp)))
         Spacer(Modifier.height(8.dp))
         Text(p.title, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 17.sp)
@@ -1439,7 +1441,7 @@ private fun ArtistCard(a: MusicArtist, onClick: () -> Unit) {
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        ArtworkImage(url = a.pictureUrl, modifier = Modifier.size(120.dp).clip(CircleShape))
+        ArtworkImage(url = a.pictureUrl, seed = a.id, modifier = Modifier.size(120.dp).clip(CircleShape))
         Spacer(Modifier.height(8.dp))
         Text(a.name, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1453,7 +1455,7 @@ private fun AlbumCard(a: MusicAlbum, onClick: () -> Unit) {
             .width(140.dp)
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
     ) {
-        ArtworkImage(url = a.artworkUrl, modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)))
+        ArtworkImage(url = a.artworkUrl, seed = a.id, modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)))
         Spacer(Modifier.height(8.dp))
         Text(a.title, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1471,7 +1473,7 @@ private fun TrackRow(track: MusicTrack, onClick: () -> Unit) {
             .padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+        ArtworkImage(url = rememberTrackArt(track), seed = track.id, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 15.sp,
@@ -1499,15 +1501,45 @@ private fun NowPlayingBadge(modifier: Modifier = Modifier) {
 
 /** Artwork with a subtle placeholder while it loads / when absent. */
 @Composable
-private fun ArtworkImage(url: String?, modifier: Modifier = Modifier) {
-    Box(modifier = modifier.background(NexusSurface), contentAlignment = Alignment.Center) {
+private fun ArtworkImage(url: String?, modifier: Modifier = Modifier, seed: String = "") {
+    Box(
+        // A cover of its own when there is no cover: a gradient in the theme with the
+        // note on top, instead of a flat grey square with a grey glyph. A shelf of
+        // identical grey squares reads as a list that failed to load; a shelf of
+        // different-coloured ones reads as a shelf of different songs.
+        //
+        // The tint is derived from the track key, so the same song keeps the same
+        // colour everywhere it appears — card, row, mini-player, now-playing.
+        modifier = modifier.background(if (url.isNullOrBlank()) defaultArtBrush(seed) else SolidColor(NexusSurface)),
+        contentAlignment = Alignment.Center,
+    ) {
         if (!url.isNullOrBlank()) {
             AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize())
         } else {
-            Icon(Icons.Filled.MusicNote, null, tint = NexusTextSecondary, modifier = Modifier.size(28.dp))
+            Icon(
+                Icons.Filled.MusicNote, null,
+                tint = Color.White.copy(alpha = 0.9f),
+                modifier = Modifier.fillMaxSize(0.34f),
+            )
         }
     }
+}
+
+/** One of a few theme-derived gradients, picked deterministically from [seed]. */
+private fun defaultArtBrush(seed: String): Brush {
+    val shift = if (seed.isBlank()) 0f else ((seed.hashCode() and 0x7FFFFFFF) % 5) * 26f - 52f
+    val top = shiftMusicHue(NexusAccentSoft, shift)
+    val bottom = shiftMusicHue(NexusAccent, shift)
+    return Brush.linearGradient(listOf(top, bottom))
+}
+
+private fun shiftMusicHue(color: Color, degrees: Float): Color {
+    if (degrees == 0f) return color
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(color.toArgb(), hsv)
+    hsv[0] = (hsv[0] + degrees + 360f) % 360f
+    return Color(android.graphics.Color.HSVToColor(hsv))
 }
 
 @Composable
@@ -2006,7 +2038,7 @@ fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
+            ArtworkImage(url = rememberTrackArt(track), seed = track.id, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(track.title, color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
@@ -2144,6 +2176,7 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             ) {
                 ArtworkImage(
                     url = rememberTrackArt(track),
+                    seed = track.id,
                     modifier = Modifier.fillMaxWidth(0.88f).aspectRatio(1f).clip(RoundedCornerShape(18.dp)),
                 )
             }

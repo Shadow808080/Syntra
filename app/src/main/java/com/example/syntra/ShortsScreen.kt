@@ -3447,13 +3447,83 @@ private fun ReelCommentsSheet(
     // someone else's words.
     actionsFor?.let { c ->
         val mine = c.authorId.isNotBlank() && c.authorId == myId
-        androidx.compose.ui.window.Dialog(onDismissRequest = { actionsFor = null }) {
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { actionsFor = null },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            // A full-screen dark backdrop with the popup on it, rather than a bare
+            // menu. The comment you picked rides the TOP of the popup: in a thread of
+            // near-identical replies a menu on its own never says which one it is
+            // about, and one of these actions deletes it.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.62f))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { actionsFor = null },
+                contentAlignment = Alignment.Center,
+            ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .background(NexusSurfaceElevated, RoundedCornerShape(20.dp))
-                    .padding(vertical = 10.dp),
+                    .fillMaxWidth(0.86f)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(NexusSurfaceElevated)
+                    // Swallow taps on the card itself so they don't reach the backdrop
+                    // behind it and close the very menu being aimed at.
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) {}
+                    .padding(bottom = 10.dp),
             ) {
+                // The selected comment, stuck to the top of the popup.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(NexusAccent.copy(alpha = 0.10f))
+                        .padding(horizontal = 16.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    CommentAvatar(
+                        url = c.avatarUrl,
+                        name = c.displayName.ifBlank { c.username }.ifBlank { "pengguna" },
+                        size = 30.dp,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (mine) "Komentar Anda" else c.displayName.ifBlank { c.username }.ifBlank { "pengguna" },
+                            color = if (mine) NexusAccentSoft else NexusTextPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (c.body.isNotBlank()) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                c.body,
+                                color = NexusTextSecondary,
+                                fontSize = 12.sp,
+                                lineHeight = 17.sp,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    if (c.mediaUrl != null) {
+                        Spacer(Modifier.width(10.dp))
+                        AsyncImage(
+                            model = c.mediaUrl,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(38.dp).clip(RoundedCornerShape(8.dp)),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
                 if (mine) {
                     CommentActionRow(Icons.Filled.Edit, "Edit komentar", NexusTextPrimary) {
                         actionsFor = null
@@ -3468,6 +3538,7 @@ private fun ReelCommentsSheet(
                     pendingDelete = c
                 }
                 CommentActionRow(Icons.Filled.Close, "Batal", NexusTextSecondary) { actionsFor = null }
+            }
             }
         }
     }

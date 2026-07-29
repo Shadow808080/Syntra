@@ -897,20 +897,20 @@ private fun SortPill(sort: RoomSort, onToggle: () -> Unit) {
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onToggle,
             )
-            .padding(start = 11.dp, end = 13.dp, top = 7.dp, bottom = 7.dp),
+            .padding(start = 13.dp, end = 15.dp, top = 9.dp, bottom = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             Icons.Filled.SwapVert,
             contentDescription = "Ubah urutan",
             tint = NexusAccentSoft,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(19.dp),
         )
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(7.dp))
         Text(
             text = sort.label,
             color = NexusTextPrimary,
-            fontSize = 12.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
         )
