@@ -362,6 +362,7 @@ fun GifPickerSheet(
     var genMode by remember { mutableStateOf(false) }
     val gifs = remember { mutableStateListOf<GifItem>() }
     var loading by remember { mutableStateOf(GifClient.configured) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
 
     // Animate the sheet down THEN remove it. Just flipping the host flag while the
     // sheet is at rest leaves it on screen (a Material3 quirk) — this is why it didn't
@@ -420,6 +421,48 @@ fun GifPickerSheet(
                 Icon(Icons.Filled.Image, null, tint = NexusAccent, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(10.dp))
                 Text("GIF dari galeri HP", color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+
+            // Your saved animated stickers, first.
+            //
+            // "Tambahkan ke stiker favorit" on someone's GIF put it in the Stiker tray
+            // and nowhere else — so the obvious place to go looking for it, the GIF
+            // sheet you send GIFs from, never showed it. Stills stay out: this row is
+            // specifically the GIFs, and they already have the Stiker tab.
+            val savedGifs = StickerStore.stickers(ctx).filter { it.animated }
+            if (savedGifs.isNotEmpty()) {
+                Text(
+                    "Favorit kamu",
+                    color = NexusTextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 18.dp, top = 8.dp, bottom = 4.dp),
+                )
+                androidx.compose.foundation.lazy.LazyRow(
+                    contentPadding = PaddingValues(horizontal = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                ) {
+                    // items(count) is a MEMBER of LazyListScope, so it needs no import
+                    // — importing the list `items` extension would collide with the
+                    // grid one already used by the sticker tab in this same file.
+                    items(savedGifs.size, key = { savedGifs[it].id }) { i ->
+                        val s = savedGifs[i]
+                        AsyncImage(
+                            model = java.io.File(s.path),
+                            contentDescription = "GIF favorit",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(NexusSurfaceElevated)
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) { onGifDevice(Uri.fromFile(java.io.File(s.path))); dismiss() },
+                        )
+                    }
+                }
             }
 
             if (!GifClient.configured) {

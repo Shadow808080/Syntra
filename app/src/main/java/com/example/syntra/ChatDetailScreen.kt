@@ -78,6 +78,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.automirrored.filled.Reply
+import androidx.compose.material.icons.filled.AddReaction
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Star
@@ -137,6 +138,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.Popup
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
@@ -1433,18 +1435,6 @@ fun ChatDetailScreen(
                         reactions.remove(m.id)
                     }
                 },
-                myReaction = one?.let { m -> mine?.let { reactions[m.id]?.get(it) } },
-                onReact = { emoji ->
-                    val m = one
-                    selectedIds.clear()
-                    if (m != null && ApiConfig.ENABLED && mine != null) {
-                        // Tapping the emoji I already picked clears it (toggle).
-                        val base = reactions[m.id].orEmpty()
-                        val next = if (base[mine] == emoji) "" else emoji
-                        reactions[m.id] = if (next.isBlank()) base - mine else base + (mine to next)
-                        scope.launch { runCatching { SyntraClient.reactToMessage(m.id, next) } }
-                    }
-                },
                 onDeleteForEveryone = {
                     val target = picked.filter { it.fromMe && !it.isDeleted }
                     selectedIds.clear()
@@ -1649,6 +1639,17 @@ fun ChatDetailScreen(
                         },
                         isSelected = msg.id in selectedIds,
                         isStarred = msg.id in starredIds,
+                        myReaction = SyntraClient.myUserId?.let { reactions[msg.id]?.get(it) },
+                        onReact = { emoji ->
+                            val me = SyntraClient.myUserId
+                            if (ApiConfig.ENABLED && me != null) {
+                                // Tapping the emoji I already picked clears it (toggle).
+                                val base = reactions[msg.id].orEmpty()
+                                val next = if (base[me] == emoji) "" else emoji
+                                reactions[msg.id] = if (next.isBlank()) base - me else base + (me to next)
+                                scope.launch { runCatching { SyntraClient.reactToMessage(msg.id, next) } }
+                            }
+                        },
                         onImageClick = {
                             // A video opens the player; a photo/GIF opens the image viewer.
                             if (it.isVideoUrl()) fullscreenVideo = it
@@ -2325,8 +2326,6 @@ private fun SelectionTopBar(
     onAddFavorite: () -> Unit,
     onDeleteForMe: () -> Unit,
     onDeleteForEveryone: () -> Unit,
-    myReaction: String?,
-    onReact: (String) -> Unit,
 ) {
     val single = count == 1
     Column(
@@ -2394,7 +2393,10 @@ private fun SelectionTopBar(
                         onClick = { open = false; onAddFavorite() },
                     )
                 }
-                if (anyMine) {
+                // Single message only. On a mixed selection this fired on whichever
+                // messages happened to be mine and silently skipped the rest — the
+                // menu promised one thing and did another to an arbitrary subset.
+                if (single && anyMine) {
                     DropdownMenuItem(
                         text = { Text("Hapus untuk semua orang", color = Color(0xFFFF5D5D)) },
                         onClick = { open = false; onDeleteForEveryone() },
@@ -2408,35 +2410,85 @@ private fun SelectionTopBar(
         }
     }
 
-    // The quick-reaction row followed the bottom sheet out, and reacting has no other
-    // entry point — so it comes back here, on its own line, for a single message only.
-    // Reacting to five messages with one tap is not a thing anyone means to do.
-    if (single) {
-        Row(
+    }
+}
+
+/**
+ * The little emoji button beside a bubble, and the picker it opens.
+ *
+ * Reacting used to be buried in the long-press menu, which meant the lightest thing
+ * you can do to a message needed the same ceremony as deleting it. The picker is a
+ * [Popup] on purpose: it is allowed to overhang the bubble and the rows around it,
+ * so a reaction never pushes the conversation about to make room for itself.
+ */
+@Composable
+private fun ReactionButton(
+    myReaction: String?,
+    alignEnd: Boolean,
+    onReact: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .size(26.dp)
+                .clip(CircleShape)
+                .background(
+                    if (myReaction != null) NexusAccent.copy(alpha = 0.22f) else Color.Transparent,
+                )
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { open = true },
+            contentAlignment = Alignment.Center,
         ) {
-            QUICK_REACTIONS.forEach { emoji ->
-                val picked = myReaction == emoji
-                Box(
+            if (myReaction != null) {
+                Text(myReaction, fontSize = 13.sp)
+            } else {
+                Icon(
+                    Icons.Filled.AddReaction,
+                    contentDescription = "Beri reaksi",
+                    tint = NexusTextSecondary.copy(alpha = 0.65f),
+                    modifier = Modifier.size(15.dp),
+                )
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = if (alignEnd) Alignment.TopEnd else Alignment.TopStart,
+                // Lifted above the button so it covers the bubble rather than the
+                // messages below, which is where the eye already is.
+                offset = androidx.compose.ui.unit.IntOffset(0, -150),
+                onDismissRequest = { open = false },
+                properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+            ) {
+                Row(
                     modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(if (picked) NexusAccent.copy(alpha = 0.25f) else Color.Transparent)
-                        .clickable(
-                            indication = null,
-                            interactionSource = remember { MutableInteractionSource() },
-                        ) { onReact(emoji) },
-                    contentAlignment = Alignment.Center,
+                        .clip(RoundedCornerShape(50))
+                        .background(NexusSurfaceElevated)
+                        .border(1.dp, NexusStroke, RoundedCornerShape(50))
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(emoji, fontSize = 21.sp)
+                    QUICK_REACTIONS.forEach { emoji ->
+                        val picked = myReaction == emoji
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(if (picked) NexusAccent.copy(alpha = 0.25f) else Color.Transparent)
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) { open = false; onReact(emoji) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(emoji, fontSize = 20.sp)
+                        }
+                    }
                 }
             }
         }
-    }
     }
 }
 
@@ -3417,6 +3469,9 @@ private fun MessageBubble(
     isSelected: Boolean = false,
     /** Non-null only while a selection is active: a plain tap toggles this message. */
     onTapWhileSelecting: (() -> Unit)? = null,
+    /** The emoji I reacted with, or null. Drives the little button beside the bubble. */
+    myReaction: String? = null,
+    onReact: (String) -> Unit = {},
     /** True when this message is in the user's starred list (server-side). */
     isStarred: Boolean = false,
 ) {
@@ -3748,6 +3803,17 @@ private fun MessageBubble(
                         DeliveryTicks(state, metaColor)
                     }
                 }
+            }
+            // The react button rides in the gutter beside the bubble — outgoing on the
+            // left of it, incoming on the right, so it always sits toward the middle of
+            // the screen and never off the edge. Not offered on a tombstone.
+            if (!msg.isDeleted) {
+                Spacer(Modifier.width(2.dp))
+                ReactionButton(
+                    myReaction = myReaction,
+                    alignEnd = msg.fromMe,
+                    onReact = onReact,
+                )
             }
             if (!msg.fromMe) Spacer(Modifier.weight(1f))
         }
