@@ -69,15 +69,25 @@ object StickerStore {
      * list is then updated on the caller's dispatcher.
      */
     suspend fun add(context: Context, uri: Uri): Sticker? {
+        val bytes = withContext(Dispatchers.IO) {
+            runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+        }
+        return addFromBytes(context, bytes)
+    }
+
+    /**
+     * Adds a sticker straight from bytes — used when saving someone else's sticker to
+     * your favourites, where all we have are the downloaded/rendered bytes.
+     *
+     * GIF-or-not is decided by the file's OWN header (magic bytes), never by a picker's
+     * reported mime: trusting the mime meant a real GIF got decoded to a single PNG
+     * frame and sent as a still — the "sticker won't move" bug.
+     */
+    suspend fun addFromBytes(context: Context, bytes: ByteArray?): Sticker? {
+        if (bytes == null || bytes.isEmpty()) return null
         val list = stickers(context)
         val sticker = withContext(Dispatchers.IO) {
-            val cr = context.contentResolver
-            val bytes = runCatching { cr.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
-            if (bytes == null || bytes.isEmpty()) return@withContext null
-            // Decide GIF by the file's OWN header, not by getType(uri): the photo picker
-            // often reports a generic mime, and trusting it meant a real GIF got decoded
-            // to a single PNG frame and sent as a still — the "sticker won't move" bug.
-            val animated = looksLikeGif(bytes) || cr.getType(uri) == "image/gif"
+            val animated = looksLikeGif(bytes)
             val id = UUID.randomUUID().toString()
             val file = File(dir(context), "$id." + if (animated) "gif" else "png")
             val ok = runCatching {

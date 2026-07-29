@@ -1805,6 +1805,34 @@ fun ChatDetailScreen(
                 (System.currentTimeMillis() - msg.at) <= 10_000L,
             isPinned = pinnedId == msg.id,
             isTranslated = translations.containsKey(msg.id),
+            // Offer "save to my stickers" for a sticker message: a big-emoji sticker, or
+            // an image/GIF (that's how custom stickers ride the wire). Works on anyone's
+            // message — the point is grabbing someone else's sticker into your own tray.
+            canFavorite = !msg.isDeleted && (
+                msg.sticker != null ||
+                    (msg.media?.substringBefore('?')?.lowercase()?.let { u ->
+                        u.endsWith(".gif") || u.endsWith(".png") || u.endsWith(".jpg") ||
+                            u.endsWith(".jpeg") || u.endsWith(".webp")
+                    } == true)
+            ),
+            onAddFavorite = {
+                pendingMessage = null
+                scope.launch {
+                    val bytes = withContext(Dispatchers.IO) {
+                        when {
+                            msg.sticker != null -> emojiStickerPng(msg.sticker!!)
+                            msg.media != null -> chatMediaBytes(context, msg.media!!)
+                            else -> null
+                        }
+                    }
+                    val ok = com.example.syntra.net.StickerStore.addFromBytes(context, bytes) != null
+                    Toast.makeText(
+                        context,
+                        if (ok) "Ditambahkan ke stiker favorit" else "Gagal menambahkan stiker.",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            },
             onEdit = {
                 pendingMessage = null
                 editingId = msg.id
@@ -2162,6 +2190,8 @@ private fun MessageActionsDialog(
     canEdit: Boolean,
     isPinned: Boolean,
     isTranslated: Boolean,
+    canFavorite: Boolean = false,
+    onAddFavorite: () -> Unit = {},
     onEdit: () -> Unit,
     onCopy: () -> Unit,
     onPin: () -> Unit,
@@ -2227,6 +2257,9 @@ private fun MessageActionsDialog(
             if (!msg.isDeleted) {
                 MessageAction(if (isPinned) "Batalkan semat" else "Sematkan pesan", NexusTextPrimary, onPin)
             }
+            if (canFavorite) {
+                MessageAction("Tambahkan ke stiker favorit", NexusTextPrimary, onAddFavorite)
+            }
             if (msg.fromMe && !msg.isDeleted) {
                 MessageAction("Hapus untuk semua orang", Color(0xFFFF5D5D), onDeleteForEveryone)
             }
@@ -2234,6 +2267,34 @@ private fun MessageActionsDialog(
             MessageAction("Batal", NexusTextSecondary, onDismiss)
         }
     }
+}
+
+/** Reads the bytes behind a chat media reference — an https url, a content:// uri, or a
+ *  local file path — so a received sticker can be saved. Call off the main thread. */
+private fun chatMediaBytes(context: Context, media: String): ByteArray? = runCatching {
+    when {
+        media.startsWith("http") -> java.net.URL(media).openStream().use { it.readBytes() }
+        media.startsWith("content://") ->
+            context.contentResolver.openInputStream(android.net.Uri.parse(media))?.use { it.readBytes() }
+        else -> java.io.File(media).readBytes()
+    }
+}.getOrNull()
+
+/** Renders a big-emoji sticker onto a 512px transparent PNG so it can be saved to the
+ *  tray just like an image sticker. */
+private fun emojiStickerPng(emoji: String): ByteArray {
+    val size = 512
+    val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = size * 0.7f
+        textAlign = android.graphics.Paint.Align.CENTER
+    }
+    val fm = paint.fontMetrics
+    android.graphics.Canvas(bmp).drawText(emoji, size / 2f, size / 2f - (fm.ascent + fm.descent) / 2f, paint)
+    val out = java.io.ByteArrayOutputStream()
+    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+    bmp.recycle()
+    return out.toByteArray()
 }
 
 @Composable
