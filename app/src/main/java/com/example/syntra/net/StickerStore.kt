@@ -72,15 +72,20 @@ object StickerStore {
         val list = stickers(context)
         val sticker = withContext(Dispatchers.IO) {
             val cr = context.contentResolver
-            val animated = cr.getType(uri) == "image/gif"
+            val bytes = runCatching { cr.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+            if (bytes == null || bytes.isEmpty()) return@withContext null
+            // Decide GIF by the file's OWN header, not by getType(uri): the photo picker
+            // often reports a generic mime, and trusting it meant a real GIF got decoded
+            // to a single PNG frame and sent as a still — the "sticker won't move" bug.
+            val animated = looksLikeGif(bytes) || cr.getType(uri) == "image/gif"
             val id = UUID.randomUUID().toString()
             val file = File(dir(context), "$id." + if (animated) "gif" else "png")
             val ok = runCatching {
                 if (animated) {
-                    cr.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } }
-                        ?: return@runCatching false
+                    // Keep the GIF's bytes verbatim so every frame survives.
+                    file.writeBytes(bytes)
                 } else {
-                    val bmp = decodeDownsampled(context, uri) ?: return@runCatching false
+                    val bmp = decodeDownsampled(bytes) ?: return@runCatching false
                     file.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     bmp.recycle()
                 }
@@ -98,6 +103,10 @@ object StickerStore {
         return sticker
     }
 
+    /** GIF magic number: the file starts with the ASCII bytes "GIF" (GIF87a/GIF89a). */
+    private fun looksLikeGif(b: ByteArray): Boolean =
+        b.size >= 3 && b[0] == 'G'.code.toByte() && b[1] == 'I'.code.toByte() && b[2] == 'F'.code.toByte()
+
     /** Removes a sticker from the collection and deletes its file. */
     fun remove(context: Context, id: String) {
         val list = stickers(context)
@@ -108,14 +117,13 @@ object StickerStore {
         persist(context, list)
     }
 
-    private fun decodeDownsampled(context: Context, uri: Uri): Bitmap? {
-        val cr = context.contentResolver
+    private fun decodeDownsampled(bytes: ByteArray): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         var sample = 1
         while (bounds.outWidth / sample > MAX_DIM || bounds.outHeight / sample > MAX_DIM) sample *= 2
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        return cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
     }
 }
