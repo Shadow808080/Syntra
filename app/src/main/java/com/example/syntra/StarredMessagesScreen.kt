@@ -8,9 +8,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -39,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -181,43 +184,81 @@ private fun StarredRow(m: NetStarredMessage, onUnstar: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(NexusSurfaceElevated)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            // The rail has to match the card's height, and the card's height comes
+            // from its text — so the row is measured at its own intrinsic height and
+            // the rail fills that.
+            .height(IntrinsicSize.Min),
         verticalAlignment = Alignment.Top,
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                m.body.ifBlank {
-                    when (m.type) {
-                        "image" -> "[Foto]"
-                        "gif" -> "[GIF]"
-                        "video" -> "[Video]"
-                        "audio" -> "[Suara]"
-                        else -> "[Lampiran]"
-                    }
-                },
-                color = NexusTextPrimary,
-                fontSize = 14.sp,
-                lineHeight = 20.sp,
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (m.createdAt.isNotBlank()) {
-                Spacer(Modifier.height(5.dp))
-                Text(starredDate(m.createdAt), color = NexusTextSecondary, fontSize = 11.sp)
-            }
-        }
-        Spacer(Modifier.width(10.dp))
-        Icon(
-            Icons.Filled.Star, "Hapus dari berbintang",
-            tint = Color(0xFFFFC542),
+        // A gold rail down the left edge, the same gold as the star on the bubble.
+        //
+        // A plain surface card read exactly like every other list in the app, which
+        // is the opposite of what a keepsake list should feel like. The rail and a
+        // faint wash behind it make the two read as one idea: this is the message you
+        // set aside.
+        Box(
             modifier = Modifier
-                .size(20.dp)
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                    onClick = onUnstar,
-                ),
+                .width(3.dp)
+                .fillMaxHeight()
+                .background(StarGold),
         )
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .background(
+                    Brush.horizontalGradient(
+                        0f to StarGold.copy(alpha = 0.10f),
+                        0.5f to Color.Transparent,
+                    ),
+                )
+                .padding(start = 13.dp, end = 13.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    m.body.ifBlank {
+                        when (m.type) {
+                            "image" -> "[Foto]"
+                            "gif" -> "[GIF]"
+                            "video" -> "[Video]"
+                            "audio" -> "[Suara]"
+                            else -> "[Lampiran]"
+                        }
+                    },
+                    color = NexusTextPrimary,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (m.createdAt.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.Star, null,
+                            tint = StarGold.copy(alpha = 0.9f),
+                            modifier = Modifier.size(11.dp),
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text(starredDate(m.createdAt), color = NexusTextSecondary, fontSize = 11.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            // Tapping the star un-stars it — the same symbol that put it here takes
+            // it away, so there is nothing new to learn.
+            Icon(
+                Icons.Filled.Star, "Hapus dari berbintang",
+                tint = StarGold,
+                modifier = Modifier
+                    .size(20.dp)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onUnstar,
+                    ),
+            )
+        }
     }
 }
 

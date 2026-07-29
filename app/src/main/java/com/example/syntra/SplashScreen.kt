@@ -188,12 +188,6 @@ fun SyntraSplash(onDone: () -> Unit) {
                 fontSize = 27.sp,
                 fontWeight = FontWeight.ExtraBold,
             )
-            Spacer(Modifier.height(5.dp))
-            Text(
-                text = "Obrolan · Shorts · Rooms",
-                color = NexusTextSecondary.copy(alpha = settle.value * 0.9f),
-                fontSize = 12.sp,
-            )
         }
     }
 }

@@ -78,6 +78,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.EmojiEmotions
@@ -436,7 +437,19 @@ fun ChatDetailScreen(
     // banner at the top. On-device only until the backend gains a pin endpoint.
     var pinnedId by remember(conversation) { mutableStateOf(PinStore.get(context, conversation.id)) }
     // Ids of messages I've starred. Server-side and cross-device, unlike the pin.
+    //
+    // Seeded from the server on open: without this the star only survived as long as
+    // the screen did, so re-entering a chat showed every message as unstarred and the
+    // menu offered to star something that already was.
     val starredIds = remember(conversation) { mutableStateListOf<String>() }
+    LaunchedEffect(conversation.id) {
+        if (!ApiConfig.ENABLED) return@LaunchedEffect
+        runCatching { SyntraClient.getStarredMessages() }
+            .onSuccess { all ->
+                starredIds.clear()
+                starredIds.addAll(all.filter { it.conversationId == conversation.id }.map { it.id })
+            }
+    }
     // Per-message translations the user asked for (message id -> translated text).
     val translations = remember(conversation) { mutableStateMapOf<String, String>() }
     // A picked/captured photo waiting in the edit-before-send screen. Non-null shows
@@ -1446,6 +1459,8 @@ fun ChatDetailScreen(
                         reactions = aggregateReactions(reactions[msg.id]),
                         outgoingColor = chatTheme.bubble,
                         onLongPress = { pendingMessage = msg },
+                        isSelected = pendingMessage?.id == msg.id,
+                        isStarred = msg.id in starredIds,
                         onImageClick = {
                             // A video opens the player; a photo/GIF opens the image viewer.
                             if (it.isVideoUrl()) fullscreenVideo = it
@@ -2319,6 +2334,9 @@ private fun emojiStickerPng(emoji: String): ByteArray {
     bmp.recycle()
     return out.toByteArray()
 }
+
+/** The one colour a star is allowed to be, wherever it appears. */
+internal val StarGold = Color(0xFFFFC542)
 
 @Composable
 private fun MessageAction(label: String, tint: Color, onClick: () -> Unit) {
@@ -3288,6 +3306,10 @@ private fun MessageBubble(
     onHideTranslation: () -> Unit = {},
     viewOnceOpened: Boolean = false,
     onOpenViewOnce: (String) -> Unit = {},
+    /** True while this exact message is the one whose action sheet is open. */
+    isSelected: Boolean = false,
+    /** True when this message is in the user's starred list (server-side). */
+    isStarred: Boolean = false,
 ) {
     val context = LocalContext.current
     // Stickers float free — no bubble background behind a big emoji.
@@ -3319,7 +3341,28 @@ private fun MessageBubble(
     // Swipe-right-to-reply: drag the row, snap back, and fire onReply past a threshold.
     val swipeX = remember { Animatable(0f) }
     val swipeScope = rememberCoroutineScope()
-    Column(modifier = Modifier.fillMaxWidth()) {
+
+    // The row you long-pressed lifts out of the list while its menu is open.
+    //
+    // The action sheet used to be the only clue, and it merely repeated the first two
+    // lines of the text — in a run of similar messages ("ok", "ok", "ok") that is no
+    // clue at all, and it is the sheet that offers "Hapus untuk semua orang".
+    val selectTint by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
+        animationSpec = tween(160),
+        label = "select-tint",
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (selectTint > 0.01f) {
+                    Modifier.background(NexusAccent.copy(alpha = 0.16f * selectTint))
+                } else {
+                    Modifier
+                },
+            ),
+    ) {
         // Group chats: sender avatar + name sit ABOVE the message, on the first bubble
         // of a same-sender run. WhatsApp-style header over the chat.
         if (isGroup && !msg.fromMe && showSenderHeader) {
@@ -3576,6 +3619,18 @@ private fun MessageBubble(
                 ) {
                     if (msg.isEdited && !msg.isDeleted) {
                         Text(text = "diedit", color = metaColor, fontSize = 10.sp)
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    // A small gold star rides the metadata line, next to "diedit" —
+                    // that line is where a bubble says things ABOUT itself, and being
+                    // starred is exactly that.
+                    if (isStarred) {
+                        Icon(
+                            Icons.Filled.Star,
+                            contentDescription = "Berbintang",
+                            tint = StarGold,
+                            modifier = Modifier.size(11.dp),
+                        )
                         Spacer(Modifier.width(4.dp))
                     }
                     Text(text = msg.time, color = metaColor, fontSize = 10.sp)
