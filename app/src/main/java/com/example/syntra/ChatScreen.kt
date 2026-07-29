@@ -45,7 +45,9 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.union
@@ -91,6 +93,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -131,6 +134,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -1843,18 +1847,32 @@ private fun NotificationBell(unread: Int, onClick: () -> Unit) {
         if (unread > 0) {
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 9.dp, end = 9.dp)
-                    .size(if (unread > 9) 17.dp else 15.dp)
-                    .background(Color(0xFFFF4D5E), CircleShape)
-                    .border(1.5.dp, NexusBackground, CircleShape),
+                    // Anchored to the GLYPH, not the 46dp touch target. Aligning to
+                    // the target's corner floated the badge off into empty padding,
+                    // because the target is deliberately much larger than the bell.
+                    .align(Alignment.Center)
+                    .offset(x = 10.dp, y = (-9).dp)
+                    // Grows for "9+" instead of being clipped by a fixed circle.
+                    // RoundedCornerShape(50), not CircleShape: a circle on a
+                    // wider-than-tall box renders as an ellipse.
+                    .defaultMinSize(minWidth = 16.dp, minHeight = 16.dp)
+                    .background(Color(0xFFFF4D5E), RoundedCornerShape(50))
+                    .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     if (unread > 9) "9+" else "$unread",
                     color = Color.White,
-                    fontSize = 9.sp,
+                    fontSize = 10.sp,
+                    lineHeight = 10.sp,
                     fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    // Without this the font's own ascent/descent padding sits inside
+                    // a 16dp badge and pushes 10sp digits visibly low, clipping them.
+                    style = LocalTextStyle.current.copy(
+                        platformStyle = PlatformTextStyle(includeFontPadding = false),
+                    ),
                 )
             }
         }
