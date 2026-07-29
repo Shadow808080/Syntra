@@ -50,6 +50,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -403,6 +404,7 @@ fun MusicScreen(
                 onQueryChange = { query = it },
                 onOpenSearch = { searching = true },
                 onCloseSearch = { searching = false; query = "" },
+                onPublish = { pickAudio.launch(arrayOf("audio/*")) },
             )
 
             when {
@@ -568,6 +570,8 @@ private fun MusicTopBar(
     onQueryChange: (String) -> Unit,
     onOpenSearch: () -> Unit,
     onCloseSearch: () -> Unit,
+    /** Starts the publish-to-community flow. */
+    onPublish: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -611,6 +615,31 @@ private fun MusicTopBar(
         } else {
             Text("Musik", color = NexusTextPrimary, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
             Spacer(Modifier.weight(1f))
+            // Publish, as a headphone wearing a "+". It sat in the list as a full-width
+            // card, which put a one-off action in the middle of content you scroll past
+            // every time. Up here beside search it is available without being in the way.
+            Box(
+                modifier = Modifier.size(42.dp).clickable(
+                    indication = null, interactionSource = remember { MutableInteractionSource() },
+                    onClick = onPublish,
+                ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.Headphones, "Terbitkan lagu", tint = NexusTextPrimary, modifier = Modifier.size(24.dp))
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 6.dp, end = 5.dp)
+                        .size(14.dp)
+                        .clip(CircleShape)
+                        // Ringed in the bar's own colour so the badge reads as attached
+                        // to the headphones rather than floating over them.
+                        .background(NexusBackground),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.Add, null, tint = NexusAccentSoft, modifier = Modifier.size(12.dp))
+                }
+            }
             Box(
                 modifier = Modifier.size(42.dp).clickable(
                     indication = null, interactionSource = remember { MutableInteractionSource() },
@@ -691,12 +720,11 @@ private fun MusicBrowseBody(
 
         // Community uploads — public tracks other people added from their devices.
         //
-        // The publish entry point lives HERE, with the thing it feeds. It used to be
-        // the "tambahkan lagu dari penyimpanan" banner at the top, which is what made
-        // publishing look like it was how you got your own files into the app.
-        item { SectionHeader("Unggahan komunitas") }
-        item { PublishMusicCard(onClick = onPublish) }
+        // The publish action is the headphone-with-a-plus in the top bar now — a
+        // one-off action does not belong as a full-width card in the middle of content
+        // you scroll past every time.
         if (communityTracks.isNotEmpty()) {
+            item { SectionHeader("Unggahan komunitas") }
             item {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
@@ -1274,34 +1302,6 @@ private fun SectionHeader(title: String) {
 }
 
 /** Device-music add banner — a big tappable card with the "+" at the start. */
-@Composable
-private fun PublishMusicCard(onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 4.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(NexusSurface)
-            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier.size(46.dp).clip(RoundedCornerShape(12.dp)).background(ShortsTealMusic.copy(alpha = 0.16f)),
-            contentAlignment = Alignment.Center,
-        ) { Icon(Icons.Filled.Add, null, tint = ShortsTealMusic, modifier = Modifier.size(24.dp)) }
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text("Terbitkan lagu", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(2.dp))
-            // Says plainly that this makes it PUBLIC — the old wording ("tambahkan
-            // lagu dari penyimpanan") never did, so people used it expecting a
-            // private import.
-            Text("Bagikan ke komunitas agar bisa dicari orang lain", color = NexusTextSecondary, fontSize = 12.sp)
-        }
-    }
-}
-
 @Composable
 private fun DeviceMusicCard(count: Int, onOpen: () -> Unit) {
     Row(

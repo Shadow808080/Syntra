@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Search
@@ -145,7 +146,22 @@ private fun NetRoom.toUi() = Room(
     hostCoverUrl = hostCoverUrl,
 )
 
-private val filters = listOf("Semua", "Tech", "Music", "Chill")
+/**
+ * How the list is ordered.
+ *
+ * This replaces a category filter whose categories were hardcoded ("Semua · Tech ·
+ * Music · Chill") and matched by substring against a free-text topic. Nobody types
+ * "Tech" into a room topic, so every filter but "Semua" showed an empty list — a row
+ * of chips that mostly proved the feed was empty.
+ *
+ * Ordering works on data every room actually has, and there are only two answers
+ * worth offering, so it is a toggle rather than a menu: one tap, and the control
+ * states its own current value.
+ */
+private enum class RoomSort(val label: String) {
+    NEWEST("Terbaru"),
+    BUSIEST("Paling ramai"),
+}
 
 /**
  * How many rooms get their avatar stack fetched. Faces are card decoration, so there
@@ -170,7 +186,7 @@ fun RoomsScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var selectedFilter by remember { mutableIntStateOf(0) }
+    var sort by remember { mutableStateOf(RoomSort.NEWEST) }
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     // Room currently joined and shown full-screen (null = browsing the list).
@@ -307,15 +323,18 @@ fun RoomsScreen(
         onDispose { SyntraClient.removeListener(listener) }
     }
 
-    // Topic chip AND the search box both narrow the same list.
+    // Search narrows; the sort toggle orders. `allRooms` already arrives newest-first,
+    // so NEWEST keeps that order rather than inventing one from a field we don't have.
     val visibleRooms = allRooms
-        .filter { selectedFilter == 0 || it.topic.contains(filters[selectedFilter], ignoreCase = true) }
         .filter { r ->
             val q = searchQuery.trim()
             q.isEmpty() ||
                 r.title.contains(q, ignoreCase = true) ||
                 r.topic.contains(q, ignoreCase = true) ||
                 r.hostName.contains(q, ignoreCase = true)
+        }
+        .let { list ->
+            if (sort == RoomSort.BUSIEST) list.sortedByDescending { it.participantCount } else list
         }
 
     Box(
@@ -355,6 +374,10 @@ fun RoomsScreen(
                         showCreate = true
                     }
                 },
+                sort = sort,
+                onToggleSort = {
+                    sort = if (sort == RoomSort.NEWEST) RoomSort.BUSIEST else RoomSort.NEWEST
+                },
                 onShuffle = {
                     // Pick from what's actually joinable and on screen, not from the
                     // raw list: offering a room the filter has hidden, or one the SFU
@@ -376,10 +399,8 @@ fun RoomsScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
-                item {
-                    FilterRow(selected = selectedFilter, onSelect = { selectedFilter = it })
-                }
-                item { Spacer(Modifier.height(8.dp)) }
+                // The category chip row is gone — sorting lives in the header now.
+                item { Spacer(Modifier.height(4.dp)) }
 
                 when {
                     // The pull-to-refresh spinner already says "loading"; a second
@@ -390,7 +411,6 @@ fun RoomsScreen(
                         RoomsPlaceholder(
                             when {
                                 searchQuery.isNotBlank() -> "Tidak ada room yang cocok dengan \"$searchQuery\"."
-                                selectedFilter != 0 -> "Belum ada room di kategori ${filters[selectedFilter]}."
                                 else -> "Belum ada room yang aktif.\nBuat satu lewat tombol mikrofon di atas."
                             },
                         )
@@ -598,6 +618,8 @@ private fun RoomsHeader(
     onToggleSearch: () -> Unit,
     onCreate: () -> Unit,
     onShuffle: () -> Unit,
+    sort: RoomSort,
+    onToggleSort: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -613,6 +635,12 @@ private fun RoomsHeader(
         // the bottom corner, sitting on top of the last card in the list.
         Row(verticalAlignment = Alignment.CenterVertically) {
             CreateRoomButton(onClick = onCreate)
+            Spacer(Modifier.width(12.dp))
+            // Sits right beside the create button as a quiet counterweight: one is the
+            // thing you do, the other is how you look. A pill rather than an icon
+            // because the answer ("Terbaru" / "Paling ramai") IS the control — an icon
+            // would need a menu to say the same thing.
+            SortPill(sort = sort, onToggle = onToggleSort)
             Spacer(Modifier.weight(1f))
             // Drop into a random live room — the reason a hub like this exists is to
             // find rooms you weren't looking for. Disabled when there is nothing live,
@@ -858,46 +886,36 @@ private fun LivePulseDot() {
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun FilterRow(selected: Int, onSelect: (Int) -> Unit) {
-    LazyRow(
+private fun SortPill(sort: RoomSort, onToggle: () -> Unit) {
+    Row(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 14.dp),
-        contentPadding = PaddingValues(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            .clip(RoundedCornerShape(50))
+            .background(NexusSurface)
+            .border(1.dp, NexusStroke, RoundedCornerShape(50))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onToggle,
+            )
+            .padding(start = 11.dp, end = 13.dp, top = 7.dp, bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        itemsIndexed(filters) { index, label ->
-            val isSelected = index == selected
-            val base = Modifier
-                .clip(RoundedCornerShape(50))
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                ) { onSelect(index) }
-            Box(
-                modifier = if (isSelected) {
-                    base.background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
-                } else {
-                    base
-                        .background(NexusSurface)
-                        .border(1.dp, NexusStroke, RoundedCornerShape(50))
-                }.padding(horizontal = 18.dp, vertical = 9.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = label,
-                    color = if (isSelected) Color.White else NexusTextSecondary,
-                    fontSize = 13.sp,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
-                )
-            }
-        }
+        Icon(
+            Icons.Filled.SwapVert,
+            contentDescription = "Ubah urutan",
+            tint = NexusAccentSoft,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = sort.label,
+            color = NexusTextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
     }
 }
-
-// ---------------------------------------------------------------------------
-// Room card
-// ---------------------------------------------------------------------------
 
 @Composable
 private fun RoomCard(

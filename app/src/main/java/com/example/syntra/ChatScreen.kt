@@ -1109,6 +1109,21 @@ fun ChatScreen(
             .fillMaxSize()
             .background(NexusBackground),
     ) {
+        // The shawl lives HERE, at the root, drawn before anything else.
+        //
+        // It used to be a child of the story rail, which meant its canvas was the
+        // rail's own box and every stroke was clipped to it — scaling and offsetting
+        // the layer could not help, because a layer cannot paint outside the bounds it
+        // was given. To actually run up behind the header and off the top of the
+        // screen, it has to BE at the top of the screen. This Box is edge-to-edge, so
+        // y=0 here is above the status bar; the header and list draw over it.
+        StoryAuroraBackground(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(280.dp)
+                .align(Alignment.TopCenter),
+        )
+
         Column(modifier = Modifier.fillMaxSize()) {
             NexusHeader(
                 searching = searching,
@@ -1916,22 +1931,9 @@ private fun ActiveRow(
         // The rail sits over a slow, wavy AURORA that flows the full width BEHIND the
         // avatars (drawn first, so it never covers the story UI — only peeks through
         // the gaps between profiles).
+        // No aurora here any more — it is drawn at the screen root so it can run up
+        // behind the header. See ChatScreen's root Box.
         Box(modifier = Modifier.fillMaxWidth()) {
-            // The cloth is drawn TALLER than the rail and offset upward, so it runs up
-            // behind the "Cerita" header and the app bar above it instead of starting
-            // abruptly at the top of the avatars. Clipping it to the rail's own height
-            // cut the drape off at exactly the point it should be flowing past.
-            StoryAuroraBackground(
-                modifier = Modifier
-                    .matchParentSize()
-                    .graphicsLayer {
-                        // Grown and lifted rather than re-laid-out: the canvas keeps the
-                        // rail's own bounds (so nothing below shifts) while the drape it
-                        // paints extends well past the top of that box.
-                        scaleY = 2.6f
-                        translationY = -size.height * 0.55f
-                    },
-            )
             LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
