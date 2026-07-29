@@ -77,8 +77,11 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.automirrored.filled.Reply
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.EmojiEmotions
@@ -431,7 +434,7 @@ fun ChatDetailScreen(
     // The message being replied to (swipe right on a bubble), null when not replying.
     var replyingTo by remember(conversation) { mutableStateOf<Message?>(null) }
     // The message currently being edited (its text is loaded into the composer), or
-    // null. Editing is only offered within 10s of sending — see MessageActionsDialog.
+    // null. Editing is only offered within 10s of sending — see SelectionTopBar.
     var editingId by remember(conversation) { mutableStateOf<String?>(null) }
     // Locally pinned message id for this conversation (sematkan pesan) — shown as a
     // banner at the top. On-device only until the backend gains a pin endpoint.
@@ -518,7 +521,19 @@ fun ChatDetailScreen(
         mutableStateOf(maxOfNullable(delivered, read))
     }
     var confirmClear by remember(conversation) { mutableStateOf(false) }
-    var pendingMessage by remember(conversation) { mutableStateOf<Message?>(null) }
+    /**
+     * Ids of the messages currently selected.
+     *
+     * This replaces a single `pendingMessage` + bottom sheet. One-at-a-time meant
+     * deleting five messages was five long-presses and five trips through the same
+     * sheet, and the sheet itself never showed WHICH message it was about beyond
+     * echoing two lines of its text.
+     */
+    val selectedIds = remember(conversation) { mutableStateListOf<String>() }
+    // Back peels off the selection first, the way it does on the chat list. Leaving
+    // the whole conversation because you wanted to un-pick one message is a jarring
+    // amount of undo for a wrong tap.
+    BackHandler(enabled = selectedIds.isNotEmpty()) { selectedIds.clear() }
     var fullscreenImage by remember(conversation) { mutableStateOf<String?>(null) }
     // A chat video opened for full-screen playback (its URL), or null.
     var fullscreenVideo by remember(conversation) { mutableStateOf<String?>(null) }
@@ -1302,6 +1317,164 @@ fun ChatDetailScreen(
             // through; child buttons/rows still get theirs first.
             .pointerInput(Unit) { detectTapGestures {} },
     ) {
+        if (selectedIds.isNotEmpty()) {
+            val picked = messages.filter { it.id in selectedIds }
+            val one = picked.singleOrNull()
+            val mine = SyntraClient.myUserId
+            SelectionTopBar(
+                count = picked.size,
+                // Edit stays a 10-second window on my own text message.
+                singleCanEdit = one != null && one.fromMe && !one.isDeleted && one.media == null &&
+                    (System.currentTimeMillis() - one.at) <= 10_000L,
+                singleCanCopy = one != null && !one.isDeleted && one.text.isNotBlank(),
+                // A sticker to lift: a big-emoji sticker, or an image/GIF (which is how
+                // custom stickers ride the wire). Anyone's message — that IS the point.
+                singleCanFavorite = one != null && !one.isDeleted && (
+                    one.sticker != null ||
+                        (one.media?.substringBefore('?')?.lowercase()?.let { u ->
+                            u.endsWith(".gif") || u.endsWith(".png") || u.endsWith(".jpg") ||
+                                u.endsWith(".jpeg") || u.endsWith(".webp")
+                        } == true)
+                    ),
+                singleIsPinned = one != null && pinnedId == one.id,
+                singleIsTranslated = one != null && translations.containsKey(one.id),
+                allStarred = picked.isNotEmpty() && picked.all { it.id in starredIds },
+                anyMine = picked.any { it.fromMe && !it.isDeleted },
+                onClose = { selectedIds.clear() },
+                onReply = { one?.let { replyingTo = it }; selectedIds.clear() },
+                onCopy = {
+                    one?.let {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("pesan", it.text))
+                        Toast.makeText(context, "Pesan disalin.", Toast.LENGTH_SHORT).show()
+                    }
+                    selectedIds.clear()
+                },
+                onStar = {
+                    // One decision for the whole selection: if every one is starred,
+                    // this un-stars them; otherwise it stars the rest. Toggling each
+                    // independently would leave a mixed set doing two things at once.
+                    val target = picked.toList()
+                    val turnOn = !target.all { it.id in starredIds }
+                    selectedIds.clear()
+                    target.forEach { m ->
+                        if (turnOn) { if (m.id !in starredIds) starredIds.add(m.id) } else starredIds.remove(m.id)
+                        scope.launch {
+                            runCatching { SyntraClient.starMessage(m.id, turnOn) }
+                                .onFailure {
+                                    if (turnOn) starredIds.remove(m.id) else starredIds.add(m.id)
+                                }
+                        }
+                    }
+                },
+                onEdit = {
+                    one?.let {
+                        editingId = it.id
+                        replyingTo = null
+                        input = it.text
+                        showEmoji = false
+                        fieldFocus.requestFocus()
+                        keyboard?.show()
+                    }
+                    selectedIds.clear()
+                },
+                onPin = {
+                    one?.let {
+                        if (pinnedId == it.id) { PinStore.clear(context, conversation.id); pinnedId = null }
+                        else { PinStore.set(context, conversation.id, it.id); pinnedId = it.id }
+                    }
+                    selectedIds.clear()
+                },
+                onTranslate = {
+                    val m = one
+                    selectedIds.clear()
+                    if (m != null) {
+                        if (translations.containsKey(m.id)) {
+                            translations.remove(m.id)
+                        } else {
+                            scope.launch {
+                                val result = Translate.translate(m.text)
+                                if (result != null && result != m.text) translations[m.id] = result
+                                else Toast.makeText(context, "Tidak bisa menerjemahkan.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                },
+                onAddFavorite = {
+                    val m = one
+                    selectedIds.clear()
+                    if (m != null) {
+                        scope.launch {
+                            val bytes = withContext(Dispatchers.IO) {
+                                when {
+                                    m.sticker != null -> emojiStickerPng(m.sticker!!)
+                                    m.media != null -> chatMediaBytes(context, m.media!!)
+                                    else -> null
+                                }
+                            }
+                            val ok = com.example.syntra.net.StickerStore.addFromBytes(context, bytes) != null
+                            Toast.makeText(
+                                context,
+                                if (ok) "Ditambahkan ke stiker favorit" else "Gagal menambahkan stiker.",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
+                },
+                onDeleteForMe = {
+                    val target = picked.toList()
+                    selectedIds.clear()
+                    target.forEach { m ->
+                        // Record the decision on this device BEFORE dropping it, or the
+                        // next sync pulls it straight back — a delete that undoes itself.
+                        HiddenMessageStore.hide(context, m.id)
+                        MessageCache.remove(context, conversation.id, m.id)
+                        messages.remove(m)
+                        reactions.remove(m.id)
+                    }
+                },
+                myReaction = one?.let { m -> mine?.let { reactions[m.id]?.get(it) } },
+                onReact = { emoji ->
+                    val m = one
+                    selectedIds.clear()
+                    if (m != null && ApiConfig.ENABLED && mine != null) {
+                        // Tapping the emoji I already picked clears it (toggle).
+                        val base = reactions[m.id].orEmpty()
+                        val next = if (base[mine] == emoji) "" else emoji
+                        reactions[m.id] = if (next.isBlank()) base - mine else base + (mine to next)
+                        scope.launch { runCatching { SyntraClient.reactToMessage(m.id, next) } }
+                    }
+                },
+                onDeleteForEveryone = {
+                    val target = picked.filter { it.fromMe && !it.isDeleted }
+                    selectedIds.clear()
+                    target.forEach { m ->
+                        scope.launch {
+                            runCatching { SyntraClient.deleteMessage(m.id) }
+                                .onSuccess {
+                                    // Keep the tombstone (matches what the peer sees).
+                                    val i = messages.indexOfFirst { it.id == m.id }
+                                    if (i >= 0) {
+                                        messages[i] = messages[i].copy(
+                                            text = "Pesan ini dihapus", media = null, isDeleted = true,
+                                        )
+                                    }
+                                    reactions.remove(m.id)
+                                    MessageCache.remove(context, conversation.id, m.id)
+                                }
+                                .onFailure {
+                                    val why = if ((it as? ApiException)?.code == "not_found") {
+                                        "Server belum mendukung hapus untuk semua orang."
+                                    } else {
+                                        it.message ?: "Gagal menghapus."
+                                    }
+                                    Toast.makeText(context, why, Toast.LENGTH_LONG).show()
+                                }
+                        }
+                    }
+                },
+            )
+        } else {
         DetailTopBar(
             convo = conversation,
             // A blocked person is not "online" and is not "typing" to you. Leaking
@@ -1350,6 +1523,7 @@ fun ChatDetailScreen(
                 }
             },
         )
+        }
 
         // Pinned-message banner (sematkan pesan). Tap to jump to it, X to unpin.
         pinnedId?.let { pid ->
@@ -1458,8 +1632,22 @@ fun ChatDetailScreen(
                         showSenderHeader = !sameSenderAsOlder,
                         reactions = aggregateReactions(reactions[msg.id]),
                         outgoingColor = chatTheme.bubble,
-                        onLongPress = { pendingMessage = msg },
-                        isSelected = pendingMessage?.id == msg.id,
+                        onLongPress = {
+                            if (msg.id in selectedIds) selectedIds.remove(msg.id)
+                            else selectedIds.add(msg.id)
+                        },
+                        // While selecting, a plain tap adds/removes too — having to
+                        // long-press every single message to build a selection is the
+                        // part that makes multi-select feel worse than doing it once.
+                        onTapWhileSelecting = if (selectedIds.isEmpty()) {
+                            null
+                        } else {
+                            {
+                                if (msg.id in selectedIds) selectedIds.remove(msg.id)
+                                else selectedIds.add(msg.id)
+                            }
+                        },
+                        isSelected = msg.id in selectedIds,
                         isStarred = msg.id in starredIds,
                         onImageClick = {
                             // A video opens the player; a photo/GIF opens the image viewer.
@@ -1813,148 +2001,6 @@ fun ChatDetailScreen(
         )
     }
 
-    pendingMessage?.let { msg ->
-        val mine = SyntraClient.myUserId
-        MessageActionsDialog(
-            msg = msg,
-            // Edit is offered only for my own text message, within 10s of sending.
-            canEdit = msg.fromMe && !msg.isDeleted && msg.media == null &&
-                (System.currentTimeMillis() - msg.at) <= 10_000L,
-            isPinned = pinnedId == msg.id,
-            isStarred = msg.id in starredIds,
-            isTranslated = translations.containsKey(msg.id),
-            // Offer "save to my stickers" for a sticker message: a big-emoji sticker, or
-            // an image/GIF (that's how custom stickers ride the wire). Works on anyone's
-            // message — the point is grabbing someone else's sticker into your own tray.
-            canFavorite = !msg.isDeleted && (
-                msg.sticker != null ||
-                    (msg.media?.substringBefore('?')?.lowercase()?.let { u ->
-                        u.endsWith(".gif") || u.endsWith(".png") || u.endsWith(".jpg") ||
-                            u.endsWith(".jpeg") || u.endsWith(".webp")
-                    } == true)
-            ),
-            onAddFavorite = {
-                pendingMessage = null
-                scope.launch {
-                    val bytes = withContext(Dispatchers.IO) {
-                        when {
-                            msg.sticker != null -> emojiStickerPng(msg.sticker!!)
-                            msg.media != null -> chatMediaBytes(context, msg.media!!)
-                            else -> null
-                        }
-                    }
-                    val ok = com.example.syntra.net.StickerStore.addFromBytes(context, bytes) != null
-                    Toast.makeText(
-                        context,
-                        if (ok) "Ditambahkan ke stiker favorit" else "Gagal menambahkan stiker.",
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                }
-            },
-            onEdit = {
-                pendingMessage = null
-                editingId = msg.id
-                replyingTo = null
-                input = msg.text
-                showEmoji = false
-                fieldFocus.requestFocus()
-                keyboard?.show()
-            },
-            onCopy = {
-                pendingMessage = null
-                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("pesan", msg.text))
-                Toast.makeText(context, "Pesan disalin.", Toast.LENGTH_SHORT).show()
-            },
-            onPin = {
-                pendingMessage = null
-                if (pinnedId == msg.id) {
-                    PinStore.clear(context, conversation.id); pinnedId = null
-                } else {
-                    PinStore.set(context, conversation.id, msg.id); pinnedId = msg.id
-                }
-            },
-            onStar = {
-                pendingMessage = null
-                val now = msg.id !in starredIds
-                // Optimistic, and put back if the server refuses — the star is drawn
-                // from this set, so it must never claim something that didn't happen.
-                if (now) starredIds.add(msg.id) else starredIds.remove(msg.id)
-                scope.launch {
-                    runCatching { SyntraClient.starMessage(msg.id, now) }
-                        .onFailure {
-                            if (now) starredIds.remove(msg.id) else starredIds.add(msg.id)
-                            Toast.makeText(context, "Gagal: ${it.message}", Toast.LENGTH_SHORT).show()
-                        }
-                }
-            },
-            onTranslate = {
-                pendingMessage = null
-                if (translations.containsKey(msg.id)) {
-                    translations.remove(msg.id)
-                } else {
-                    scope.launch {
-                        val result = Translate.translate(msg.text)
-                        if (result != null && result != msg.text) {
-                            translations[msg.id] = result
-                        } else {
-                            Toast.makeText(context, "Tidak bisa menerjemahkan.", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            },
-            myReaction = mine?.let { reactions[msg.id]?.get(it) },
-            onReact = { emoji ->
-                pendingMessage = null
-                if (ApiConfig.ENABLED && mine != null) {
-                    // Tapping the emoji I already picked clears it (toggle).
-                    val base = reactions[msg.id].orEmpty()
-                    val next = if (base[mine] == emoji) "" else emoji
-                    reactions[msg.id] = if (next.isBlank()) base - mine else base + (mine to next)
-                    scope.launch { runCatching { SyntraClient.reactToMessage(msg.id, next) } }
-                }
-            },
-            onDismiss = { pendingMessage = null },
-            onDeleteForMe = {
-                pendingMessage = null
-                // Record the decision on this device BEFORE dropping it from the list.
-                // Without this the message came back on the next open, because the
-                // cache and the server still had it — a delete that undoes itself.
-                HiddenMessageStore.hide(context, msg.id)
-                MessageCache.remove(context, conversation.id, msg.id)
-                messages.remove(msg)
-                reactions.remove(msg.id)
-            },
-            onDeleteForEveryone = {
-                pendingMessage = null
-                scope.launch {
-                    runCatching { SyntraClient.deleteMessage(msg.id) }
-                        .onSuccess {
-                            // Keep the tombstone (matches what the peer sees), don't drop it.
-                            val i = messages.indexOfFirst { it.id == msg.id }
-                            if (i >= 0) {
-                                messages[i] = messages[i].copy(
-                                    text = "Pesan ini dihapus",
-                                    media = null,
-                                    isDeleted = true,
-                                )
-                            }
-                            reactions.remove(msg.id)
-                            MessageCache.remove(context, conversation.id, msg.id)
-                        }
-                        .onFailure {
-                            val why = if ((it as? ApiException)?.code == "not_found") {
-                                "Server belum mendukung hapus untuk semua orang."
-                            } else {
-                                it.message ?: "Gagal menghapus."
-                            }
-                            Toast.makeText(context, why, Toast.LENGTH_LONG).show()
-                        }
-                }
-            },
-        )
-    }
-
     if (confirmClear) {
         ClearChatDialog(
             name = conversation.name,
@@ -2212,101 +2258,6 @@ fun ChatDetailScreen(
     // keeps running (as a floating window) even after you leave this chat.
 }
 
-/** Long-press a bubble. "For everyone" only makes sense for messages I sent. */
-private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
-
-@Composable
-private fun MessageActionsDialog(
-    msg: Message,
-    myReaction: String?,
-    canEdit: Boolean,
-    isPinned: Boolean,
-    isStarred: Boolean = false,
-    isTranslated: Boolean,
-    canFavorite: Boolean = false,
-    onAddFavorite: () -> Unit = {},
-    onEdit: () -> Unit,
-    onCopy: () -> Unit,
-    onPin: () -> Unit,
-    onStar: () -> Unit = {},
-    onTranslate: () -> Unit,
-    onReact: (String) -> Unit,
-    onDismiss: () -> Unit,
-    onDeleteForMe: () -> Unit,
-    onDeleteForEveryone: () -> Unit,
-) {
-    Dialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
-                .padding(vertical = 18.dp),
-        ) {
-            // Quick-reaction row — hidden for a message that's already deleted.
-            if (!msg.isDeleted) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    QUICK_REACTIONS.forEach { emoji ->
-                        val picked = emoji == myReaction
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .background(
-                                    if (picked) NexusAccent.copy(alpha = 0.25f) else Color.Transparent,
-                                    CircleShape,
-                                )
-                                .clickable(
-                                    indication = null,
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    onClick = { onReact(emoji) },
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(emoji, fontSize = 22.sp)
-                        }
-                    }
-                }
-                Spacer(Modifier.height(14.dp))
-            }
-            Text(
-                text = msg.text,
-                color = NexusTextSecondary,
-                fontSize = 13.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 22.dp),
-            )
-            Spacer(Modifier.height(14.dp))
-            if (canEdit) {
-                MessageAction("Edit pesan", NexusTextPrimary, onEdit)
-            }
-            if (!msg.isDeleted && msg.text.isNotBlank()) {
-                MessageAction("Salin", NexusTextPrimary, onCopy)
-                MessageAction(if (isTranslated) "Sembunyikan terjemahan" else "Terjemahkan", NexusTextPrimary, onTranslate)
-            }
-            if (!msg.isDeleted) {
-                MessageAction(if (isPinned) "Batalkan semat" else "Sematkan pesan", NexusTextPrimary, onPin)
-                // Starring is server-side and cross-device, unlike pinning (which is
-                // per-conversation). The endpoints have existed since the beginning
-                // with nothing in the app ever calling them.
-                MessageAction(if (isStarred) "Hapus dari berbintang" else "Tandai berbintang", NexusTextPrimary, onStar)
-            }
-            if (canFavorite) {
-                MessageAction("Tambahkan ke stiker favorit", NexusTextPrimary, onAddFavorite)
-            }
-            if (msg.fromMe && !msg.isDeleted) {
-                MessageAction("Hapus untuk semua orang", Color(0xFFFF5D5D), onDeleteForEveryone)
-            }
-            MessageAction("Hapus untuk saya", NexusTextPrimary, onDeleteForMe)
-            MessageAction("Batal", NexusTextSecondary, onDismiss)
-        }
-    }
-}
-
 /** Reads the bytes behind a chat media reference — an https url, a content:// uri, or a
  *  local file path — so a received sticker can be saved. Call off the main thread. */
 private fun chatMediaBytes(context: Context, media: String): ByteArray? = runCatching {
@@ -2338,21 +2289,177 @@ private fun emojiStickerPng(emoji: String): ByteArray {
 /** The one colour a star is allowed to be, wherever it appears. */
 internal val StarGold = Color(0xFFFFC542)
 
+/** The one-tap reactions offered on a selected message. */
+private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
+/**
+ * The header that takes over while messages are selected.
+ *
+ * Everything that used to be in the long-press bottom sheet lives here now: the
+ * common actions as icons, the rest behind the three-dot. The point of moving it is
+ * that a sheet is inherently about ONE thing — it opened over a single message and
+ * closed after a single action — so deleting five messages meant five long-presses
+ * through five identical sheets.
+ *
+ * Actions gate on [count]: replying to, editing, copying, translating, pinning or
+ * lifting a sticker out of *several* messages at once has no meaning, so those
+ * disappear rather than acting on an arbitrary one of them.
+ */
 @Composable
-private fun MessageAction(label: String, tint: Color, onClick: () -> Unit) {
-    Text(
-        text = label,
-        color = tint,
-        fontSize = 15.sp,
+private fun SelectionTopBar(
+    count: Int,
+    singleCanEdit: Boolean,
+    singleCanCopy: Boolean,
+    singleCanFavorite: Boolean,
+    singleIsPinned: Boolean,
+    singleIsTranslated: Boolean,
+    allStarred: Boolean,
+    anyMine: Boolean,
+    onClose: () -> Unit,
+    onReply: () -> Unit,
+    onCopy: () -> Unit,
+    onStar: () -> Unit,
+    onEdit: () -> Unit,
+    onPin: () -> Unit,
+    onTranslate: () -> Unit,
+    onAddFavorite: () -> Unit,
+    onDeleteForMe: () -> Unit,
+    onDeleteForEveryone: () -> Unit,
+    myReaction: String?,
+    onReact: (String) -> Unit,
+) {
+    val single = count == 1
+    Column(
         modifier = Modifier
             .fillMaxWidth()
+            .background(NexusSurfaceElevated)
+            .windowInsetsPadding(WindowInsets.statusBars),
+    ) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SelectionIcon(Icons.Filled.Close, "Batal pilih", onClose)
+        Text(
+            text = "$count",
+            color = NexusTextPrimary,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 6.dp),
+        )
+        Spacer(Modifier.weight(1f))
+
+        if (single) SelectionIcon(Icons.AutoMirrored.Filled.Reply, "Balas", onReply)
+        if (singleCanCopy && single) SelectionIcon(Icons.Filled.ContentCopy, "Salin", onCopy)
+        // Starring is the one action that reads naturally in bulk.
+        SelectionIcon(
+            icon = if (allStarred) Icons.Filled.Star else Icons.Filled.StarBorder,
+            description = if (allStarred) "Hapus dari berbintang" else "Tandai berbintang",
+            onClick = onStar,
+            tint = if (allStarred) StarGold else NexusTextPrimary,
+        )
+
+        Box {
+            var open by remember { mutableStateOf(false) }
+            SelectionIcon(Icons.Filled.MoreVert, "Lainnya", onClick = { open = true })
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                if (single && singleCanEdit) {
+                    DropdownMenuItem(
+                        text = { Text("Edit pesan", color = NexusTextPrimary) },
+                        onClick = { open = false; onEdit() },
+                    )
+                }
+                if (single) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (singleIsTranslated) "Sembunyikan terjemahan" else "Terjemahkan",
+                                color = NexusTextPrimary,
+                            )
+                        },
+                        onClick = { open = false; onTranslate() },
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (singleIsPinned) "Batalkan semat" else "Sematkan pesan", color = NexusTextPrimary)
+                        },
+                        onClick = { open = false; onPin() },
+                    )
+                }
+                if (single && singleCanFavorite) {
+                    DropdownMenuItem(
+                        text = { Text("Tambahkan ke stiker favorit", color = NexusTextPrimary) },
+                        onClick = { open = false; onAddFavorite() },
+                    )
+                }
+                if (anyMine) {
+                    DropdownMenuItem(
+                        text = { Text("Hapus untuk semua orang", color = Color(0xFFFF5D5D)) },
+                        onClick = { open = false; onDeleteForEveryone() },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Hapus untuk saya", color = NexusTextPrimary) },
+                    onClick = { open = false; onDeleteForMe() },
+                )
+            }
+        }
+    }
+
+    // The quick-reaction row followed the bottom sheet out, and reacting has no other
+    // entry point — so it comes back here, on its own line, for a single message only.
+    // Reacting to five messages with one tap is not a thing anyone means to do.
+    if (single) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            QUICK_REACTIONS.forEach { emoji ->
+                val picked = myReaction == emoji
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(if (picked) NexusAccent.copy(alpha = 0.25f) else Color.Transparent)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { onReact(emoji) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(emoji, fontSize = 21.sp)
+                }
+            }
+        }
+    }
+    }
+}
+
+@Composable
+private fun SelectionIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    onClick: () -> Unit,
+    tint: Color = NexusTextPrimary,
+) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
             .clickable(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onClick,
-            )
-            .padding(horizontal = 22.dp, vertical = 14.dp),
-    )
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, description, tint = tint, modifier = Modifier.size(21.dp))
+    }
 }
 
 @Composable
@@ -3308,6 +3415,8 @@ private fun MessageBubble(
     onOpenViewOnce: (String) -> Unit = {},
     /** True while this exact message is the one whose action sheet is open. */
     isSelected: Boolean = false,
+    /** Non-null only while a selection is active: a plain tap toggles this message. */
+    onTapWhileSelecting: (() -> Unit)? = null,
     /** True when this message is in the user's starred list (server-side). */
     isStarred: Boolean = false,
 ) {
@@ -3400,7 +3509,7 @@ private fun MessageBubble(
                 .combinedClickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
-                    onClick = {},
+                    onClick = { onTapWhileSelecting?.invoke() },
                     onLongClick = onLongPress,
                 )
                 .pointerInput(msg.id) {
@@ -3431,7 +3540,7 @@ private fun MessageBubble(
                     .combinedClickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
-                        onClick = {},
+                        onClick = { onTapWhileSelecting?.invoke() },
                         onLongClick = onLongPress,
                     )
                     .padding(
