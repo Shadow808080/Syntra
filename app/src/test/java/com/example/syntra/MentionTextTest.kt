@@ -101,6 +101,39 @@ class MentionTextTest {
     }
 
     @Test
+    fun `a known handle renders as the display name but still links the handle`() {
+        val names = mapOf("reza" to "Reza Ramadhan")
+        val built = mentionedText("halo @reza", Color.Blue, { names[it] }) {}
+        // The reader sees the name…
+        assertEquals("halo @Reza Ramadhan", built.text)
+        // …while the link still carries the username, which is what the backend and
+        // the profile lookup actually understand.
+        assertEquals(
+            listOf("reza"),
+            built.getLinkAnnotations(0, built.length)
+                .mapNotNull { (it.item as? LinkAnnotation.Clickable)?.tag }
+                .map { it.removePrefix("mention:") },
+        )
+    }
+
+    @Test
+    fun `an unknown handle falls back to the raw username`() {
+        val built = mentionedText("halo @reza", Color.Blue, { null }) {}
+        assertEquals("halo @reza", built.text)
+    }
+
+    @Test
+    fun `punctuation after a substituted name is kept`() {
+        val names = mapOf("reza" to "Reza Ramadhan")
+        // "@reza." — the regex keeps the trailing dot in the match, so it has to be
+        // re-attached after the name rather than swallowed.
+        assertEquals(
+            "terima kasih @Reza Ramadhan.",
+            mentionedText("terima kasih @reza.", Color.Blue, { names[it] }) {}.text,
+        )
+    }
+
+    @Test
     fun `tapping a mention reports the stripped handle`() {
         var tapped: String? = null
         val built = mentionedText("halo @reza!", Color.Blue) { tapped = it }

@@ -2239,6 +2239,12 @@ private fun highlightHashtags(caption: String) = buildAnnotatedString {
 internal fun mentionedText(
     text: String,
     mentionColour: Color,
+    /**
+     * Turns a handle into the display name to SHOW. The stored text stays
+     * `@username` (the backend scans it to raise the notification) — only what the
+     * reader sees changes. Defaults to showing the handle unchanged.
+     */
+    nameOf: (String) -> String? = { null },
     onOpenUser: (String) -> Unit,
 ) = buildAnnotatedString {
     // Scanned with a regex over the WHOLE string rather than split on " ".
@@ -2263,6 +2269,11 @@ internal fun mentionedText(
         val word = m.value
         val handle = word.substring(1).trimEnd('.')
         if (word[0] == '@' && handle.isNotEmpty()) {
+            // Show the name, link the handle. Any punctuation the regex kept (a
+            // trailing dot) rides along after the substituted name.
+            val shown = nameOf(handle)?.takeIf { it.isNotBlank() }
+                ?.let { "@" + it + word.substring(1 + handle.length) }
+                ?: word
             withLink(
                 LinkAnnotation.Clickable(
                     tag = "mention:$handle",
@@ -2270,7 +2281,7 @@ internal fun mentionedText(
                         style = SpanStyle(color = mentionColour, fontWeight = FontWeight.SemiBold),
                     ),
                 ) { onOpenUser(handle) },
-            ) { append(word) }
+            ) { append(shown) }
         } else if (word[0] == '#' && handle.isNotEmpty()) {
             withStyle(SpanStyle(color = ShortsTeal, fontWeight = FontWeight.SemiBold)) { append(word) }
         } else {
@@ -2961,6 +2972,14 @@ private fun ReelCommentsSheet(
         runCatching { SyntraClient.getReelComments(reel.id) }
             .onSuccess { comments.clear(); comments.addAll(it) }
         loading = false
+        // Names for the @mentions in these comments. Authors are free — we already
+        // have their names — and only the handles still unknown after that cost a
+        // request. Done after the list is on screen, so it never delays it.
+        val fresh = comments.toList()
+        fresh.forEach { com.example.syntra.net.MentionNames.remember(it.username, it.displayName) }
+        fresh.flatMap { com.example.syntra.net.MentionNames.handlesIn(it.body) }
+            .distinct()
+            .forEach { com.example.syntra.net.MentionNames.resolve(it) }
     }
 
     LaunchedEffect(reel.id) { refresh() }
@@ -3593,7 +3612,23 @@ private fun CommentRow(
             }
             Spacer(Modifier.width(4.dp))
         }
-        CommentAvatar(url = c.avatarUrl, name = name, size = if (isReply) 30.dp else 38.dp)
+        // Avatar and name open the author's profile — the two things everyone taps
+        // expecting exactly that. Not offered on my own comment (it would just open
+        // my profile from inside my own post) or while one is still sending.
+        val canOpenAuthor = !isMine && !c.pending && c.username.isNotBlank()
+        val openAuthor = Modifier.then(
+            if (canOpenAuthor) {
+                Modifier.clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { onOpenUser(c.username) }
+            } else {
+                Modifier
+            },
+        )
+        Box(modifier = openAuthor) {
+            CommentAvatar(url = c.avatarUrl, name = name, size = if (isReply) 30.dp else 38.dp)
+        }
         Spacer(Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3605,7 +3640,7 @@ private fun CommentRow(
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier.weight(1f, fill = false).then(openAuthor),
                 )
                 if (isMine) {
                     // A small pill badge, same idea as "Anda" on your own Shorts.
@@ -3672,7 +3707,12 @@ private fun CommentRow(
             if (c.body.isNotBlank()) {
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    mentionedText(c.body, NexusAccentSoft, onOpenUser),
+                    mentionedText(
+                        text = c.body,
+                        mentionColour = NexusAccentSoft,
+                        nameOf = { com.example.syntra.net.MentionNames.known(it) },
+                        onOpenUser = onOpenUser,
+                    ),
                     color = NexusTextPrimary.copy(alpha = 0.92f),
                     fontSize = 14.sp,
                     lineHeight = 19.sp,
@@ -3989,7 +4029,14 @@ private fun TagPeopleSheet(onDismiss: () -> Unit, onPick: (String) -> Unit) {
                                     .clickable(
                                         indication = null,
                                         interactionSource = remember { MutableInteractionSource() },
-                                    ) { onPick(u.username) }
+                                    ) {
+                                        // We already have their name right here, so the
+                                        // mention can render as a name immediately
+                                        // instead of showing the handle until a lookup
+                                        // catches up.
+                                        com.example.syntra.net.MentionNames.remember(u.username, u.displayName)
+                                        onPick(u.username)
+                                    }
                                     .padding(horizontal = 20.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {

@@ -1,114 +1,24 @@
 package com.example.syntra.net
 
 import android.content.Context
-import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 
 /**
- * The user's own audio files, picked from device storage, so they appear in the
- * Music tab next to the online catalogue and survive app restarts.
+ * Reads the tags out of ONE audio file the user just picked.
  *
- * A file is referenced by its `content://` Uri with a *persisted* read grant, so
- * playback still works after the process dies. Title/artist/duration and any
- * embedded cover art are read once via [MediaMetadataRetriever]; the cover is
- * cached to a file so Coil can display it. Stored as a small JSON array in
- * SharedPreferences — no backend involved; these tracks are private to the device.
+ * This used to be a curated library: files added one at a time through a picker and
+ * persisted as JSON in SharedPreferences. That whole idea is gone — the phone's music
+ * is [DeviceAudio]'s MediaStore query now, which needs no bookkeeping and cannot
+ * drift out of sync with the filesystem. What remains is the one job that query
+ * cannot do: reading title/artist/duration/cover from an arbitrary picked file to
+ * prefill the publish form and size the trim slider.
  */
 object LocalMusicStore {
-    private const val PREF = "local_music"
-    private const val KEY = "tracks"
 
-    fun list(context: Context): List<MusicTrack> {
-        val raw = prefs(context).getString(KEY, null) ?: return emptyList()
-        return runCatching {
-            val arr = JSONArray(raw)
-            (0 until arr.length()).map { i ->
-                val o = arr.getJSONObject(i)
-                val uri = o.getString("uri")
-                MusicTrack(
-                    id = uri,
-                    title = o.optString("title"),
-                    artist = o.optString("artist"),
-                    artworkUrl = o.optString("art").ifBlank { null },
-                    previewUrl = uri,
-                    durationSec = o.optInt("dur"),
-                )
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    /** Import a freshly picked audio [uri]; returns the updated list. */
-    fun add(context: Context, uri: Uri): List<MusicTrack> {
-        runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-        }
-        val existing = list(context)
-        if (existing.any { it.id == uri.toString() }) return existing
-        val updated = existing + readMetadata(context, uri)
-        save(context, updated)
-        return updated
-    }
-
-    /**
-     * Reads a picked file's title/artist/duration/cover WITHOUT saving it — used by
-     * the upload screen to prefill the form and drive the trim slider's length.
-     */
     fun probe(context: Context, uri: Uri): MusicTrack = readMetadata(context, uri)
-
-    /**
-     * Appends an already-formed [track] (e.g. a clip we just uploaded, whose
-     * [MusicTrack.previewUrl] is a public URL) and returns the updated list. Unlike
-     * [add] this does not re-read metadata — the caller already set title/artist.
-     */
-    fun addTrack(context: Context, track: MusicTrack): List<MusicTrack> {
-        val existing = list(context)
-        if (existing.any { it.id == track.id }) return existing
-        val updated = existing + track
-        save(context, updated)
-        return updated
-    }
-
-    fun remove(context: Context, id: String): List<MusicTrack> {
-        val updated = list(context).filterNot { it.id == id }
-        save(context, updated)
-        runCatching { context.contentResolver.releasePersistableUriPermission(Uri.parse(id), Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-        return updated
-    }
-
-    /** Renames a device track; blank titles are ignored. Returns the updated list. */
-    fun setTitle(context: Context, id: String, title: String): List<MusicTrack> {
-        val clean = title.trim()
-        if (clean.isBlank()) return list(context)
-        val updated = list(context).map { if (it.id == id) it.copy(title = clean) else it }
-        save(context, updated)
-        return updated
-    }
-
-    private fun prefs(context: Context) =
-        context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-
-    private fun save(context: Context, tracks: List<MusicTrack>) {
-        val arr = JSONArray()
-        tracks.forEach { t ->
-            arr.put(
-                JSONObject().apply {
-                    put("uri", t.previewUrl)
-                    put("title", t.title)
-                    put("artist", t.artist)
-                    put("art", t.artworkUrl ?: "")
-                    put("dur", t.durationSec)
-                },
-            )
-        }
-        prefs(context).edit().putString(KEY, arr.toString()).apply()
-    }
 
     private fun readMetadata(context: Context, uri: Uri): MusicTrack {
         val r = MediaMetadataRetriever()

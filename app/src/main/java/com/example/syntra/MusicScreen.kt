@@ -49,6 +49,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -117,6 +118,7 @@ import com.example.syntra.net.MusicBrowse
 import com.example.syntra.net.MusicClient
 import com.example.syntra.net.MusicPlayer
 import com.example.syntra.net.MusicPlaylist
+import com.example.syntra.net.DeviceAudio
 import com.example.syntra.net.MusicTrack
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
@@ -172,15 +174,28 @@ fun MusicScreen(
     var query by remember { mutableStateOf("") }
     var detail by remember { mutableStateOf<MusicDetail?>(null) }
 
-    // The user's own audio, picked from device storage. Loaded once, then kept in
-    // sync as files are added/removed. These play through the same MusicPlayer.
+    // The music actually on this phone, read from MediaStore. A query, not a
+    // collection — nothing here is stored by us and nothing is uploaded.
     val localTracks = remember { mutableStateListOf<MusicTrack>() }
-    LaunchedEffect(Unit) {
-        val saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            com.example.syntra.net.LocalMusicStore.list(context)
+    var scanningDevice by remember { mutableStateOf(false) }
+
+    suspend fun scanDevice() {
+        if (!DeviceAudio.hasPermission(context)) { localTracks.clear(); return }
+        scanningDevice = true
+        val found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            DeviceAudio.list(context)
         }
-        localTracks.clear(); localTracks.addAll(saved)
+        localTracks.clear(); localTracks.addAll(found)
+        scanningDevice = false
     }
+
+    val askAudioPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) scope.launch { scanDevice() } }
+
+    // Scan on entry when we already have the grant, so the card shows a real count
+    // instead of asking for permission before anyone has expressed interest.
+    LaunchedEffect(Unit) { scanDevice() }
     // Public, community-uploaded tracks (searchable across users). Best-effort: the
     // backend endpoint may not exist yet, in which case this stays empty.
     val communityTracks = remember { mutableStateListOf<MusicTrack>() }
@@ -254,12 +269,9 @@ fun MusicScreen(
             .onFailure { failed = true }
         runCatching { com.example.syntra.net.SyntraClient.getMusicFeed() }
             .onSuccess { communityTracks.clear(); communityTracks.addAll(it) }
-        // Device library too — a track published elsewhere should appear here.
-        runCatching {
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                com.example.syntra.net.LocalMusicStore.list(context)
-            }
-        }.onSuccess { localTracks.clear(); localTracks.addAll(it) }
+        // Re-scan the phone as well, so a song added to the device since the last
+        // look shows up. Nothing to do with the community feed above it.
+        scanDevice()
         loading = false
     }
 
@@ -364,11 +376,11 @@ fun MusicScreen(
                 published
             }
             result
-                .onSuccess { track ->
-                    val updated = kotlinx.coroutines.withContext(io) {
-                        com.example.syntra.net.LocalMusicStore.addTrack(context, track)
-                    }
-                    localTracks.clear(); localTracks.addAll(updated)
+                .onSuccess { _ ->
+                    // Publishing puts a track in the PUBLIC catalogue. It used to also
+                    // insert it into the device list, which is what made "lagu dari
+                    // penyimpanan" look like it only worked after an upload. The device
+                    // list is MediaStore; publishing does not change what is on the phone.
                     reloadCommunity()
                     publishOk = true
                     publishStatus = "Lagu diterbitkan"
@@ -452,19 +464,20 @@ fun MusicScreen(
                         }
                     },
                     onPlay = play,
-                    onAddLocal = { pickAudio.launch(arrayOf("audio/*")) },
-                    onRemoveLocal = { t ->
-                        scope.launch {
-                            val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                com.example.syntra.net.LocalMusicStore.remove(context, t.id)
-                            }
-                            localTracks.clear(); localTracks.addAll(updated)
-                        }
-                    },
+                    onPublish = { pickAudio.launch(arrayOf("audio/*")) },
                     onOpenPlaylist = { detail = MusicDetail.Playlist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
-                    onOpenLocal = { detail = MusicDetail.Local(localTracks) },
+                    onOpenLocal = {
+                    // Ask only when the folder is actually opened — a permission prompt
+                    // on entering the Music tab is a demand before an intention.
+                    if (DeviceAudio.hasPermission(context)) {
+                        scope.launch { scanDevice() }
+                        detail = MusicDetail.Local(localTracks)
+                    } else {
+                        askAudioPermission.launch(DeviceAudio.permission)
+                    }
+                },
                     // An artist chip drops you into search for that name — the liked
                     // list only knows the artist's name, not the catalogue id needed
                     // to open their page directly.
@@ -482,14 +495,6 @@ fun MusicScreen(
                 detail = d,
                 onBack = { detail = null },
                 onPlay = play,
-                onRemoveLocal = { t ->
-                    scope.launch {
-                        val updated = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            com.example.syntra.net.LocalMusicStore.remove(context, t.id)
-                        }
-                        localTracks.clear(); localTracks.addAll(updated)
-                    }
-                },
             )
         }
 
@@ -630,8 +635,8 @@ private fun MusicBrowseBody(
     onDeleteCommunity: (MusicTrack) -> Unit = {},
     onEditCommunityTitle: (MusicTrack, String) -> Unit = { _, _ -> },
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
-    onAddLocal: () -> Unit,
-    onRemoveLocal: (MusicTrack) -> Unit,
+    /** Opens the picker that starts the PUBLISH flow — unrelated to the device list. */
+    onPublish: () -> Unit,
     onOpenPlaylist: (MusicPlaylist) -> Unit,
     onOpenAlbum: (MusicAlbum) -> Unit,
     onOpenArtist: (MusicArtist) -> Unit,
@@ -675,20 +680,23 @@ private fun MusicBrowseBody(
             }
         }
 
-        // Device music — the user's own files, always first. No section header/title
-        // anymore: the add-from-storage banner IS the entry point (its "+" sits at the
-        // start), and it stays put whether or not the user has added tracks yet.
-        item { LocalMusicEmpty(onAddLocal) }
-        // Lagu dari penyimpanan tampil sebagai satu kartu bergaya album, tepat di bawah
-        // banner "Tambahkan lagu dari penyimpanan". Mengetuknya membuka halaman daftar
-        // lagu lokal (header + Putar + daftar lengkap).
-        if (localTracks.isNotEmpty()) {
-            item { LocalLibraryCard(tracks = localTracks, onOpen = onOpenLocal) }
-        }
+        // Device music — ONE card, always present, opening the phone's own library.
+        //
+        // There used to be two: a "+ tambahkan dari penyimpanan" banner that opened a
+        // file picker one song at a time, and a library card shown only once something
+        // had been added. Since the thing that populated that list was the PUBLIC
+        // publish flow, the local feature appeared to come alive only after an upload
+        // it has nothing to do with. Now it is a straight read of MediaStore.
+        item { DeviceMusicCard(count = localTracks.size, onOpen = onOpenLocal) }
 
         // Community uploads — public tracks other people added from their devices.
+        //
+        // The publish entry point lives HERE, with the thing it feeds. It used to be
+        // the "tambahkan lagu dari penyimpanan" banner at the top, which is what made
+        // publishing look like it was how you got your own files into the app.
+        item { SectionHeader("Unggahan komunitas") }
+        item { PublishMusicCard(onClick = onPublish) }
         if (communityTracks.isNotEmpty()) {
-            item { SectionHeader("Unggahan komunitas") }
             item {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
@@ -1022,7 +1030,6 @@ private fun MusicDetailScreen(
     detail: MusicDetail,
     onBack: () -> Unit,
     onPlay: (MusicTrack, List<MusicTrack>) -> Unit,
-    onRemoveLocal: (MusicTrack) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -1131,14 +1138,11 @@ private fun MusicDetailScreen(
                     }
                 }
             } else if (localList != null) {
-                // Device songs: playable rows that keep the remove (×) button.
-                items(shown, key = { it.id }) { t ->
-                    LocalTrackRow(
-                        track = t,
-                        onClick = { onPlay(t, shown.toList()) },
-                        onRemove = { onRemoveLocal(t) },
-                    )
-                }
+                // Device songs are a READ of MediaStore, so there is nothing to remove
+                // — the file belongs to the phone, not to us. The × used to delete an
+                // entry from our own curated list; keeping it here would either do
+                // nothing or imply we had deleted someone's music.
+                items(shown, key = { it.id }) { t -> TrackRow(t) { onPlay(t, shown.toList()) } }
             } else {
                 items(shown, key = { it.id }) { t -> TrackRow(t) { onPlay(t, shown.toList()) } }
             }
@@ -1271,59 +1275,77 @@ private fun SectionHeader(title: String) {
 
 /** Device-music add banner — a big tappable card with the "+" at the start. */
 @Composable
-private fun LocalMusicEmpty(onAdd: () -> Unit) {
+private fun PublishMusicCard(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(NexusSurface)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.size(46.dp).clip(RoundedCornerShape(12.dp)).background(ShortsTealMusic.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Filled.Add, null, tint = ShortsTealMusic, modifier = Modifier.size(24.dp)) }
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Terbitkan lagu", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(2.dp))
+            // Says plainly that this makes it PUBLIC — the old wording ("tambahkan
+            // lagu dari penyimpanan") never did, so people used it expecting a
+            // private import.
+            Text("Bagikan ke komunitas agar bisa dicari orang lain", color = NexusTextSecondary, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun DeviceMusicCard(count: Int, onOpen: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 20.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(NexusSurface)
-            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onAdd)
-            .padding(horizontal = 16.dp, vertical = 16.dp),
-        // Top-aligned, not centred. The tile is 46dp against two lines of text, so
-        // centring floated it between them and left it pointing at the gap rather than
-        // at the label it belongs to. Aligned to the top it reads with the title.
-        verticalAlignment = Alignment.Top,
-    ) {
-        Box(
-            modifier = Modifier.size(46.dp).clip(RoundedCornerShape(10.dp)).background(NexusAccent.copy(alpha = 0.16f)),
-            contentAlignment = Alignment.Center,
-        ) { Icon(Icons.Filled.Add, null, tint = NexusAccentSoft, modifier = Modifier.size(24.dp)) }
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text("Tambahkan lagu dari penyimpanan", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(2.dp))
-            Text("Putar file musik yang tersimpan di perangkatmu", color = NexusTextSecondary, fontSize = 12.sp)
-        }
-    }
-}
-
-/**
- * The device library as one album-style card. Tapping it opens the full local list
- * (header art + "Putar" + every track), like an album page.
- */
-@Composable
-private fun LocalLibraryCard(tracks: List<MusicTrack>, onOpen: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(NexusSurface)
             .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onOpen)
-            .padding(12.dp),
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ArtworkImage(
-            url = rememberTrackArt(tracks.firstOrNull()),
-            modifier = Modifier.size(52.dp).clip(RoundedCornerShape(10.dp)),
-        )
+        // A folder with a note in the corner — it has to say "files on this phone"
+        // before it says "music", because everything else on this screen is music
+        // and none of it is local.
+        Box(
+            modifier = Modifier.size(46.dp).clip(RoundedCornerShape(12.dp)).background(NexusAccent.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Filled.Folder, null, tint = NexusAccentSoft, modifier = Modifier.size(25.dp))
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 5.dp, bottom = 5.dp)
+                    .size(15.dp)
+                    .clip(CircleShape)
+                    .background(NexusSurface),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.MusicNote, null, tint = NexusAccentSoft, modifier = Modifier.size(11.dp))
+            }
+        }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text("Lagu di perangkat", color = NexusTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(2.dp))
-            Text("${tracks.size} lagu tersimpan", color = NexusTextSecondary, fontSize = 12.sp)
+            Text(
+                // The card is here from the first launch, so it has to make sense
+                // before anything has been scanned.
+                if (count > 0) "$count lagu di penyimpanan telepon" else "Buka folder musik di teleponmu",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
+            )
         }
         Icon(
             Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1331,39 +1353,6 @@ private fun LocalLibraryCard(tracks: List<MusicTrack>, onOpen: () -> Unit) {
             tint = NexusTextSecondary,
             modifier = Modifier.size(22.dp),
         )
-    }
-}
-
-/** A device-music row: artwork · title/artist · remove. Read-only (from file), just plays. */
-@Composable
-private fun LocalTrackRow(
-    track: MusicTrack,
-    onClick: () -> Unit,
-    onRemove: () -> Unit,
-) {
-    val isCurrent = MusicPlayer.current?.id == track.id
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
-            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.height(2.dp))
-            Text(track.artist, color = NexusTextSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        if (isCurrent) { NowPlayingBadge(); Spacer(Modifier.width(4.dp)) }
-        Box(
-            modifier = Modifier.size(40.dp).clickable(
-                indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onRemove,
-            ),
-            contentAlignment = Alignment.Center,
-        ) { Icon(Icons.Filled.Close, "Hapus dari daftar", tint = NexusTextSecondary, modifier = Modifier.size(18.dp)) }
     }
 }
 
