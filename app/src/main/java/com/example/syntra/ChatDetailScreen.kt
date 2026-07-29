@@ -1160,6 +1160,22 @@ fun ChatDetailScreen(
         }
     }
 
+    /** Send one of the user's saved stickers — reads its local file and rides the same
+     *  media pipeline as a photo/GIF, so it renders bubble-less like any sticker. */
+    fun sendStickerFile(s: com.example.syntra.net.StickerStore.Sticker) {
+        if (!ApiConfig.ENABLED) return
+        scope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { java.io.File(s.path).readBytes() }.getOrNull()
+            }
+            when {
+                bytes == null -> Toast.makeText(context, "Gagal memuat stiker.", Toast.LENGTH_SHORT).show()
+                s.animated -> sendMedia("image", "gif", "image/gif", bytes)
+                else -> sendMedia("image", "png", "image/png", bytes)
+            }
+        }
+    }
+
     /**
      * Puts an already-optimistically-rendered message on the wire.
      *
@@ -1732,6 +1748,10 @@ fun ChatDetailScreen(
                 onBackspace = { input = input.dropLast(1) },
                 onSticker = { emoji ->
                     sendSticker(emoji)
+                    showEmoji = false
+                },
+                onImageSticker = { s ->
+                    sendStickerFile(s)
                     showEmoji = false
                 },
                 onOpenGif = {

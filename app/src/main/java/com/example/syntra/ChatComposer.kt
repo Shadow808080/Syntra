@@ -67,6 +67,15 @@ import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import coil.compose.AsyncImage
+import com.example.syntra.net.StickerStore
 
 // ---------------------------------------------------------------------------
 // Emoji picker
@@ -110,14 +119,18 @@ private val stickerSet = (
     ).split(" ")
 
 /**
- * Emoji keyboard + sticker picker. The Emoji tab inserts into the message field;
- * the Stiker tab sends a big-emoji sticker straight away via [onSticker].
+ * Emoji keyboard + sticker picker. The Emoji tab inserts into the message field; the
+ * Stiker tab sends a big-emoji sticker via [onSticker] OR one of the user's own image
+ * stickers via [onImageSticker], and lets them add new ones from the gallery.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun EmojiPicker(
     onPick: (String) -> Unit,
     onBackspace: () -> Unit,
     onSticker: (String) -> Unit = {},
+    /** A saved image/GIF sticker the user tapped — sent through the media pipeline. */
+    onImageSticker: (StickerStore.Sticker) -> Unit = {},
     // Tapping the GIF tab opens the draggable GIF bottom-sheet (rendered by the host),
     // instead of a cramped inline panel — so it can be pulled up and its search field
     // rides above the keyboard.
@@ -126,6 +139,15 @@ fun EmojiPicker(
     // 0 = emoji (insert into field), 1 = stickers. GIF is a separate bottom-sheet.
     var mode by remember { mutableStateOf(0) }
     var group by remember { mutableStateOf(0) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // The user's own sticker tray (device-local), observed live.
+    val myStickers = StickerStore.stickers(context)
+    var removeTarget by remember { mutableStateOf<StickerStore.Sticker?>(null) }
+    // Add-a-sticker: pick an image or GIF from the gallery, copy it into the tray.
+    val addSticker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> if (uri != null) scope.launch { StickerStore.add(context, uri) } }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -152,6 +174,46 @@ fun EmojiPicker(
                 columns = GridCells.Fixed(5),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
             ) {
+                // Add your own sticker (image or GIF from the gallery).
+                item {
+                    Box(
+                        modifier = Modifier
+                            .padding(6.dp)
+                            .size(58.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(NexusSurfaceElevated)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) {
+                                addSticker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Filled.Add, "Tambah stiker", tint = NexusAccent, modifier = Modifier.size(26.dp))
+                    }
+                }
+                // The user's own image / GIF stickers. Tap to send, long-press to remove.
+                items(myStickers, key = { it.id }) { s ->
+                    AsyncImage(
+                        model = s.path,
+                        contentDescription = "Stiker",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .padding(6.dp)
+                            .size(58.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .combinedClickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                                onClick = { onImageSticker(s) },
+                                onLongClick = { removeTarget = s },
+                            ),
+                    )
+                }
+                // Built-in big-emoji stickers.
                 items(stickerSet) { emoji ->
                     Text(
                         text = emoji,
@@ -163,6 +225,52 @@ fun EmojiPicker(
                             ) { onSticker(emoji) }
                             .padding(10.dp),
                     )
+                }
+            }
+            // Confirm before removing one of the user's stickers.
+            removeTarget?.let { s ->
+                Dialog(onDismissRequest = { removeTarget = null }) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(NexusSurfaceElevated, RoundedCornerShape(20.dp))
+                            .padding(20.dp),
+                    ) {
+                        Text("Hapus stiker ini?", color = NexusTextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Stiker akan dihapus dari koleksimu di perangkat ini.",
+                            color = NexusTextSecondary, fontSize = 13.sp,
+                        )
+                        Spacer(Modifier.height(18.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            Text(
+                                "Batal",
+                                color = NexusTextSecondary,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { removeTarget = null }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "Hapus",
+                                color = DangerFill,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { StickerStore.remove(context, s.id); removeTarget = null }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                            )
+                        }
+                    }
                 }
             }
             return@Column
