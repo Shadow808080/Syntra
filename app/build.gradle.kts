@@ -130,6 +130,10 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     testImplementation(libs.junit)
+    // UploadCenter and the socket layer are coroutine machinery; testing them without
+    // a controllable dispatcher means testing them with sleeps, which is how you get a
+    // suite that fails on a busy machine and passes on a quiet one.
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
