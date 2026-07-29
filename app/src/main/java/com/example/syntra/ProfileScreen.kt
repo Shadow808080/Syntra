@@ -161,6 +161,12 @@ fun ProfileScreen(
     var optionsFor by remember { mutableStateOf<NetReel?>(null) }
     // Short whose caption is being edited (null = none).
     var editCaptionFor by remember { mutableStateOf<NetReel?>(null) }
+    // Which people list is open over the profile (null = none).
+    var peopleList by remember { mutableStateOf<PeopleList?>(null) }
+    // How many follow requests are waiting. Only ever non-zero on a private account.
+    var pendingRequests by remember { mutableIntStateOf(0) }
+    // A profile opened FROM one of those lists.
+    var openOtherProfile by remember { mutableStateOf<String?>(null) }
     // Reel awaiting a report reason.
     var reportFor by remember { mutableStateOf<NetReel?>(null) }
     // When set, opens the full-screen swipeable reel viewer at this index.
@@ -283,6 +289,10 @@ fun ProfileScreen(
             val myShorts = if (isMe) SyntraClient.getMyReels() else SyntraClient.getUserReels(username!!)
             shorts.clear(); shorts.addAll(myShorts.distinctBy { it.id })
             if (isMe) {
+                // Silent: a public account always returns an empty list, so a failure
+                // here must not take the whole profile load down with it.
+                runCatching { SyntraClient.getFollowRequests().size }
+                    .onSuccess { pendingRequests = it }
                 val sv = SyntraClient.getSavedReels()
                 saved.clear(); saved.addAll(sv.distinctBy { it.id })
                 // Who viewed me — best effort, never blocks the profile.
@@ -404,7 +414,18 @@ fun ProfileScreen(
                             }
                         },
                         onVisitorsClick = { showVisitors = true },
+                        onOpenFollowers = { peopleList = PeopleList.FOLLOWERS },
+                        onOpenFollowing = { if (isMe) peopleList = PeopleList.FOLLOWING },
                     )
+                    // Pending follow requests, own profile only. Shown as a row rather
+                    // than buried in Settings: a request that nobody ever sees is the
+                    // whole reason private accounts were a dead end.
+                    if (isMe && pendingRequests > 0) {
+                        FollowRequestsRow(
+                            count = pendingRequests,
+                            onClick = { peopleList = PeopleList.REQUESTS },
+                        )
+                    }
                     if (isMe) {
                         EditProfileButton(onClick = { showEditProfile = true })
                     } else if (user != null) {
@@ -520,6 +541,29 @@ fun ProfileScreen(
             onRemove = { showCoverOptions = false; deleteCover() },
             onDismiss = { showCoverOptions = false },
         )
+    }
+
+    // Followers / following / pending requests, full-screen over the profile.
+    peopleList?.let { kind ->
+        PeopleListScreen(
+            kind = kind,
+            username = if (kind == PeopleList.FOLLOWERS && !isMe) username else null,
+            onClose = {
+                peopleList = null
+                // Coming back from the requests list, the count has probably changed.
+                if (kind == PeopleList.REQUESTS) {
+                    scope.launch {
+                        runCatching { SyntraClient.getFollowRequests().size }
+                            .onSuccess { pendingRequests = it }
+                    }
+                }
+            },
+            onOpenProfile = { uname -> peopleList = null; openOtherProfile = uname },
+        )
+    }
+
+    openOtherProfile?.let { uname ->
+        ProfileScreen(username = uname, onClose = { openOtherProfile = null })
     }
 
     // Full-screen swipeable reel viewer (opened by tapping a thumbnail).
@@ -745,6 +789,8 @@ private fun ProfileHeaderHero(
     onAvatarTap: () -> Unit,
     onEditCover: () -> Unit,
     onVisitorsClick: () -> Unit,
+    onOpenFollowers: () -> Unit = {},
+    onOpenFollowing: () -> Unit = {},
 ) {
     val coverHeight = 172.dp
     Box(Modifier.fillMaxWidth()) {
@@ -833,9 +879,26 @@ private fun ProfileHeaderHero(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                StatCell(user?.followingCount ?: 0, "Mengikuti", Modifier.weight(1f))
+                // The counts are now doors, not decoration: tapping them opens the
+                // actual lists. "Pengikut" in particular had no way of being seen
+                // anywhere in the app, even though the endpoint has always existed.
+                StatCell(
+                    user?.followingCount ?: 0, "Mengikuti",
+                    Modifier.weight(1f).clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onOpenFollowing,
+                    ),
+                )
                 StatDivider()
-                StatCell(user?.followerCount ?: 0, "Pengikut", Modifier.weight(1f))
+                StatCell(
+                    user?.followerCount ?: 0, "Pengikut",
+                    Modifier.weight(1f).clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onOpenFollowers,
+                    ),
+                )
                 StatDivider()
                 StatCell(totalLikes, "Suka", Modifier.weight(1f))
             }
@@ -1449,6 +1512,36 @@ private fun ReelOptionsSheet(
  * thumbnail, and quietly changing who can see a post is not something that should
  * live one accidental tap away from "Hapus".
  */
+/** The "N orang menunggu persetujuan" row on your own private profile. */
+@Composable
+private fun FollowRequestsRow(count: Int, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(NexusAccent.copy(alpha = 0.12f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.PersonAdd, null, tint = NexusAccentSoft, modifier = Modifier.size(19.dp))
+        Spacer(Modifier.width(12.dp))
+        Text(
+            "$count permintaan mengikuti menunggu",
+            color = NexusTextPrimary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f),
+        )
+        Text("Lihat", color = NexusAccentSoft, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
 @Composable
 private fun EditCaptionDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var text by remember { mutableStateOf(initial) }

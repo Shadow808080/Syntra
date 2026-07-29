@@ -435,6 +435,8 @@ fun ChatDetailScreen(
     // Locally pinned message id for this conversation (sematkan pesan) — shown as a
     // banner at the top. On-device only until the backend gains a pin endpoint.
     var pinnedId by remember(conversation) { mutableStateOf(PinStore.get(context, conversation.id)) }
+    // Ids of messages I've starred. Server-side and cross-device, unlike the pin.
+    val starredIds = remember(conversation) { mutableStateListOf<String>() }
     // Per-message translations the user asked for (message id -> translated text).
     val translations = remember(conversation) { mutableStateMapOf<String, String>() }
     // A picked/captured photo waiting in the edit-before-send screen. Non-null shows
@@ -1804,6 +1806,7 @@ fun ChatDetailScreen(
             canEdit = msg.fromMe && !msg.isDeleted && msg.media == null &&
                 (System.currentTimeMillis() - msg.at) <= 10_000L,
             isPinned = pinnedId == msg.id,
+            isStarred = msg.id in starredIds,
             isTranslated = translations.containsKey(msg.id),
             // Offer "save to my stickers" for a sticker message: a big-emoji sticker, or
             // an image/GIF (that's how custom stickers ride the wire). Works on anyone's
@@ -1854,6 +1857,20 @@ fun ChatDetailScreen(
                     PinStore.clear(context, conversation.id); pinnedId = null
                 } else {
                     PinStore.set(context, conversation.id, msg.id); pinnedId = msg.id
+                }
+            },
+            onStar = {
+                pendingMessage = null
+                val now = msg.id !in starredIds
+                // Optimistic, and put back if the server refuses — the star is drawn
+                // from this set, so it must never claim something that didn't happen.
+                if (now) starredIds.add(msg.id) else starredIds.remove(msg.id)
+                scope.launch {
+                    runCatching { SyntraClient.starMessage(msg.id, now) }
+                        .onFailure {
+                            if (now) starredIds.remove(msg.id) else starredIds.add(msg.id)
+                            Toast.makeText(context, "Gagal: ${it.message}", Toast.LENGTH_SHORT).show()
+                        }
                 }
             },
             onTranslate = {
@@ -2189,12 +2206,14 @@ private fun MessageActionsDialog(
     myReaction: String?,
     canEdit: Boolean,
     isPinned: Boolean,
+    isStarred: Boolean = false,
     isTranslated: Boolean,
     canFavorite: Boolean = false,
     onAddFavorite: () -> Unit = {},
     onEdit: () -> Unit,
     onCopy: () -> Unit,
     onPin: () -> Unit,
+    onStar: () -> Unit = {},
     onTranslate: () -> Unit,
     onReact: (String) -> Unit,
     onDismiss: () -> Unit,
@@ -2256,6 +2275,10 @@ private fun MessageActionsDialog(
             }
             if (!msg.isDeleted) {
                 MessageAction(if (isPinned) "Batalkan semat" else "Sematkan pesan", NexusTextPrimary, onPin)
+                // Starring is server-side and cross-device, unlike pinning (which is
+                // per-conversation). The endpoints have existed since the beginning
+                // with nothing in the app ever calling them.
+                MessageAction(if (isStarred) "Hapus dari berbintang" else "Tandai berbintang", NexusTextPrimary, onStar)
             }
             if (canFavorite) {
                 MessageAction("Tambahkan ke stiker favorit", NexusTextPrimary, onAddFavorite)

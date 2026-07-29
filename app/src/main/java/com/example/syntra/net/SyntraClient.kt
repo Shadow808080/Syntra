@@ -916,6 +916,109 @@ object SyntraClient {
     suspend fun getFollowing(): List<NetUser> =
         (getData("/api/v1/users/me/following") as JSONArray).mapObjects { it.toUser() }
 
+    /** People who follow me (accepted only — pending ones are in [getFollowRequests]). */
+    suspend fun getFollowers(): List<NetUser> =
+        (getData("/api/v1/users/me/followers") as JSONArray).mapObjects { it.toUser() }
+
+    /** Followers of someone else, for their profile screen. */
+    suspend fun getFollowersOf(username: String): List<NetUser> =
+        (getData("/api/v1/users/$username/followers") as JSONArray).mapObjects { it.toUser() }
+
+    /**
+     * Follow requests waiting on me — only ever non-empty for a private account.
+     *
+     * Without this list a private account is a trap: every request sits at `pending`
+     * forever, so nobody ever becomes a follower and nobody ever sees your stories.
+     */
+    suspend fun getFollowRequests(): List<NetUser> =
+        (getData("/api/v1/users/me/follow-requests") as JSONArray).mapObjects { it.toUser() }
+
+    suspend fun approveFollow(username: String) {
+        postData("/api/v1/users/$username/follow/approve", JSONObject())
+    }
+
+    suspend fun rejectFollow(username: String) {
+        postData("/api/v1/users/$username/follow/reject", JSONObject())
+    }
+
+    // -----------------------------------------------------------------------
+    // Notifications — docs/api.md §7b
+    //
+    // The socket already delivers `notification.new` while the app is open, but that
+    // is a live signal, not a record: anything that happened while you were away was
+    // simply lost. These give it a history.
+    // -----------------------------------------------------------------------
+
+    suspend fun getNotifications(limit: Int = 30): List<NetNotification> =
+        (getData("/api/v1/notifications?limit=$limit") as JSONArray).mapObjects {
+            NetNotification(
+                id = it.getString("id"),
+                type = it.optString("type", ""),
+                actorId = it.optString("actor_id", ""),
+                actorUsername = it.optString("actor_username", ""),
+                actorName = it.optString("actor_name", ""),
+                actorAvatarUrl = it.optString("actor_avatar_url", "").ifBlank { null },
+                subjectType = it.optString("subject_type", ""),
+                subjectId = it.optString("subject_id", ""),
+                isRead = it.optBoolean("is_read", false),
+                createdAt = it.optString("created_at", ""),
+            )
+        }
+
+    suspend fun getUnreadNotificationCount(): Int =
+        (getData("/api/v1/notifications/unread-count") as JSONObject).optInt("unread", 0)
+
+    /** Marks one notification read, or ALL of them when [notificationId] is null. */
+    suspend fun markNotificationsRead(notificationId: String? = null) {
+        val payload = JSONObject()
+        if (notificationId != null) payload.put("notification_id", notificationId)
+        postData("/api/v1/notifications/read", payload)
+    }
+
+    // -----------------------------------------------------------------------
+    // Starred messages — docs/api.md §5b
+    // -----------------------------------------------------------------------
+
+    suspend fun starMessage(messageId: String, starred: Boolean) {
+        if (starred) putData("/api/v1/messages/$messageId/star", JSONObject())
+        else delete("/api/v1/messages/$messageId/star")
+    }
+
+    /** My starred messages, newest first, across every conversation. */
+    suspend fun getStarredMessages(limit: Int = 50): List<NetStarredMessage> =
+        (getData("/api/v1/messages/starred?limit=$limit") as JSONArray).mapObjects {
+            NetStarredMessage(
+                id = it.getString("id"),
+                conversationId = it.optString("conversation_id", ""),
+                senderId = it.optString("sender_id", ""),
+                type = it.optString("type", "text"),
+                body = it.optString("body", ""),
+                createdAt = it.optString("created_at", ""),
+                starredAt = it.optString("starred_at", ""),
+            )
+        }
+
+    // -----------------------------------------------------------------------
+    // Room moderation — docs/api.md §11b
+    //
+    // Only `end` is wrapped here. The rest of the room-moderation endpoints are
+    // deliberately left alone:
+    //
+    //  · /rooms/{id}/speak-requests is redundant — the app already knows who has a
+    //    hand up from `hasRaisedHand` on the participants list it polls anyway.
+    //  · /rooms/{id}/requests + approve/reject only ever return anything for an
+    //    invite-only room, and this app creates every room as `public`. Wrapping them
+    //    would add a screen that can never have a row in it.
+    //  · /rooms/{id}/invite needs a people picker that does not exist yet.
+    //
+    // A client method nothing calls is a feature that looks finished from the inside.
+    // -----------------------------------------------------------------------
+
+    /** Ends the room for everyone — host only. Broadcasts `room.ended` immediately. */
+    suspend fun endRoom(roomId: String) {
+        postData("/api/v1/rooms/$roomId/end", JSONObject())
+    }
+
     /** Reports a user. `reason` is free text; verified `POST /reports` → 201. */
     suspend fun reportUser(targetId: String, reason: String) {
         postData(
@@ -1417,6 +1520,10 @@ object SyntraClient {
                     dispatch { it.onRoomJoinDecided(d.optString("room_id"), approved) }
                 }
                 "notification.new" -> (data as? JSONObject)?.let { d ->
+                    // Bump the badge here, once, rather than in each listener: the
+                    // count belongs to the app, not to whichever screen happens to be
+                    // listening at the time.
+                    NotificationBadge.unread += 1
                     dispatch {
                         it.onNotification(
                             d.optString("type"),

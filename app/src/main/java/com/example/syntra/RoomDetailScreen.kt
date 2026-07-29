@@ -319,6 +319,31 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
         onLeave()
     }
 
+    /**
+     * Closes the room for everyone, now.
+     *
+     * The host used to just `leave()`, and the room only actually ended once LiveKit's
+     * disconnect webhook reached the backend 6–10 seconds later — which is exactly the
+     * "my friend is still shown in the room" lag noted on [leave]. `POST /rooms/{id}/end`
+     * says so directly and broadcasts `room.ended` at once, so every other participant's
+     * screen closes immediately instead of hanging on a room that is already over.
+     */
+    fun endRoomNow() {
+        VoiceEngine.disconnect()
+        if (ApiConfig.ENABLED) {
+            SyntraClient.roomLeaveTopic(room.id)
+            // Detached, for the same reason as leave(): onLeave() tears this screen
+            // (and its scope) down immediately after.
+            SyntraClient.fireAndForget {
+                // Fall back to leaving if ending is refused — better a slow close than
+                // a host stuck inside a room they asked to end.
+                runCatching { SyntraClient.endRoom(room.id) }
+                    .onFailure { runCatching { SyntraClient.leaveRoom(room.id) } }
+            }
+        }
+        onLeave()
+    }
+
     val isHost = myRole == "host"
 
     // Tell the rest of the app we're in a room, so an incoming call rings as a banner
@@ -722,7 +747,7 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
                 confirmText = "Akhiri room",
                 onConfirm = {
                     confirmLeave = false
-                    leave()
+                    endRoomNow()
                 },
                 onDismiss = { confirmLeave = false },
             )

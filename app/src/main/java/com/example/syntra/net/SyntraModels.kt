@@ -207,6 +207,38 @@ data class NetReel(
     val isFollowing: Boolean = false,
 )
 
+/**
+ * Satu baris di kotak notifikasi.
+ *
+ * `subjectType` + `subjectId` menentukan ke mana ketukan membawa: sebuah `reel`
+ * membuka postingannya, `user` membuka profil orangnya. Tanpa keduanya notifikasi
+ * hanya jadi pengumuman yang tak bisa ditindaklanjuti.
+ */
+data class NetNotification(
+    val id: String,
+    /** follow · like · comment · mention · story_reply · room_live · system */
+    val type: String = "",
+    val actorId: String = "",
+    val actorUsername: String = "",
+    val actorName: String = "",
+    val actorAvatarUrl: String? = null,
+    val subjectType: String = "",
+    val subjectId: String = "",
+    val isRead: Boolean = false,
+    val createdAt: String = "",
+)
+
+/** Satu pesan berbintang, lintas percakapan. */
+data class NetStarredMessage(
+    val id: String,
+    val conversationId: String = "",
+    val senderId: String = "",
+    val type: String = "text",
+    val body: String = "",
+    val createdAt: String = "",
+    val starredAt: String = "",
+)
+
 data class NetReelComment(
     val id: String,
     val authorId: String = "",

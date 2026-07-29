@@ -656,9 +656,7 @@ fun ShortsScreen(
                             onLike = { toggleLike(reel) },
                             onComment = { commentsFor = reel },
                             onSave = { toggleSave(reel) },
-                            onShare = {
-                                Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show()
-                            },
+                            onShare = { shareReel(context, reel) },
                             onOpenProfile = {
                                 if (reel.creatorUsername.isNotBlank()) openProfileUser = reel.creatorUsername
                             },
@@ -1975,7 +1973,7 @@ fun ReelViewer(
                 onLike = { toggleLike(reel) },
                 onComment = { commentsFor = reel },
                 onSave = { toggleSave(reel) },
-                onShare = { Toast.makeText(context, "Bagikan segera hadir.", Toast.LENGTH_SHORT).show() },
+                onShare = { shareReel(context, reel) },
                 autoScroll = autoScroll,
                 onVideoEnded = {
                     if (autoScroll && page < items.lastIndex) {
@@ -2180,6 +2178,32 @@ private fun ReelCaption(reel: NetReel, onOpenProfile: () -> Unit = {}, modifier:
     }
 }
 
+/**
+ * Hands a short to Android's share sheet.
+ *
+ * This was a toast that said "segera hadir" on a button that has always looked
+ * functional. There is no public web page for a reel yet, so what gets shared is the
+ * creator, the caption, and the direct media link — which does open and play. That is
+ * a real share; a promise is not.
+ */
+private fun shareReel(context: Context, reel: NetReel) {
+    val who = reel.creatorUsername.ifBlank { reel.creatorName }.ifBlank { "seseorang" }
+    val text = buildString {
+        append("Tonton short dari @").append(who).append(" di Syntra")
+        if (reel.caption.isNotBlank()) append("\n\n").append(reel.caption.take(200))
+        if (reel.mediaUrl.isNotBlank()) append("\n\n").append(reel.mediaUrl)
+    }
+    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(android.content.Intent.EXTRA_TEXT, text)
+    }
+    runCatching {
+        context.startActivity(android.content.Intent.createChooser(send, "Bagikan short"))
+    }.onFailure {
+        Toast.makeText(context, "Tidak ada aplikasi untuk berbagi.", Toast.LENGTH_SHORT).show()
+    }
+}
+
 /** Tints `#hashtags` teal like the reference feed. */
 private fun highlightHashtags(caption: String) = buildAnnotatedString {
     val tokens = caption.split(" ")
@@ -2205,7 +2229,7 @@ private fun highlightHashtags(caption: String) = buildAnnotatedString {
  * Trailing punctuation is stripped from the username but kept in the visible text, so
  * "cek @reza, mantap" links to `reza` and still reads with its comma.
  */
-private fun mentionedText(
+internal fun mentionedText(
     text: String,
     mentionColour: Color,
     onOpenUser: (String) -> Unit,

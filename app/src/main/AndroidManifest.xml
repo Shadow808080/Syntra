@@ -17,6 +17,12 @@
     <!-- Read the device gallery to show it in the "Tambah status" grid. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Android 14+ lets people grant access to SELECTED photos rather than all of
+         them. Declaring this is what makes that choice reachable: without it the
+         system offers only all-or-nothing, and someone who is not willing to hand over
+         their entire gallery has to deny outright — so the "Tambah status" grid comes
+         up empty and looks broken rather than restricted. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />

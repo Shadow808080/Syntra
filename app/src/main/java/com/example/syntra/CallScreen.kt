@@ -719,10 +719,6 @@ private fun CallSession(d: CallDescriptor) {
     }
 
     // Promote to "ongoing" the moment the other side is really in the room.
-    LaunchedEffect(CallEngine.connected) {
-        android.util.Log.i(CALL_TAG, "engine.connected=${CallEngine.connected} phase=$phase")
-    }
-
     LaunchedEffect(remoteJoined) {
         if (remoteJoined && phase != CallPhase.ONGOING && phase != CallPhase.ENDED) {
             phase = CallPhase.ONGOING; everConnected = true

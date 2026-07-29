@@ -79,6 +79,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Person
@@ -616,6 +617,11 @@ fun ChatScreen(
     var showArchived by remember { mutableStateOf(false) }
     var showNewGroup by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showNotifications by remember { mutableStateOf(false) }
+    var showStarred by remember { mutableStateOf(false) }
+    // Seed the badge from the server once. The socket keeps it moving after that, but
+    // anything that arrived while the app was closed only exists on the server.
+    LaunchedEffect(Unit) { com.example.syntra.net.NotificationBadge.refresh() }
     var showDiscover by remember { mutableStateOf(false) }
     var openProfileUser by remember { mutableStateOf<String?>(null) }
 
@@ -1115,6 +1121,7 @@ fun ChatScreen(
                     searching = false
                     query = ""
                 },
+                onOpenNotifications = { showNotifications = true },
                 allSelectedBlocked = selection.isNotEmpty() && chats
                     .filter { it.id in selection }
                     .all { BlockStore.isBlocked(context, it.counterpartUsername, it.counterpartId) },
@@ -1122,6 +1129,7 @@ fun ChatScreen(
                     val picked = chats.filter { it.id in selection }
                     when (label) {
                         "New group" -> showNewGroup = true
+                        "Pesan berbintang" -> showStarred = true
                         "Settings" -> showSettings = true
                         "Tandai sudah dibaca" -> {
                             picked.forEach { convo ->
@@ -1561,6 +1569,26 @@ fun ChatScreen(
         }
 
 
+        if (showNotifications) {
+            NotificationsScreen(
+                onClose = { showNotifications = false },
+                // A reel notification hands the id to Shorts through the same request
+                // object a push notification uses, so both paths land identically.
+                onOpenReel = { reelId ->
+                    showNotifications = false
+                    ReelNavRequest.reelId = reelId
+                },
+                onOpenUser = { uname ->
+                    showNotifications = false
+                    openProfileUser = uname
+                },
+            )
+        }
+
+        if (showStarred) {
+            StarredMessagesScreen(onClose = { showStarred = false })
+        }
+
         if (showDiscover) {
             DiscoverScreen(
                 onClose = { showDiscover = false },
@@ -1664,6 +1692,7 @@ private fun NexusHeader(
     onStartSearch: () -> Unit,
     onStopSearch: () -> Unit,
     onMenuItem: (String) -> Unit,
+    onOpenNotifications: () -> Unit = {},
     /** True when EVERY picked conversation is already blocked — flips the menu label. */
     allSelectedBlocked: Boolean = false,
 ) {
@@ -1743,8 +1772,12 @@ private fun NexusHeader(
         } else {
             SyntraTitle()
             Spacer(Modifier.weight(1f))
-            // Order: search · overflow. "Find people" moved to a FAB above the camera
-            // (bottom-right), so it isn't crowded in with the top-bar icons.
+            // Order: notifications · search · overflow. "Find people" moved to a FAB
+            // above the camera (bottom-right), so it isn't crowded in with these.
+            NotificationBell(
+                unread = com.example.syntra.net.NotificationBadge.unread,
+                onClick = onOpenNotifications,
+            )
             HeaderIcon(Icons.Filled.Search, "Search", size = 28.dp, onClick = onStartSearch)
             Box {
                 var menuOpen by remember { mutableStateOf(false) }
@@ -1753,7 +1786,7 @@ private fun NexusHeader(
                     expanded = menuOpen,
                     onDismissRequest = { menuOpen = false },
                 ) {
-                    listOf("New group", "Settings").forEach { label ->
+                    listOf("New group", "Pesan berbintang", "Settings").forEach { label ->
                         DropdownMenuItem(
                             text = { Text(label) },
                             onClick = {
@@ -1763,6 +1796,51 @@ private fun NexusHeader(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The bell, with a count when something is waiting.
+ *
+ * The number is capped at "9+": past that the exact figure stops being information
+ * and starts being a wide pill that shoves the rest of the header sideways.
+ */
+@Composable
+private fun NotificationBell(unread: Int, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(46.dp)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Filled.NotificationsNone,
+            "Notifikasi",
+            tint = NexusTextPrimary,
+            modifier = Modifier.size(26.dp),
+        )
+        if (unread > 0) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 9.dp, end = 9.dp)
+                    .size(if (unread > 9) 17.dp else 15.dp)
+                    .background(Color(0xFFFF4D5E), CircleShape)
+                    .border(1.5.dp, NexusBackground, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    if (unread > 9) "9+" else "$unread",
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                )
             }
         }
     }
