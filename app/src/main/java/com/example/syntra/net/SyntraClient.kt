@@ -500,9 +500,25 @@ object SyntraClient {
         return data.optString("avatar_url", "")
     }
 
-    /** The group's current description (empty when none). `GET .../{id}`. */
-    suspend fun getGroupDescription(conversationId: String): String =
-        (getData("/api/v1/conversations/$conversationId") as JSONObject).optString("description", "")
+    /**
+     * A group's own record. `GET .../{id}`.
+     *
+     * WHY THIS EXISTS AS ITS OWN CALL. The conversation LIST sends the group's icon as
+     * `avatar_media_id` — a bare uuid, which no client can turn into a URL (the public
+     * link needs the storage key, which the list does not send). This endpoint sends a
+     * resolved `avatar_url`. That asymmetry is the entire reason a group photo showed
+     * up right after upload and then vanished: the upload response carried a URL, and
+     * the very next list refresh replaced it with an id that gets dropped.
+     */
+    suspend fun getGroupInfo(conversationId: String): GroupInfo {
+        val o = getData("/api/v1/conversations/$conversationId") as JSONObject
+        return GroupInfo(
+            description = o.optString("description", ""),
+            avatarUrl = o.optString("avatar_url", "").ifBlank { null },
+            memberCount = o.optInt("member_count", 0),
+            myRole = o.optString("my_role", "member"),
+        )
+    }
 
     suspend fun getStories(): List<NetStoryGroup> =
         (getData("/api/v1/stories") as JSONArray).mapObjects { it.toStoryGroup() }
@@ -1032,6 +1048,14 @@ object SyntraClient {
         postData(
             "/api/v1/reports",
             JSONObject().put("reason", reason).put("target_type", "reel").put("target_id", reelId),
+        )
+    }
+
+    /** Reports a comment. `/reports` accepts target_type "comment" (see api.md). */
+    suspend fun reportComment(commentId: String, reason: String) {
+        postData(
+            "/api/v1/reports",
+            JSONObject().put("reason", reason).put("target_type", "comment").put("target_id", commentId),
         )
     }
 

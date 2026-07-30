@@ -148,6 +148,7 @@ import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import com.example.syntra.net.ApiConfig
 import com.example.syntra.net.ApiException
+import com.example.syntra.net.AvatarCache
 import com.example.syntra.net.NetMember
 import com.example.syntra.net.NetMessage
 import com.example.syntra.net.NetPresence
@@ -223,6 +224,14 @@ private data class Message(
      * one in flight. This drives a red "gagal terkirim · ketuk untuk coba lagi".
      */
     val failed: Boolean = false,
+    /**
+     * A group event the server wrote ("X mengubah foto grup", "X keluar dari grup").
+     *
+     * Not a bubble: nobody said it TO anyone, and drawing it as one puts a notice about
+     * the group in the visual language of a message from a person. Rendered as small
+     * centred grey text between the messages instead.
+     */
+    val isSystem: Boolean = false,
 )
 
 /** Marker prefix for a story reply: "STORYREPLY<0x1>url<0x1>text". */
@@ -355,6 +364,7 @@ private fun NetMessage.toUi(): Message {
         sticker = sticker,
         storyReplyUrl = storyUrl,
         replyToId = replyToId,
+        isSystem = type == "system",
     )
 }
 
@@ -491,6 +501,18 @@ fun ChatDetailScreen(
             if (System.currentTimeMillis() - lastTypingAt >= 6000) peerTyping = false
         }
     }
+    // GROUPS: who is typing, not just that someone is. A single boolean cannot say
+    // "Bagas is typing" and cannot survive two people typing at once — the second
+    // person's "stopped" would clear the first person's indicator.
+    // userId -> when we last heard from them; entries expire on the same 6s rule.
+    val typingUsers = remember(conversation) { mutableStateMapOf<String, Long>() }
+    LaunchedEffect(conversation.id, typingUsers.size) {
+        while (typingUsers.isNotEmpty()) {
+            kotlinx.coroutines.delay(1500)
+            val cutoff = System.currentTimeMillis() - 6000
+            typingUsers.entries.removeAll { it.value < cutoff }
+        }
+    }
     // Live online state for the header; seeded from the list, then kept current
     // by presence.update so it changes without leaving the chat.
     var peerOnline by remember(conversation) {
@@ -553,8 +575,11 @@ fun ChatDetailScreen(
     var confirmBlock by remember(conversation) { mutableStateOf(false) }
     var showChatTheme by remember(conversation) { mutableStateOf(false) }
     var showWallpaper by remember(conversation) { mutableStateOf(false) }
-    // Per-conversation chat background: a built-in URL, a local content:// uri, or null.
+    // Per-conversation chat background: a built-in URL, a local file path, or null.
     var wallpaper by remember(conversation) { mutableStateOf(ChatWallpaperStore.get(context, conversation.id)) }
+    // Chosen but NOT applied: a built-in URL (String) or a gallery Uri, shown full
+    // screen for approval first. Nothing is written to disk while this is non-null.
+    var previewWallpaper by remember(conversation) { mutableStateOf<Any?>(null) }
     var showProfile by remember(conversation) { mutableStateOf(false) }
     // Group actions: settings/members screen, add-members sheet, leave confirmation.
     var showGroupSettings by remember(conversation) { mutableStateOf(false) }
@@ -565,6 +590,12 @@ fun ChatDetailScreen(
     // Group senders by id → their profile, so each incoming bubble can show the
     // sender's avatar + name (WhatsApp-style). Only fetched for group conversations.
     val groupMembers = remember(conversation) { mutableStateMapOf<String, NetMember>() }
+    // The group's own icon. The conversation row we were opened from cannot supply it —
+    // the list endpoint sends a bare media id — so it comes from the cache first (drawn
+    // on the first frame) and then from the one endpoint that resolves a real URL.
+    var groupAvatar by remember(conversation.id) {
+        mutableStateOf(conversation.avatarUrl ?: AvatarCache.get(context, conversation.id))
+    }
     LaunchedEffect(conversation.id, conversation.isGroup, groupReload) {
         if (!conversation.isGroup) return@LaunchedEffect
         runCatching { SyntraClient.getMembers(conversation.id) }
@@ -572,6 +603,12 @@ fun ChatDetailScreen(
                 groupMembers.clear()
                 list.forEach { groupMembers[it.userId] = it }
             }
+        runCatching { SyntraClient.getGroupInfo(conversation.id) }.onSuccess { info ->
+            if (!info.avatarUrl.isNullOrBlank()) {
+                groupAvatar = info.avatarUrl
+                AvatarCache.put(context, conversation.id, info.avatarUrl)
+            }
+        }
     }
     var chatTheme by remember(conversation) { mutableStateOf(ChatThemeStore.get(context, conversation.id)) }
 
@@ -834,6 +871,10 @@ fun ChatDetailScreen(
                     if (conversationId == conversation.id && userId != SyntraClient.myUserId) {
                         peerTyping = typing
                         if (typing) lastTypingAt = System.currentTimeMillis()
+                        // Per-person, so a group header can name them and two people
+                        // typing at once don't cancel each other out.
+                        if (typing) typingUsers[userId] = System.currentTimeMillis()
+                        else typingUsers.remove(userId)
                     }
                 }
 
@@ -1148,22 +1189,11 @@ fun ChatDetailScreen(
         }
     }
 
-    // Wallpaper from the gallery. The read grant is persisted so the background
-    // still renders after a restart — without it the uri goes dead and the chat
-    // would silently fall back to plain.
+    // Wallpaper from the gallery. Picking only opens a PREVIEW — nothing is saved, and
+    // the chat you were reading does not change, until it is approved.
     val wallpaperPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
-    ) { uri ->
-        if (uri != null) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                )
-            }
-            wallpaper = uri.toString()
-            ChatWallpaperStore.set(context, conversation.id, uri.toString())
-        }
-    }
+    ) { uri -> if (uri != null) previewWallpaper = uri }
 
     fun sendSticker(emoji: String) {
         val ref = "$LOCAL_ID_PREFIX${System.currentTimeMillis()}"
@@ -1493,9 +1523,14 @@ fun ChatDetailScreen(
             // the "kek gada gunanya" case: from their side the block did nothing.
             peerTyping = peerTyping && !peerBlocked && !blockedByPeer,
             peerOnline = peerOnline && !peerBlocked && !blockedByPeer,
-            peerAvatar = if (peerBlocked || blockedByPeer) null else peerAvatar,
+            peerAvatar = if (conversation.isGroup) groupAvatar
+            else if (peerBlocked || blockedByPeer) null else peerAvatar,
             peerBlocked = peerBlocked,
             peerBlockedMe = blockedByPeer,
+            memberCount = groupMembers.size,
+            typingNames = if (!conversation.isGroup) emptyList() else typingUsers.keys.mapNotNull { id ->
+                groupMembers[id]?.let { it.displayName.ifBlank { it.username } }
+            },
             onBack = onBack,
             onLongPressAvatar = { confirmClear = true },
             onOpenProfile = { if (conversation.isGroup) showGroupSettings = true else showProfile = true },
@@ -1625,6 +1660,34 @@ fun ChatDetailScreen(
                     val older = ordered.getOrNull(index + 1)
                     if (older == null || dayKey(older.at) != dayKey(msg.at)) {
                         DateChip(dayLabel(msg.at))
+                    }
+                    // Group events are notices, not messages — no bubble, no sender, no
+                    // selection, no reply. Everything below this point is about talking
+                    // to someone, and none of it applies.
+                    if (msg.isSystem) {
+                        // Fold a run of identical notices into one line with a count.
+                        // Changing the group icon four times produced four identical
+                        // sentences that pushed the actual conversation off the screen.
+                        //
+                        // The run is rendered at its OLDEST member — the one the date
+                        // chip above belongs to — and the newer duplicates are skipped,
+                        // so collapsing can never swallow a day separator. Same day
+                        // only, for the same reason.
+                        val sameAsOlder = older != null && older.isSystem &&
+                            older.text == msg.text && dayKey(older.at) == dayKey(msg.at)
+                        if (sameAsOlder) return@Column
+                        var repeats = 1
+                        var k = index - 1
+                        while (k >= 0) {
+                            val newer = ordered.getOrNull(k) ?: break
+                            if (!newer.isSystem || newer.text != msg.text ||
+                                dayKey(newer.at) != dayKey(msg.at)
+                            ) break
+                            repeats++
+                            k--
+                        }
+                        SystemNotice(msg.text, repeats)
+                        return@Column
                     }
                     // In a group, show who sent each incoming message. `older` (index+1)
                     // is the previous message from the same run; only the first message of
@@ -1853,13 +1916,23 @@ fun ChatDetailScreen(
                     .padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
-                    Modifier.width(3.dp).height(34.dp).clip(RoundedCornerShape(2.dp)).background(NexusAccentSoft),
-                )
-                Spacer(Modifier.width(10.dp))
+                // No accent rule down the left. The label already says what this strip
+                // is, and the bar only repeated it in a second visual language.
                 Column(Modifier.weight(1f)) {
                     Text(
-                        if (q.fromMe) "Membalas dirimu" else "Membalas ${conversation.name}",
+                        // In a group the quoted message belongs to a PERSON. This used
+                        // to print the conversation name, so replying to Bagas inside
+                        // "Gabut" announced "Membalas Gabut" — the one name that is
+                        // certainly not who you are answering.
+                        when {
+                            q.fromMe -> "Membalas dirimu"
+                            conversation.isGroup -> {
+                                val who = q.senderId?.let { groupMembers[it] }
+                                    ?.let { it.displayName.ifBlank { it.username } }
+                                if (who != null) "Membalas $who" else "Membalas"
+                            }
+                            else -> "Membalas ${conversation.name}"
+                        },
                         color = NexusAccentSoft,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -2139,15 +2212,44 @@ fun ChatDetailScreen(
             current = wallpaper,
             onDismiss = { showWallpaper = false },
             onPick = {
-                wallpaper = it
-                ChatWallpaperStore.set(context, conversation.id, it)
                 showWallpaper = false
+                // "Tanpa latar" needs no preview — there is nothing to look at, and
+                // clearing is instantly undoable by picking again.
+                if (it == null) {
+                    wallpaper = null
+                    ChatWallpaperStore.set(context, conversation.id, null)
+                } else {
+                    previewWallpaper = it
+                }
             },
             onPickLocal = {
                 showWallpaper = false
                 wallpaperPicker.launch(
                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                 )
+            },
+        )
+    }
+
+    // Approve-before-apply. A gallery pick is COPIED into the app's own files at this
+    // point (not before, and never uploaded): the wallpaper is a personal setting that
+    // must survive the source photo being deleted or its read grant being revoked.
+    previewWallpaper?.let { pick ->
+        WallpaperPreviewSheet(
+            model = pick,
+            onCancel = { previewWallpaper = null },
+            onApply = {
+                previewWallpaper = null
+                val model = when (pick) {
+                    is android.net.Uri -> ChatWallpaperStore.saveCopy(context, conversation.id, pick)
+                    else -> pick as? String
+                }
+                if (model == null) {
+                    Toast.makeText(context, "Gagal menyimpan latar.", Toast.LENGTH_SHORT).show()
+                } else {
+                    wallpaper = model
+                    ChatWallpaperStore.set(context, conversation.id, model)
+                }
             },
         )
     }
@@ -2702,6 +2804,9 @@ private fun DetailTopBar(
     peerAvatar: String? = null,
     peerBlocked: Boolean = false,
     peerBlockedMe: Boolean = false,
+    /** Group only: how many people are in it, and who is typing right now. */
+    memberCount: Int = 0,
+    typingNames: List<String> = emptyList(),
     onBack: () -> Unit = {},
     onLongPressAvatar: () -> Unit = {},
     onOpenProfile: () -> Unit = {},
@@ -2716,6 +2821,16 @@ private fun DetailTopBar(
         // surface shows them, and does not turn the header into an accusation.
         peerBlockedMe -> "Tidak tersedia"
         peerBlocked -> "Diblokir"
+        // A GROUP is not a person and has no "last seen". It used to claim one anyway,
+        // which is how a four-person group ended up captioned "last seen recently".
+        // Typing names the person, because in a group "typing…" leaves out the only
+        // part you actually wanted to know.
+        convo.isGroup -> when {
+            typingNames.size == 1 -> "${typingNames.first()} sedang mengetik…"
+            typingNames.size > 1 -> "${typingNames.size} orang sedang mengetik…"
+            memberCount > 0 -> "$memberCount anggota"
+            else -> "Grup"
+        }
         peerTyping -> "typing…"
         peerOnline || convo.presence == Presence.ONLINE -> "online"
         convo.presence == Presence.TYPING -> "typing…"
@@ -2780,7 +2895,13 @@ private fun DetailTopBar(
             )
             Text(
                 text = status,
-                color = if (convo.presence == Presence.NONE) NexusTextSecondary else NexusAccentSoft,
+                // Accent only when the line is live. "4 anggota" is a fact about the
+                // group, not activity, so it stays quiet like every other subtitle.
+                color = if (typingNames.isNotEmpty() || (!convo.isGroup && convo.presence != Presence.NONE)) {
+                    NexusAccentSoft
+                } else {
+                    NexusTextSecondary
+                },
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -3548,6 +3669,63 @@ private fun BlockedComposerBar(busy: Boolean, onUnblock: () -> Unit) {
     }
 }
 
+/**
+ * Name colours for group senders.
+ *
+ * The app's avatar gradients are all Syntra blue — that is the brand, and it is right
+ * for a tile. It is wrong for a sender label: six shades of the same blue told you
+ * nothing, so a busy group was a wall of identically-coloured names and you had to
+ * read every one to follow who was talking. These are chosen to be separable from each
+ * other AND legible on the dark bubble, which rules out the deep end of any hue.
+ */
+private val senderNameColors = listOf(
+    Color(0xFF6FB2FF), // sky
+    Color(0xFF7BE0C3), // mint
+    Color(0xFFF2A65A), // amber
+    Color(0xFFE886B4), // rose
+    Color(0xFFB39DFF), // lilac
+    Color(0xFF8FD16B), // leaf
+    Color(0xFFFFD166), // sand
+    Color(0xFF6FD3E8), // cyan
+)
+
+/** Stable per-person colour: the same sender is the same colour in every session. */
+private fun senderColor(key: String): Color =
+    senderNameColors[(key.hashCode() and Int.MAX_VALUE) % senderNameColors.size]
+
+/**
+ * A group event, quiet and centred: "Budi mengubah foto grup", "Ani keluar dari grup".
+ *
+ * Same pill shape as [DateChip] because it plays the same role — a note about the
+ * conversation rather than a line in it — but a dimmer fill and smaller type, since
+ * these appear far more often than day separators and must not outrank them.
+ */
+@Composable
+private fun SystemNotice(text: String, repeats: Int = 1) {
+    if (text.isBlank()) return
+    // A chip, like the date separator, instead of loose centred text. Group events sit
+    // between bubbles and had no edge of their own, so a run of them read as a wall of
+    // grey sentences rather than as a margin note about the group.
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            // "Changed the group photo ×4" instead of the same sentence four times.
+            // Someone fiddling with the icon should cost one line of history, not four.
+            text = if (repeats > 1) "$text ×$repeats" else text,
+            color = NexusTextSecondary,
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(NexusSurface.copy(alpha = 0.75f))
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+        )
+    }
+}
+
 @Composable
 private fun DateChip(label: String) {
     Row(
@@ -3651,32 +3829,6 @@ private fun MessageBubble(
                 },
             ),
     ) {
-        // Group chats: sender avatar + name sit ABOVE the message, on the first bubble
-        // of a same-sender run. WhatsApp-style header over the chat.
-        if (isGroup && !msg.fromMe && showSenderHeader) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(start = 2.dp, top = 2.dp, bottom = 3.dp),
-            ) {
-                GradientAvatar(
-                    gradient = gradientFor(msg.senderId ?: senderName ?: ""),
-                    initial = (senderName?.firstOrNull() ?: '?').toString().uppercase(),
-                    size = 28.dp,
-                    photoUrl = senderAvatar,
-                )
-                if (!senderName.isNullOrBlank()) {
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = senderName,
-                        color = gradientFor(msg.senderId ?: senderName).first(),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -3705,7 +3857,23 @@ private fun MessageBubble(
                 },
             verticalAlignment = Alignment.Bottom,
         ) {
-            if (msg.fromMe) Spacer(Modifier.weight(1f))
+            // The react button rides in the gutter beside the bubble — MY messages get
+            // it on the left, theirs on the right, so it always sits toward the middle
+            // of the screen and never against the edge. Not offered on a tombstone.
+            if (msg.fromMe) {
+                Spacer(Modifier.weight(1f))
+                if (!msg.isDeleted) {
+                    Box(
+                        // The row is bottom-aligned so bubbles sit on a common baseline;
+                        // the button is centred against the bubble's full height, which
+                        // is where the hand goes for a message of any length.
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                    ) {
+                        ReactionButton(myReaction = myReaction, alignEnd = true, onReact = onReact)
+                    }
+                    Spacer(Modifier.width(2.dp))
+                }
+            }
             Column(
                 modifier = Modifier
                     .graphicsLayer {
@@ -3727,6 +3895,35 @@ private fun MessageBubble(
                         vertical = if (isPureMedia) 0.dp else 6.dp,
                     ),
             ) {
+                // Group chats: who sent it, INSIDE the bubble, on the first message of
+                // a same-sender run. It used to float above the bubble in the row's own
+                // padding, which read as a label belonging to the conversation rather
+                // than to the message — and on a short message the header was wider
+                // than the bubble it introduced.
+                if (isGroup && !msg.fromMe && showSenderHeader) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    ) {
+                        GradientAvatar(
+                            gradient = gradientFor(msg.senderId ?: senderName ?: ""),
+                            initial = (senderName?.firstOrNull() ?: '?').toString().uppercase(),
+                            size = 20.dp,
+                            photoUrl = senderAvatar,
+                        )
+                        if (!senderName.isNullOrBlank()) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = senderName,
+                                color = senderColor(msg.senderId ?: senderName),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
                 // Quoted message (WhatsApp-style): a small placeholder of the message
                 // this one replies to, shown above the body.
                 quoted?.let { q ->
@@ -3928,25 +4125,15 @@ private fun MessageBubble(
                     }
                 }
             }
-            // The react button rides in the gutter beside the bubble — outgoing on the
-            // left of it, incoming on the right, so it always sits toward the middle of
-            // the screen and never off the edge. Not offered on a tombstone.
-            if (!msg.isDeleted) {
-                Spacer(Modifier.width(2.dp))
-                Box(
-                    // The row is bottom-aligned so bubbles sit on a common baseline;
-                    // the button is centred against the bubble's full height instead,
-                    // which is where the hand goes for a message of any length.
-                    modifier = Modifier.align(Alignment.CenterVertically),
-                ) {
-                    ReactionButton(
-                        myReaction = myReaction,
-                        alignEnd = msg.fromMe,
-                        onReact = onReact,
-                    )
+            if (!msg.fromMe) {
+                if (!msg.isDeleted) {
+                    Spacer(Modifier.width(2.dp))
+                    Box(modifier = Modifier.align(Alignment.CenterVertically)) {
+                        ReactionButton(myReaction = myReaction, alignEnd = false, onReact = onReact)
+                    }
                 }
+                Spacer(Modifier.weight(1f))
             }
-            if (!msg.fromMe) Spacer(Modifier.weight(1f))
         }
         // Reaction chips sit just under the bubble, on the same side.
         if (reactions.isNotEmpty()) {

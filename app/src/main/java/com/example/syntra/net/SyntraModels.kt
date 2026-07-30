@@ -67,6 +67,17 @@ data class NetConversation(
     val counterpartLastDeliveredId: String? = null,
 )
 
+/**
+ * What `GET /conversations/{id}` knows about a group that the list does not: a
+ * resolved [avatarUrl], the description, the member count, and my own role.
+ */
+data class GroupInfo(
+    val description: String = "",
+    val avatarUrl: String? = null,
+    val memberCount: Int = 0,
+    val myRole: String = "member",
+)
+
 data class NetMessage(
     val id: String,
     val conversationId: String,

@@ -156,6 +156,29 @@ berfungsi dari mana saja.
 Tambahan kecil: agar konsisten dengan `/reports` (yang menerima UUID),
 `POST /users/{id}/block` sebaiknya **juga menerima UUID**, bukan hanya username.
 
+## 🔴 6b. `GET /conversations` kirim `avatar_url`, bukan `avatar_media_id` saja
+
+`GET /conversations/{id}` sudah mengirim URL yang bisa dipakai:
+
+```json
+{ "avatar_url": "https://api.syntra.fun/mediacdn/media/image/.../019fb076-....jpg",
+  "member_count": 4, "my_role": "admin" }
+```
+
+Tapi `GET /conversations` (daftar) hanya mengirim `avatar_media_id` — UUID mentah.
+Klien **tidak bisa** menyusun URL publik dari id itu (butuh `storage_key` yang tidak
+ikut dikirim), jadi foto grup dibuang di daftar chat.
+
+Efeknya: foto grup tampil sesaat setelah diunggah (respons `PATCH` membawa
+`avatar_url`), lalu **hilang di semua layar** begitu daftar di-refresh. Untuk chat
+`direct` gejalanya tertutup karena app punya cache avatar per-user dari endpoint lain;
+grup tidak punya jalur itu.
+
+Sementara ini app menambal dengan memanggil `GET /conversations/{id}` sekali per grup
+lalu menyimpan URL-nya — satu request ekstra per grup yang seharusnya tidak perlu.
+Mohon sertakan **`avatar_url`** di tiap item `GET /conversations`, sama seperti di
+endpoint detail.
+
 ## 🟡 7. Story: jangan hitung pemilik sebagai penonton
 
 Pemilik yang menonton story-nya sendiri sebaiknya **tidak menaikkan `view_count`**

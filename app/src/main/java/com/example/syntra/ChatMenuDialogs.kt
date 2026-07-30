@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -36,6 +39,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.syntra.ui.theme.DangerFill
 import com.example.syntra.ui.theme.NexusAccent
+import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
@@ -182,6 +186,30 @@ object ChatWallpaperStore {
             .apply { if (model.isNullOrBlank()) remove(key(conversationId)) else putString(key(conversationId), model) }
             .apply()
     }
+
+    /**
+     * Copies a picked gallery image into this app's own files and returns the path.
+     *
+     * The wallpaper never leaves the device — it is a personal setting, not content —
+     * but it must not depend on the gallery either. Holding the content:// uri meant
+     * the chat went blank if the photo was later deleted, moved, or the persisted
+     * grant was dropped; a copy in our own directory cannot be taken away.
+     */
+    fun saveCopy(context: Context, conversationId: String, source: android.net.Uri): String? {
+        val app = context.applicationContext
+        return runCatching {
+            val dir = java.io.File(app.filesDir, DIR).apply { mkdirs() }
+            // Named per conversation, so re-picking replaces instead of piling up.
+            val out = java.io.File(dir, "${conversationId.hashCode()}.jpg")
+            app.contentResolver.openInputStream(source).use { input ->
+                requireNotNull(input) { "tidak bisa membaca gambar" }
+                out.outputStream().use { input.copyTo(it) }
+            }
+            out.absolutePath
+        }.getOrNull()
+    }
+
+    private const val DIR = "chat_wallpaper"
 }
 
 /**
@@ -287,6 +315,101 @@ fun ChatWallpaperDialog(
                 }
             }
         }
+    }
+}
+
+/**
+ * Full-screen preview of a wallpaper before it is applied.
+ *
+ * Picking used to BE applying: one tap in the gallery and the chat you were reading
+ * had a new background. A wallpaper is judged by whether messages stay readable on it,
+ * which a 96dp thumbnail cannot tell you — so this shows it at real size with real
+ * bubbles over it, and nothing is written until "Terapkan".
+ */
+@Composable
+fun WallpaperPreviewSheet(model: Any, onCancel: () -> Unit, onApply: () -> Unit) {
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(Modifier.fillMaxSize().background(NexusBackground)) {
+            coil.compose.AsyncImage(
+                model = model,
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+            ) {
+                Text(
+                    "Pratinjau latar",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.42f))
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                )
+                Spacer(Modifier.weight(1f))
+                // Sample bubbles, both sides: the only question a preview has to answer
+                // is whether text survives on top of this picture.
+                PreviewBubble("Kelihatan jelas nggak?", fromMe = false)
+                Spacer(Modifier.height(8.dp))
+                PreviewBubble("Jelas, enak dibaca.", fromMe = true)
+                Spacer(Modifier.height(22.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                                onClick = onCancel,
+                            )
+                            .padding(vertical = 13.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("Batal", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(50))
+                            .background(NexusAccent)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                                onClick = onApply,
+                            )
+                            .padding(vertical = 13.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("Terapkan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PreviewBubble(text: String, fromMe: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (fromMe) Arrangement.End else Arrangement.Start,
+    ) {
+        Text(
+            text,
+            color = if (fromMe) Color.White else NexusTextPrimary,
+            fontSize = 14.sp,
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(if (fromMe) NexusAccent else NexusSurfaceElevated)
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+        )
     }
 }
 

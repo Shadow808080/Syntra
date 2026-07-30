@@ -688,7 +688,11 @@ fun ChatScreen(
         // BOTH ids. The rooms screens only ever see a user id, so storing a photo
         // under the username alone left them with letter tiles for people whose
         // picture was sitting right there in the chat list.
-        val keys = listOfNotNull(counterpartUsername, counterpartId).filter { it.isNotBlank() }
+        // A GROUP has neither of those — it is not a person. Its own conversation id is
+        // the key, which is what lets a group icon survive a list refresh at all: the
+        // list payload never carries a usable group avatar (see getGroupInfo).
+        val keys = if (isGroup) listOf(id)
+        else listOfNotNull(counterpartUsername, counterpartId).filter { it.isNotBlank() }
         // Blocked: strip the photo. Their name stays (you need to know whose chat this
         // is to unblock them), but their face does not — even from a chat you had
         // before the block, which is the case the user actually notices.
@@ -771,6 +775,29 @@ fun ChatScreen(
     // known-missing result is cached as "" so a row scrolling in and out doesn't
     // re-request. Pull-to-refresh clears the cache to pick up a changed photo.
     fun resolveAvatarFor(convo: Conversation) {
+        // Groups resolve against their own detail endpoint, not against a person.
+        // Same shape as below — cache first, one request, remember the answer — but it
+        // has to be a separate lookup because a group has no username to ask about.
+        if (convo.isGroup) {
+            val cached = avatarCache[convo.id] ?: AvatarCache.get(context, convo.id)
+            if (cached != null) {
+                if (cached.isNotBlank() && convo.avatarUrl != cached) {
+                    val i = chats.indexOfFirst { it.id == convo.id }
+                    if (i >= 0) chats[i] = chats[i].copy(avatarUrl = cached)
+                }
+                return
+            }
+            scope.launch {
+                val url = runCatching { SyntraClient.getGroupInfo(convo.id) }.getOrNull()?.avatarUrl
+                avatarCache[convo.id] = url ?: ""
+                AvatarCache.put(context, convo.id, url)
+                if (!url.isNullOrBlank()) {
+                    val i = chats.indexOfFirst { it.id == convo.id }
+                    if (i >= 0 && chats[i].avatarUrl != url) chats[i] = chats[i].copy(avatarUrl = url)
+                }
+            }
+            return
+        }
         val username = convo.counterpartUsername
         if (username.isNullOrBlank()) return
         // Persisted first: a photo resolved in an earlier session means no lookup now.
@@ -855,6 +882,17 @@ fun ChatScreen(
                     scope.launch {
                         runCatching { SyntraClient.getConversations() }.onSuccess { convs ->
                             val fresh = convs.firstOrNull { it.id == conversationId } ?: return@onSuccess
+                            // "Avatar changed" is one of the things this event announces,
+                            // and the cache is the only place a group icon lives. Ask the
+                            // detail endpoint for the new URL before rebuilding the row —
+                            // re-reading the list alone would just restore the old photo,
+                            // because the list has never carried a usable one.
+                            if (fresh.type == "group") {
+                                val url = runCatching { SyntraClient.getGroupInfo(conversationId) }
+                                    .getOrNull()?.avatarUrl
+                                avatarCache[conversationId] = url ?: ""
+                                AvatarCache.put(context, conversationId, url)
+                            }
                             val i = chats.indexOfFirst { it.id == conversationId }
                             if (i >= 0) {
                                 // Keep the live presence we already track locally.
@@ -1121,12 +1159,25 @@ fun ChatScreen(
         // was given. To actually run up behind the header and off the top of the
         // screen, it has to BE at the top of the screen. This Box is edge-to-edge, so
         // y=0 here is above the status bar; the header and list draw over it.
-        StoryAuroraBackground(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(280.dp)
-                .align(Alignment.TopCenter),
+        //
+        // Only when there is a rail to light. ActiveRow renders nothing on an empty
+        // story list, and the shawl on its own was a glow behind a header with no
+        // story under it — decoration with nothing to decorate. It fades rather than
+        // cuts, so posting the first story doesn't make it pop in.
+        val auroraAlpha by animateFloatAsState(
+            targetValue = if (stories.isEmpty()) 0f else 1f,
+            animationSpec = tween(600),
+            label = "aurora",
         )
+        if (auroraAlpha > 0.01f) {
+            StoryAuroraBackground(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(280.dp)
+                    .align(Alignment.TopCenter)
+                    .graphicsLayer { alpha = auroraAlpha },
+            )
+        }
 
         Column(modifier = Modifier.fillMaxSize()) {
             NexusHeader(

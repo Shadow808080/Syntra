@@ -26,7 +26,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Person
@@ -48,12 +51,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.widget.Toast
 import com.example.syntra.net.ApiConfig
+import com.example.syntra.net.AvatarCache
 import com.example.syntra.net.NetMember
 import com.example.syntra.net.NetUser
 import com.example.syntra.net.SyntraClient
@@ -62,6 +69,7 @@ import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusSurface
+import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
 import kotlinx.coroutines.launch
@@ -98,33 +106,56 @@ fun GroupSettingsScreen(
     // Long-press member menu (jadikan admin / keluarkan), the group's live avatar, and
     // the "uploading a new icon" flag.
     var memberMenu by remember { mutableStateOf<NetMember?>(null) }
-    var avatarUrl by remember(conversation.id) { mutableStateOf(conversation.avatarUrl) }
+    // Seeded from the cache when the row we came from had nothing — which is the normal
+    // case, because the conversation LIST never carries a usable group icon.
+    var avatarUrl by remember(conversation.id) {
+        mutableStateOf(conversation.avatarUrl ?: AvatarCache.get(context, conversation.id))
+    }
     var uploadingAvatar by remember { mutableStateOf(false) }
     // Group description (fetched from GET /conversations/{id}) + its edit dialog.
     var description by remember(conversation.id) { mutableStateOf("") }
-    var editingDescription by remember { mutableStateOf(false) }
+    // What is in the field right now. Kept apart from [description] (what the server
+    // has) so "Simpan" can appear exactly when the two differ, and "Batal" is a reset.
+    var descDraft by remember(conversation.id) { mutableStateOf("") }
+    var descExpanded by remember(conversation.id) { mutableStateOf(false) }
+    // Set by the text layout when the collapsed description was actually clipped — the
+    // only honest trigger for "Tampilkan selengkapnya".
+    var descOverflows by remember(conversation.id) { mutableStateOf(false) }
+    // The description is plain text until you tap it; only then does a field appear.
+    var editingDesc by remember(conversation.id) { mutableStateOf(false) }
 
-    // Pick a new group icon from the gallery → downsample → upload → PATCH the group.
+    // Picked, but not yet committed. Choosing a photo used to upload it and PATCH the
+    // group in one step, so a mis-tap in the gallery became everyone's new group icon
+    // AND a file in storage. Nothing leaves the device until the preview is approved.
+    var pendingAvatar by remember { mutableStateOf<android.net.Uri?>(null) }
+
     val pickAvatar = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
-    ) { uri ->
-        if (uri != null) {
-            uploadingAvatar = true
-            scope.launch {
-                val newUrl = runCatching {
-                    val (bytes, w, h) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        decodeAvatarBytes(context, uri)
-                    } ?: error("Tidak bisa membaca gambar.")
-                    val mediaId = SyntraClient.uploadMedia("image", "jpg", "image/jpeg", bytes, w, h)
-                    SyntraClient.updateGroup(conversation.id, avatarMediaId = mediaId)
-                }.getOrNull()
-                uploadingAvatar = false
-                if (!newUrl.isNullOrBlank()) {
-                    avatarUrl = newUrl
-                    Toast.makeText(context, "Ikon grup diperbarui.", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(context, "Gagal mengubah ikon grup.", Toast.LENGTH_SHORT).show()
-                }
+    ) { uri -> if (uri != null) pendingAvatar = uri }
+
+    // Approved: downsample → upload → PATCH the group.
+    fun commitAvatar(uri: android.net.Uri) {
+        pendingAvatar = null
+        uploadingAvatar = true
+        scope.launch {
+            val newUrl = runCatching {
+                val (bytes, w, h) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    decodeAvatarBytes(context, uri)
+                } ?: error("Tidak bisa membaca gambar.")
+                val mediaId = SyntraClient.uploadMedia("image", "jpg", "image/jpeg", bytes, w, h)
+                SyntraClient.updateGroup(conversation.id, avatarMediaId = mediaId)
+            }.getOrNull()
+            uploadingAvatar = false
+            if (!newUrl.isNullOrBlank()) {
+                avatarUrl = newUrl
+                // Persist it NOW. This URL is the only one the app will see until
+                // someone opens this screen again — the list refresh that happens the
+                // moment you go back sends a bare media id, and that used to wipe the
+                // photo off every surface seconds after it was set.
+                AvatarCache.put(context, conversation.id, newUrl)
+                Toast.makeText(context, "Foto grup diperbarui.", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "Gagal mengubah foto grup.", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -135,14 +166,42 @@ fun GroupSettingsScreen(
         runCatching { SyntraClient.getMembers(conversation.id) }
             .onSuccess { members.clear(); members.addAll(it) }
             .onFailure { Toast.makeText(context, "Gagal memuat anggota: ${it.message}", Toast.LENGTH_SHORT).show() }
-        // Best-effort: the description needs the newer backend; ignore if unavailable.
-        runCatching { SyntraClient.getGroupDescription(conversation.id) }.onSuccess { description = it }
+        // This is the only endpoint that resolves the group's icon to a real URL, so it
+        // feeds the cache every screen reads from — not just this screen's own header.
+        runCatching { SyntraClient.getGroupInfo(conversation.id) }.onSuccess { info ->
+            description = info.description
+            descDraft = info.description
+            if (!info.avatarUrl.isNullOrBlank()) {
+                avatarUrl = info.avatarUrl
+                AvatarCache.put(context, conversation.id, info.avatarUrl)
+            }
+        }
         loading = false
+    }
+
+    fun saveDescription() {
+        val newDesc = descDraft
+        scope.launch {
+            runCatching { SyntraClient.updateGroup(conversation.id, description = newDesc) }
+                .onSuccess {
+                    description = newDesc
+                    Toast.makeText(context, "Deskripsi grup diperbarui.", Toast.LENGTH_SHORT).show()
+                }
+                .onFailure {
+                    Toast.makeText(context, "Gagal memperbarui deskripsi: ${it.message}", Toast.LENGTH_SHORT).show()
+                }
+        }
     }
     LaunchedEffect(conversation.id, reloadKey) { load() }
 
     val myRole = members.firstOrNull { it.userId == SyntraClient.myUserId }?.role ?: "member"
+    // Adding/removing members and renaming the group stay with admins and the owner.
     val canManage = myRole == "owner" || myRole == "admin"
+    // The description and the icon are shared content: any member can fix them. Locked
+    // to admins, a group lives with an empty description until one particular person
+    // gets round to it. The server enforces the same split, and now names whoever
+    // changed something in the system message.
+    val canEditInfo = members.any { it.userId == SyntraClient.myUserId } || members.isEmpty()
 
     Column(
         modifier = Modifier
@@ -184,7 +243,7 @@ fun GroupSettingsScreen(
                 ) {
                     Box(
                         contentAlignment = Alignment.Center,
-                        modifier = if (canManage) {
+                        modifier = if (canEditInfo) {
                             Modifier.clickable(
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
@@ -202,13 +261,17 @@ fun GroupSettingsScreen(
                             initial = conversation.name.firstOrNull()?.toString() ?: "#",
                             size = 92.dp,
                             photoUrl = avatarUrl,
+                            // The GROUP placeholder, not the single bust — this screen is
+                            // about a group, and the one-person mark read as "a person
+                            // called Keluarga Besar".
+                            group = true,
                         )
                         if (uploadingAvatar) {
                             Box(
                                 modifier = Modifier.size(92.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
                                 contentAlignment = Alignment.Center,
                             ) { CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)) }
-                        } else if (canManage) {
+                        } else if (canEditInfo) {
                             // A small camera badge hints the icon can be changed.
                             Box(
                                 modifier = Modifier
@@ -236,42 +299,116 @@ fun GroupSettingsScreen(
                 }
             }
 
-            // Group description — tap to edit (admin/owner).
+            // Group description — edited in place. There is no "Ubah" button and no
+            // dialog: the text IS the field. A dialog to change one paragraph puts a
+            // door in front of a room you can already see into, and the button only
+            // existed to open that door.
             item(key = "description") {
-                val hasDesc = description.isNotBlank()
                 Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(1.dp).background(NexusSurface))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .then(
-                            if (canManage) {
-                                Modifier.clickable(
-                                    indication = null,
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    onClick = { editingDescription = true },
-                                )
-                            } else Modifier,
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp)) {
+                    Text("Deskripsi", color = NexusTextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(6.dp))
+                    if (editingDesc) {
+                        // A field ONLY while you are actually editing. It grows with the
+                        // text — no maxLines, no fixed height — so a long description is
+                        // written in full rather than through a three-line window.
+                        BasicTextField(
+                            value = descDraft,
+                            onValueChange = { if (it.length <= 500) descDraft = it },
+                            textStyle = TextStyle(color = NexusTextPrimary, fontSize = 14.sp, lineHeight = 20.sp),
+                            cursorBrush = SolidColor(NexusAccentSoft),
+                            modifier = Modifier.fillMaxWidth(),
+                            decorationBox = { inner ->
+                                if (descDraft.isEmpty()) {
+                                    Text(
+                                        "Tambahkan deskripsi grup",
+                                        color = NexusTextSecondary,
+                                        fontSize = 14.sp,
+                                        lineHeight = 20.sp,
+                                    )
+                                }
+                                inner()
+                            },
                         )
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Deskripsi", color = NexusTextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                        if (canManage) {
-                            Spacer(Modifier.weight(1f))
-                            Text("Ubah", color = NexusAccentSoft, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    } else {
+                        // At rest the description is TEXT, not a box. It used to be a
+                        // text field standing open at a fixed three lines whether or not
+                        // anyone was editing, which made a paragraph of prose look like a
+                        // form control on a screen that is mostly reading.
+                        Text(
+                            text = description.ifBlank {
+                                if (canEditInfo) "Tambahkan deskripsi grup" else "Belum ada deskripsi"
+                            },
+                            color = if (description.isNotBlank()) NexusTextPrimary else NexusTextSecondary,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp,
+                            maxLines = if (descExpanded) Int.MAX_VALUE else 3,
+                            overflow = TextOverflow.Ellipsis,
+                            // Asked of the layout, not guessed from length: the toggle
+                            // appears exactly when the third line actually got cut.
+                            onTextLayout = { if (!descExpanded) descOverflows = it.hasVisualOverflow },
+                            modifier = if (!canEditInfo) Modifier else Modifier.clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { descDraft = description; editingDesc = true },
+                        )
+
+                        // Text alone — no chevron, no pill, no row of its own furniture.
+                        // It is a continuation of the paragraph above it, and anything
+                        // more turns three lines of description into a component.
+                        if (descOverflows || descExpanded) {
+                            Text(
+                                if (descExpanded) "ringkas" else "selengkapnya",
+                                color = NexusAccentSoft,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .padding(top = 4.dp)
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { descExpanded = !descExpanded },
+                            )
                         }
                     }
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = when {
-                            hasDesc -> description
-                            canManage -> "Tambahkan deskripsi grup"
-                            else -> "Belum ada deskripsi"
-                        },
-                        color = if (hasDesc) NexusTextPrimary else NexusTextSecondary,
-                        fontSize = 14.sp,
-                        lineHeight = 20.sp,
-                    )
+
+                    // Only while editing. These used to appear the instant the text
+                    // differed from the server's copy — which, with a field permanently
+                    // open, meant they could show up from a stray keystroke.
+                    if (editingDesc) {
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            val changed = descDraft != description
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(if (changed) NexusAccent else NexusSurfaceElevated)
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { if (changed) saveDescription(); editingDesc = false }
+                                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                            ) {
+                                Text(
+                                    "Simpan",
+                                    color = if (changed) Color.White else NexusTextSecondary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { descDraft = description; editingDesc = false }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                            ) {
+                                Text("Batal", color = NexusTextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
                 }
                 Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(1.dp).background(NexusSurface))
             }
@@ -400,81 +537,78 @@ fun GroupSettingsScreen(
         }
     }
 
-    if (editingDescription) {
-        GroupDescriptionDialog(
-            initial = description,
-            onDismiss = { editingDescription = false },
-            onSave = { newDesc ->
-                editingDescription = false
-                scope.launch {
-                    runCatching { SyntraClient.updateGroup(conversation.id, description = newDesc) }
-                        .onSuccess {
-                            description = newDesc
-                            Toast.makeText(context, "Deskripsi grup diperbarui.", Toast.LENGTH_SHORT).show()
-                        }
-                        .onFailure {
-                            Toast.makeText(context, "Gagal memperbarui deskripsi: ${it.message}", Toast.LENGTH_SHORT).show()
-                        }
-                }
-            },
+    // Approve the picture before it becomes the group's face. This one really does
+    // upload, and it is visible to every member — a mis-tap in the gallery should not
+    // be the thing that decides it.
+    pendingAvatar?.let { uri ->
+        GroupAvatarPreviewDialog(
+            uri = uri,
+            onCancel = { pendingAvatar = null },
+            onApply = { commitAvatar(uri) },
         )
     }
+
 }
 
-/** Edit dialog for the group description (up to 500 characters). */
+/** Shows the picked photo cropped as it will appear, with apply / cancel. */
 @Composable
-private fun GroupDescriptionDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    var text by remember { mutableStateOf(initial) }
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+private fun GroupAvatarPreviewDialog(
+    uri: android.net.Uri,
+    onCancel: () -> Unit,
+    onApply: () -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onCancel) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(NexusSurface, RoundedCornerShape(22.dp))
+                .background(NexusSurfaceElevated, RoundedCornerShape(22.dp))
                 .padding(22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("Deskripsi grup", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(14.dp))
-            androidx.compose.foundation.text.BasicTextField(
-                value = text,
-                onValueChange = { if (it.length <= 500) text = it },
-                textStyle = androidx.compose.ui.text.TextStyle(color = NexusTextPrimary, fontSize = 15.sp, lineHeight = 20.sp),
-                cursorBrush = androidx.compose.ui.graphics.SolidColor(NexusAccentSoft),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 90.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(NexusBackground)
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                decorationBox = { inner ->
-                    if (text.isEmpty()) {
-                        Text("Tulis deskripsi grup…", color = NexusTextSecondary, fontSize = 15.sp)
-                    }
-                    inner()
-                },
+            Text("Foto grup baru", color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Semua anggota akan melihat foto ini.",
+                color = NexusTextSecondary,
+                fontSize = 12.sp,
             )
-            Spacer(Modifier.height(6.dp))
-            Text("${text.length}/500", color = NexusTextSecondary, fontSize = 11.sp, modifier = Modifier.align(Alignment.End))
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Spacer(Modifier.weight(1f))
-                Text(
-                    "Batal",
-                    color = NexusTextSecondary,
-                    fontSize = 14.sp,
-                    modifier = Modifier
-                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDismiss)
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                )
-                Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.height(18.dp))
+            // Circular, because that is the only shape it will ever be shown in — a
+            // square preview would hide exactly what the crop is about to cut off.
+            coil.compose.AsyncImage(
+                model = uri,
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.size(150.dp).clip(CircleShape),
+            )
+            Spacer(Modifier.height(22.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(
                     modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(50))
+                        .background(NexusSurface)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onCancel,
+                        )
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Batal", color = NexusTextSecondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
                         .clip(RoundedCornerShape(50))
                         .background(NexusAccent)
-                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onSave(text.trim()) }
-                        .padding(horizontal = 20.dp, vertical = 10.dp),
-                ) {
-                    Text("Simpan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                }
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = onApply,
+                        )
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Terapkan", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
             }
         }
     }
