@@ -76,6 +76,10 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.automirrored.filled.Reply
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Gif
@@ -125,6 +129,10 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
@@ -139,6 +147,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
@@ -1441,7 +1450,13 @@ private fun ReelActionRow(
  * which is both simpler and how most short-video apps do a first-pass report.
  */
 @Composable
-internal fun ReportReelDialog(onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
+internal fun ReportReelDialog(
+    onDismiss: () -> Unit,
+    // The reason list is the same whatever is being reported; only the heading has to
+    // say what it is, so a comment report reuses this rather than cloning it.
+    title: String = "Laporkan video",
+    onSubmit: (String) -> Unit,
+) {
     val reasons = listOf(
         "Spam atau menyesatkan",
         "Konten seksual",
@@ -1458,7 +1473,7 @@ internal fun ReportReelDialog(onDismiss: () -> Unit, onSubmit: (String) -> Unit)
                 .padding(vertical = 18.dp),
         ) {
             Text(
-                "Laporkan video",
+                title,
                 color = NexusTextPrimary,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
@@ -2948,8 +2963,11 @@ private fun ReelCommentsSheet(
     val myId = SyntraClient.myUserId
     val iOwnReel = reel.authorId.isNotBlank() && reel.authorId == myId
     var pendingDelete by remember { mutableStateOf<NetReelComment?>(null) }
-    // Long-press menu on my own comment (edit / delete).
+    val clipboard = LocalClipboardManager.current
+    // Long-press menu on a comment (reply / edit / copy / delete or report).
     var actionsFor by remember { mutableStateOf<NetReelComment?>(null) }
+    var actionsAnchor by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    var reportComment by remember { mutableStateOf<NetReelComment?>(null) }
     // The comment being edited (null = writing a new one). Reuses the same composer
     // rather than a second text box — one input, two modes, like the reply flow.
     var editing by remember { mutableStateOf<NetReelComment?>(null) }
@@ -3008,10 +3026,14 @@ private fun ReelCommentsSheet(
             val tops = comments.filter { it.parentId == null }
             val sortedTops = if (newestFirst) tops.sortedByDescending { it.createdAt }
             else tops.sortedBy { it.createdAt }
+            // Triple: comment · is a reply · is the LAST reply under its parent. The
+            // last flag is what lets the thread line run unbroken from one reply to the
+            // next and stop cleanly at the end, instead of a detached stub per row.
             buildList {
                 for (t in sortedTops) {
-                    add(t to false)
-                    replies[t.id]?.sortedBy { it.createdAt }?.forEach { add(it to true) }
+                    add(Triple(t, false, false))
+                    val kids = replies[t.id]?.sortedBy { it.createdAt }.orEmpty()
+                    kids.forEachIndexed { i, r -> add(Triple(r, true, i == kids.lastIndex)) }
                 }
             }
         }
@@ -3221,17 +3243,23 @@ private fun ReelCommentsSheet(
                         Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(vertical = 8.dp),
                     ) {
-                        items(display, key = { it.first.id }) { (c, isReply) ->
+                        items(display, key = { it.first.id }) { (c, isReply, lastReply) ->
+                            // Where this row sits on screen, so the lifted copy can
+                            // appear exactly where the original was instead of jumping
+                            // to the middle of the screen.
+                            var rowBounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+                            Box(Modifier.onGloballyPositioned { rowBounds = it.boundsInWindow() }) {
                             CommentRow(
                                 c = c,
                                 isReply = isReply,
-                                canDelete = iOwnReel || (c.authorId.isNotBlank() && c.authorId == myId),
+                                lastReply = lastReply,
                                 isMine = c.authorId.isNotBlank() && c.authorId == myId,
-                                onLongPress = { actionsFor = c },
+                                onLongPress = { actionsFor = c; actionsAnchor = rowBounds },
                                 onReply = { replyingTo = c; focusRequester.requestFocus() },
                                 onToggleLike = { toggleCommentLike(c) },
                                 onOpenUser = onOpenUser,
                             )
+                            }
                         }
                     }
                 }
@@ -3283,17 +3311,8 @@ private fun ReelCommentsSheet(
                         .background(Color.White.copy(alpha = 0.06f)),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(
-                        Modifier
-                            .padding(start = 10.dp)
-                            .width(3.dp)
-                            .height(34.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(NexusAccentSoft),
-                    )
-                    Spacer(Modifier.width(10.dp))
                     Column(
-                        modifier = Modifier.weight(1f).padding(vertical = 7.dp),
+                        modifier = Modifier.weight(1f).padding(start = 12.dp, top = 7.dp, bottom = 7.dp),
                     ) {
                         Text(
                             "Membalas @${r.username.ifBlank { r.displayName }.ifBlank { "pengguna" }}",
@@ -3362,10 +3381,12 @@ private fun ReelCommentsSheet(
                     Text("GIF terlampir", color = NexusTextSecondary, fontSize = 12.sp)
                 }
             }
-            // Input row.
+            // Input row. Bottom-aligned, so as the field grows the icons and the send
+            // button stay level with the LAST line — where the caret is — instead of
+            // drifting to the middle of a tall box.
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalAlignment = Alignment.Bottom,
             ) {
                 // Attach a GIF — the same picker chat uses (gallery / GIPHY search /
                 // animated text), so there is one GIF experience in the app, not two.
@@ -3373,6 +3394,9 @@ private fun ReelCommentsSheet(
                     Icons.Filled.Gif, "Lampirkan GIF",
                     tint = if (hasGif) NexusAccentSoft else NexusTextSecondary,
                     modifier = Modifier
+                        // Nudged off the bottom edge so it reads as level with the last
+                        // line of text rather than with the box's floor.
+                        .padding(bottom = 7.dp)
                         .size(30.dp)
                         .clickable(
                             indication = null,
@@ -3385,6 +3409,7 @@ private fun ReelCommentsSheet(
                     Icons.Filled.AlternateEmail, "Tandai seseorang",
                     tint = NexusTextSecondary,
                     modifier = Modifier
+                        .padding(bottom = 10.dp)
                         .size(24.dp)
                         .clickable(
                             indication = null,
@@ -3392,11 +3417,18 @@ private fun ReelCommentsSheet(
                         ) { showTagPicker = true },
                 )
                 Spacer(Modifier.width(10.dp))
+                // Taller, and it GROWS. A comment is a paragraph often enough that a
+                // one-line slot meant typing into a moving window — you could never see
+                // the start of your own sentence. It opens at two lines' worth of height
+                // and expands to five before it starts scrolling, so most comments are
+                // visible in full while they are being written.
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(24.dp))
+                        .heightIn(min = 52.dp)
+                        .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(22.dp))
                         .padding(horizontal = 16.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.CenterStart,
                 ) {
                     if (input.isEmpty()) {
                         Text(
@@ -3411,8 +3443,8 @@ private fun ReelCommentsSheet(
                     BasicTextField(
                         value = input,
                         onValueChange = { input = it },
-                        singleLine = true,
-                        textStyle = TextStyle(color = NexusTextPrimary, fontSize = 14.sp),
+                        maxLines = 5,
+                        textStyle = TextStyle(color = NexusTextPrimary, fontSize = 14.sp, lineHeight = 19.sp),
                         cursorBrush = SolidColor(NexusAccentSoft),
                         modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
                     )
@@ -3449,96 +3481,175 @@ private fun ReelCommentsSheet(
         val mine = c.authorId.isNotBlank() && c.authorId == myId
         androidx.compose.ui.window.Dialog(
             onDismissRequest = { actionsFor = null },
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                // Edge to edge: the anchor we captured is in window coordinates from
+                // the sheet below, so this window has to start at the same y=0 or the
+                // lifted card lands a status bar lower than the comment it came from.
+                decorFitsSystemWindows = false,
+            ),
         ) {
-            // A full-screen dark backdrop with the popup on it, rather than a bare
-            // menu. The comment you picked rides the TOP of the popup: in a thread of
-            // near-identical replies a menu on its own never says which one it is
-            // about, and one of these actions deletes it.
+            // The comment is LIFTED, not copied into a dialog. It appears as its own
+            // card at the position the row occupied, everything else dimmed away, with
+            // the actions directly beneath it. The previous version was a centred panel
+            // with a preview stuck to its top — which reads as a form about a comment,
+            // not as that comment being the thing you are acting on.
+            val dismiss = { actionsFor = null }
+            var rootH by remember { mutableStateOf(0) }
+            var stackH by remember { mutableStateOf(0) }
+            val density = LocalDensity.current
+
+            // Grow-in from the row: origin at the top, so it expands out of where the
+            // comment already was rather than materialising over it.
+            val enter = remember { Animatable(0f) }
+            LaunchedEffect(c.id) { enter.animateTo(1f, spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)) }
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.62f))
+                    .onSizeChanged { rootH = it.height }
+                    // drawBehind, not background(): reading the animation inside the
+                    // draw lambda keeps the fade in the draw phase instead of
+                    // recomposing this whole box on every frame of it.
+                    .drawBehind { drawRect(Color.Black, alpha = 0.72f * enter.value.coerceIn(0f, 1f)) }
                     .clickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
-                    ) { actionsFor = null },
-                contentAlignment = Alignment.Center,
+                    ) { dismiss() },
             ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth(0.86f)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(NexusSurfaceElevated)
-                    // Swallow taps on the card itself so they don't reach the backdrop
-                    // behind it and close the very menu being aimed at.
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                    ) {}
-                    .padding(bottom = 10.dp),
-            ) {
-                // The selected comment, stuck to the top of the popup.
-                Row(
+                // Stay where the comment was, unless the actions below it would run off
+                // the bottom — then slide the whole group up just enough to fit. Both
+                // halves move together, so the menu never detaches from its comment.
+                val topPad = with(density) { 24.dp.toPx() }
+                val botPad = with(density) { 28.dp.toPx() }
+                val y = remember(actionsAnchor, stackH, rootH) {
+                    val wanted = actionsAnchor.top
+                    val maxTop = (rootH - stackH - botPad).coerceAtLeast(topPad)
+                    if (rootH == 0 || stackH == 0) wanted else wanted.coerceIn(topPad, maxTop)
+                }
+
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(NexusAccent.copy(alpha = 0.10f))
-                        .padding(horizontal = 16.dp, vertical = 13.dp),
-                    verticalAlignment = Alignment.Top,
+                        .offset { IntOffset(0, y.roundToInt()) }
+                        .onSizeChanged { stackH = it.height }
+                        .padding(horizontal = 16.dp)
+                        .graphicsLayer {
+                            val s = 0.9f + 0.1f * enter.value
+                            scaleX = s; scaleY = s
+                            alpha = enter.value.coerceIn(0f, 1f)
+                            transformOrigin = TransformOrigin(0.5f, 0f)
+                        },
                 ) {
-                    CommentAvatar(
-                        url = c.avatarUrl,
-                        name = c.displayName.ifBlank { c.username }.ifBlank { "pengguna" },
-                        size = 30.dp,
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            if (mine) "Komentar Anda" else c.displayName.ifBlank { c.username }.ifBlank { "pengguna" },
-                            color = if (mine) NexusAccentSoft else NexusTextPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                    // The comment itself, raised off the page.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .shadow(18.dp, RoundedCornerShape(18.dp))
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(NexusSurfaceElevated)
+                            // Swallow taps so touching the comment doesn't dismiss.
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) {}
+                            .padding(horizontal = 14.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        CommentAvatar(
+                            url = c.avatarUrl,
+                            name = c.displayName.ifBlank { c.username }.ifBlank { "pengguna" },
+                            size = 34.dp,
                         )
-                        if (c.body.isNotBlank()) {
-                            Spacer(Modifier.height(2.dp))
+                        Spacer(Modifier.width(11.dp))
+                        Column(Modifier.weight(1f)) {
                             Text(
-                                c.body,
-                                color = NexusTextSecondary,
-                                fontSize = 12.sp,
-                                lineHeight = 17.sp,
-                                maxLines = 3,
+                                if (mine) "Komentar Anda" else c.displayName.ifBlank { c.username }.ifBlank { "pengguna" },
+                                color = if (mine) NexusAccentSoft else NexusTextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
+                            )
+                            if (c.body.isNotBlank()) {
+                                Spacer(Modifier.height(3.dp))
+                                Text(
+                                    c.body,
+                                    color = NexusTextPrimary.copy(alpha = 0.86f),
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp,
+                                    maxLines = 6,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        if (c.mediaUrl != null) {
+                            Spacer(Modifier.width(10.dp))
+                            AsyncImage(
+                                model = c.mediaUrl,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.size(46.dp).clip(RoundedCornerShape(10.dp)),
                             )
                         }
                     }
-                    if (c.mediaUrl != null) {
-                        Spacer(Modifier.width(10.dp))
-                        AsyncImage(
-                            model = c.mediaUrl,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.size(38.dp).clip(RoundedCornerShape(8.dp)),
+
+                    Spacer(Modifier.height(10.dp))
+
+                    // Actions, in their own narrower sheet under the comment — narrower
+                    // on purpose, so the comment stays the widest thing on screen and
+                    // keeps the eye.
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth(0.72f)
+                            .shadow(14.dp, RoundedCornerShape(16.dp))
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(NexusSurfaceElevated)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) {}
+                            .padding(vertical = 4.dp),
+                    ) {
+                        CommentActionRow(Icons.AutoMirrored.Filled.Reply, "Balas", NexusTextPrimary) {
+                            dismiss()
+                            replyingTo = c
+                            editing = null
+                            runCatching { focusRequester.requestFocus() }
+                        }
+                        if (mine) {
+                            CommentActionRow(Icons.Filled.Edit, "Edit", NexusTextPrimary) {
+                                dismiss()
+                                editing = c
+                                replyingTo = null
+                                input = c.body
+                                runCatching { focusRequester.requestFocus() }
+                            }
+                        }
+                        CommentActionRow(Icons.Filled.ContentCopy, "Salin teks", NexusTextPrimary) {
+                            dismiss()
+                            clipboard.setText(AnnotatedString(c.body))
+                            Toast.makeText(context, "Teks disalin", Toast.LENGTH_SHORT).show()
+                        }
+                        androidx.compose.material3.HorizontalDivider(
+                            color = Color.White.copy(alpha = 0.07f),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 3.dp),
                         )
+                        // The reel owner may delete a comment on their post
+                        // (moderation); everyone else only their own.
+                        if (mine || iOwnReel) {
+                            CommentActionRow(Icons.Filled.Delete, "Hapus", Color(0xFFFF5D5D)) {
+                                dismiss()
+                                pendingDelete = c
+                            }
+                        } else {
+                            CommentActionRow(Icons.Filled.Flag, "Laporkan", NexusTextSecondary) {
+                                dismiss()
+                                reportComment = c
+                            }
+                        }
                     }
                 }
-                Spacer(Modifier.height(6.dp))
-                if (mine) {
-                    CommentActionRow(Icons.Filled.Edit, "Edit komentar", NexusTextPrimary) {
-                        actionsFor = null
-                        editing = c
-                        replyingTo = null
-                        input = c.body
-                        runCatching { focusRequester.requestFocus() }
-                    }
-                }
-                CommentActionRow(Icons.Filled.Delete, "Hapus komentar", Color(0xFFFF5D5D)) {
-                    actionsFor = null
-                    pendingDelete = c
-                }
-                CommentActionRow(Icons.Filled.Close, "Batal", NexusTextSecondary) { actionsFor = null }
-            }
             }
         }
     }
@@ -3572,6 +3683,21 @@ private fun ReelCommentsSheet(
                     val prefix = if (input.isEmpty() || input.endsWith(" ")) "" else " "
                     input = input + prefix + "@" + username + " "
                     focusRequester.requestFocus()
+                }
+            },
+        )
+    }
+
+    reportComment?.let { c ->
+        ReportReelDialog(
+            onDismiss = { reportComment = null },
+            title = "Laporkan komentar",
+            onSubmit = { reason ->
+                reportComment = null
+                scope.launch {
+                    runCatching { SyntraClient.reportComment(c.id, reason) }
+                        .onSuccess { Toast.makeText(context, "Laporan terkirim. Terima kasih.", Toast.LENGTH_SHORT).show() }
+                        .onFailure { Toast.makeText(context, "Gagal mengirim laporan: ${it.message}", Toast.LENGTH_LONG).show() }
                 }
             },
         )
@@ -3623,7 +3749,8 @@ private fun ReelCommentsSheet(
 private fun CommentRow(
     c: NetReelComment,
     isReply: Boolean = false,
-    canDelete: Boolean = false,
+    /** Last reply under its parent — the thread line stops at the elbow here. */
+    lastReply: Boolean = false,
     isMine: Boolean = false,
     onLongPress: () -> Unit = {},
     onReply: () -> Unit = {},
@@ -3638,9 +3765,12 @@ private fun CommentRow(
             // A not-yet-confirmed comment is drawn back a little, so it reads as "on
             // its way" rather than as a comment that is already there.
             .alpha(if (c.pending) 0.55f else 1f)
-            // Long-press my own comment to delete it.
+            // Long-press ANY settled comment to lift it and act on it. This used to be
+            // gated on `canDelete`, which meant reply and copy were only reachable on
+            // comments you happened to own — the menu decides per action what it may
+            // offer, so the gesture itself doesn't have to.
             .then(
-                if (canDelete && !c.pending) {
+                if (!c.pending) {
                     Modifier.combinedClickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
@@ -3651,38 +3781,33 @@ private fun CommentRow(
                     Modifier
                 },
             )
+            // Thread connector, drawn as the row's own background so it gets the row's
+            // FULL height. Every reply but the last runs its vertical line all the way
+            // to the bottom edge, and the next reply starts at its top edge — so a run
+            // of replies under one parent reads as one unbroken line down the thread
+            // instead of a floating stub beside each row. The last one stops at the
+            // elbow, which is what closes the group.
+            .then(
+                if (!isReply) {
+                    Modifier
+                } else {
+                    Modifier.drawBehind {
+                        val line = Color.White.copy(alpha = 0.16f)
+                        val w = 1.5.dp.toPx()
+                        val x = 27.dp.toPx()
+                        // The elbow meets the avatar's centre: 8dp of top padding above
+                        // a 30dp avatar.
+                        val elbowY = 23.dp.toPx()
+                        drawLine(line, Offset(x, 0f), Offset(x, if (lastReply) elbowY else size.height), w)
+                        drawLine(line, Offset(x, elbowY), Offset(x + 12.dp.toPx(), elbowY), w)
+                    }
+                },
+            )
             .padding(start = if (isReply) 26.dp else 18.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
     ) {
-        if (isReply) {
-            // Thread connector: an L-shaped line from the parent's avatar column down
-            // to this reply, so it's clear which comment a reply belongs to.
-            Box(
-                modifier = Modifier
-                    .width(24.dp)
-                    .height(30.dp),
-            ) {
-                // Vertical stroke.
-                Box(
-                    Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 1.dp)
-                        .width(1.5.dp)
-                        .height(16.dp)
-                        .background(Color.White.copy(alpha = 0.16f)),
-                )
-                // Horizontal elbow into the avatar.
-                Box(
-                    Modifier
-                        .align(Alignment.TopStart)
-                        .offset(y = 15.dp)
-                        .padding(start = 1.dp)
-                        .width(12.dp)
-                        .height(1.5.dp)
-                        .background(Color.White.copy(alpha = 0.16f)),
-                )
-            }
-            Spacer(Modifier.width(4.dp))
-        }
+        // The connector itself is painted by the row's background (see threadLine
+        // below) so it can span the row's real height; here we only reserve its column.
+        if (isReply) Spacer(Modifier.width(28.dp))
         // Avatar and name open the author's profile — the two things everyone taps
         // expecting exactly that. Not offered on my own comment (it would just open
         // my profile from inside my own post) or while one is still sending.
@@ -3743,16 +3868,10 @@ private fun CommentRow(
                         .alpha(0.72f),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(
-                        Modifier
-                            .padding(start = 8.dp)
-                            .width(2.5.dp)
-                            .height(24.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(NexusAccentSoft),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Column(Modifier.padding(top = 5.dp, bottom = 5.dp, end = 10.dp)) {
+                    // No accent rule down the left. The tinted background and the @name
+                    // already say this is a quote, and the bar was a second vertical
+                    // line right next to the thread connector.
+                    Column(Modifier.padding(start = 10.dp, top = 5.dp, bottom = 5.dp, end = 10.dp)) {
                         if (c.replyToUsername.isNotBlank()) {
                             Text(
                                 "@${c.replyToUsername}",

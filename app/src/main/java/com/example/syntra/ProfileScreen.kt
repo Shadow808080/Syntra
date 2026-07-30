@@ -7,6 +7,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -38,6 +41,17 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -159,6 +173,9 @@ fun ProfileScreen(
     var pendingDelete by remember { mutableStateOf<NetReel?>(null) }
     // Short whose long-press action sheet is open (null = none).
     var optionsFor by remember { mutableStateOf<NetReel?>(null) }
+    // Where the pressed tile sits on screen, so its lifted copy appears exactly there
+    // instead of in the middle of the display. Same idea as the comment popup in Shorts.
+    var optionsAnchor by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
     // Short whose caption is being edited (null = none).
     var editCaptionFor by remember { mutableStateOf<NetReel?>(null) }
     // Which people list is open over the profile (null = none).
@@ -520,11 +537,16 @@ fun ProfileScreen(
                 }
             } else {
                 itemsIndexed(list, key = { _, r -> r.id }) { index, reel ->
-                    ReelThumb(
-                        reel = reel,
-                        onLongPress = { optionsFor = reel },
-                        onOpen = { viewerAt = index },
-                    )
+                    var tileBounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+                    Box(
+                        Modifier.onGloballyPositioned { tileBounds = it.boundsInWindow() },
+                    ) {
+                        ReelThumb(
+                            reel = reel,
+                            onLongPress = { optionsFor = reel; optionsAnchor = tileBounds },
+                            onOpen = { viewerAt = index },
+                        )
+                    }
                 }
             }
         }
@@ -579,6 +601,7 @@ fun ProfileScreen(
         val mine = isMe && reel.authorId.let { it.isBlank() || it == SyntraClient.myUserId }
         ReelOptionsSheet(
             reel = reel,
+            anchor = optionsAnchor,
             isMine = mine,
             inSavedTab = tab == ProfileTab.SAVED,
             onDelete = { optionsFor = null; pendingDelete = reel },
@@ -1411,6 +1434,13 @@ private fun ReelThumb(reel: NetReel, onLongPress: () -> Unit, onOpen: () -> Unit
 /**
  * Actions for one short, opened by pressing and holding its tile.
  *
+ * The tile is LIFTED, not described. It reappears as its own card at the exact spot in
+ * the grid it already occupied, everything else dimmed away, with the actions directly
+ * beneath it — the same concept as the comment popup in Shorts. The previous version
+ * was a centred dialog with a 46×60 thumbnail stuck to its top, which reads as a form
+ * *about* a video rather than as that video being the thing you are acting on; and in
+ * a grid of near-identical thumbnails a centred panel never says which tile you hit.
+ *
  * What's offered depends on whose reel it is and which tab you're on, so the sheet
  * never shows something that would just fail: only the owner gets "Hapus", only the
  * Saved tab gets "Hapus dari simpanan", and reporting is pointless on your own post.
@@ -1418,6 +1448,7 @@ private fun ReelThumb(reel: NetReel, onLongPress: () -> Unit, onOpen: () -> Unit
 @Composable
 private fun ReelOptionsSheet(
     reel: NetReel,
+    anchor: androidx.compose.ui.geometry.Rect,
     isMine: Boolean,
     inSavedTab: Boolean,
     onDelete: () -> Unit,
@@ -1427,79 +1458,148 @@ private fun ReelOptionsSheet(
     onReport: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Column(
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            // Edge to edge: the anchor was captured in window coordinates, so this
+            // window has to start at the same y=0 or the lifted tile lands a status
+            // bar lower than the thumbnail it came from.
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        val density = LocalDensity.current
+        var rootSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+        var stackH by remember { mutableStateOf(0) }
+
+        // Grow-in from the tile, origin at its top-left, so it expands out of where the
+        // thumbnail already was rather than materialising over it.
+        val enter = remember { Animatable(0f) }
+        LaunchedEffect(reel.id) {
+            enter.animateTo(1f, spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow))
+        }
+
+        // A grid tile is only a third of the screen wide; the actions need more room
+        // than that, so the sheet under it has its own width and the pair is kept on
+        // screen as a unit.
+        val sheetW = with(density) { 226.dp.toPx() }
+        val pad = with(density) { 14.dp.toPx() }
+        val gap = with(density) { 10.dp.toPx() }
+        val tileW = if (anchor.width > 0f) anchor.width else with(density) { 120.dp.toPx() }
+        val tileH = if (anchor.height > 0f) anchor.height else tileW / 0.66f
+
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .background(NexusSurface, RoundedCornerShape(22.dp))
-                .border(1.dp, NexusStroke, RoundedCornerShape(22.dp))
-                .padding(vertical = 18.dp),
+                .fillMaxSize()
+                .onSizeChanged { rootSize = it }
+                // drawBehind, not background(): reading the animation inside the draw
+                // lambda keeps the fade in the draw phase instead of recomposing this
+                // whole box on every frame of it.
+                .drawBehind { drawRect(Color.Black, alpha = 0.72f * enter.value.coerceIn(0f, 1f)) }
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { onDismiss() },
         ) {
-            // Header: which short this is, plus how it's doing. The numbers are the
-            // reason most people long-press their own post in the first place.
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp),
+            // Horizontally: start at the tile's own left edge, pulled back only as far
+            // as needed to keep the wider actions sheet on screen. Vertically: stay
+            // where the tile was unless the actions would run off the bottom, then
+            // slide the whole group up together so the menu never detaches from it.
+            val x = remember(anchor, rootSize) {
+                val widest = maxOf(tileW, sheetW)
+                val maxLeft = (rootSize.width - widest - pad).coerceAtLeast(pad)
+                if (rootSize.width == 0) anchor.left else anchor.left.coerceIn(pad, maxLeft)
+            }
+            val y = remember(anchor, stackH, rootSize) {
+                val maxTop = (rootSize.height - stackH - pad * 2).coerceAtLeast(pad)
+                if (rootSize.height == 0 || stackH == 0) anchor.top else anchor.top.coerceIn(pad, maxTop)
+            }
+
+            Column(
+                modifier = Modifier
+                    .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
+                    .onSizeChanged { stackH = it.height }
+                    .graphicsLayer {
+                        val s = 0.9f + 0.1f * enter.value
+                        scaleX = s; scaleY = s
+                        alpha = enter.value.coerceIn(0f, 1f)
+                        transformOrigin = TransformOrigin(0f, 0f)
+                    },
             ) {
-                AsyncImage(
-                    model = reel.mediaUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
+                // The tile itself, raised off the page at its own size.
+                Box(
                     modifier = Modifier
-                        .size(46.dp, 60.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(NexusSurfaceElevated),
-                )
-                Spacer(Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        reel.caption.ifBlank { "Tanpa keterangan" },
-                        color = NexusTextPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                        .size(with(density) { tileW.toDp() }, with(density) { tileH.toDp() })
+                        .shadow(20.dp, RoundedCornerShape(14.dp))
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(NexusSurfaceElevated)
+                        // Swallow taps so touching the video doesn't dismiss.
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) {},
+                ) {
+                    // Just the frame. Nothing is drawn over it: the lifted tile exists to
+                    // say WHICH video you are acting on, and stats stamped across it only
+                    // obscured the one thing that answers that.
+                    AsyncImage(
+                        model = reel.mediaUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
                     )
-                    Spacer(Modifier.height(5.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        ReelStat(Icons.Filled.Visibility, reel.viewCount)
-                        Spacer(Modifier.width(12.dp))
-                        ReelStat(Icons.Filled.Favorite, reel.likeCount)
-                        Spacer(Modifier.width(12.dp))
-                        ReelStat(Icons.Filled.ChatBubbleOutline, reel.commentCount)
+                }
+
+                Spacer(Modifier.height(with(density) { gap.toDp() }))
+
+                // Actions, in their own sheet under the video.
+                Column(
+                    modifier = Modifier
+                        .width(with(density) { sheetW.toDp() })
+                        .shadow(14.dp, RoundedCornerShape(16.dp))
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(NexusSurfaceElevated)
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) {}
+                        .padding(vertical = 4.dp),
+                ) {
+                    if (isMine && !inSavedTab) {
+                        CoverOptionRow(Icons.Filled.Edit, "Edit keterangan", NexusTextPrimary, onEdit)
+                    }
+                    CoverOptionRow(Icons.Filled.Download, "Unduh video", NexusTextPrimary, onDownload)
+                    if (inSavedTab) {
+                        CoverOptionRow(
+                            Icons.Filled.BookmarkRemove,
+                            "Hapus dari simpanan",
+                            NexusTextPrimary,
+                            onToggleSave,
+                        )
+                    } else if (!isMine) {
+                        CoverOptionRow(
+                            if (reel.isSaved) Icons.Filled.BookmarkRemove else Icons.Filled.Bookmark,
+                            if (reel.isSaved) "Hapus dari simpanan" else "Simpan",
+                            NexusTextPrimary,
+                            onToggleSave,
+                        )
+                    }
+                    // Destructive and reporting actions sit below a rule, so the row
+                    // that cannot be undone is never the one your thumb lands on next.
+                    if (!isMine || (isMine && !inSavedTab)) {
+                        HorizontalDivider(
+                            color = Color.White.copy(alpha = 0.07f),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 3.dp),
+                        )
+                    }
+                    if (!isMine) {
+                        CoverOptionRow(Icons.Filled.Flag, "Laporkan", NexusTextSecondary, onReport)
+                    }
+                    if (isMine && !inSavedTab) {
+                        CoverOptionRow(Icons.Filled.Delete, "Hapus short", Color(0xFFFF5D5D), onDelete)
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            HorizontalDivider(color = NexusStroke)
-            Spacer(Modifier.height(4.dp))
-
-            if (isMine && !inSavedTab) {
-                CoverOptionRow(Icons.Filled.Edit, "Edit keterangan", NexusTextPrimary, onEdit)
-            }
-            CoverOptionRow(Icons.Filled.Download, "Unduh video", NexusTextPrimary, onDownload)
-            if (inSavedTab) {
-                CoverOptionRow(
-                    Icons.Filled.BookmarkRemove,
-                    "Hapus dari simpanan",
-                    NexusTextPrimary,
-                    onToggleSave,
-                )
-            } else if (!isMine) {
-                CoverOptionRow(
-                    if (reel.isSaved) Icons.Filled.BookmarkRemove else Icons.Filled.Bookmark,
-                    if (reel.isSaved) "Hapus dari simpanan" else "Simpan",
-                    NexusTextPrimary,
-                    onToggleSave,
-                )
-            }
-            if (!isMine) {
-                CoverOptionRow(Icons.Filled.Flag, "Laporkan", NexusTextPrimary, onReport)
-            }
-            if (isMine && !inSavedTab) {
-                CoverOptionRow(Icons.Filled.Delete, "Hapus short", Color(0xFFFF5D5D), onDelete)
-            }
-            CoverOptionRow(Icons.Filled.Close, "Batal", NexusTextSecondary, onDismiss)
         }
     }
 }
@@ -1621,10 +1721,12 @@ private fun EditCaptionDialog(initial: String, onDismiss: () -> Unit, onSave: (S
 
 @Composable
 private fun ReelStat(icon: androidx.compose.ui.graphics.vector.ImageVector, value: Int) {
+    // White, because these now sit on the lifted thumbnail over a video frame rather
+    // than on a surface. Secondary grey vanished against a bright frame.
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, null, tint = NexusTextSecondary, modifier = Modifier.size(13.dp))
+        Icon(icon, null, tint = Color.White, modifier = Modifier.size(13.dp))
         Spacer(Modifier.width(3.dp))
-        Text(formatCount(value), color = NexusTextSecondary, fontSize = 11.sp)
+        Text(formatCount(value), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
