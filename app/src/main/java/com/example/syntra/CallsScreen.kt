@@ -238,8 +238,12 @@ fun CallsScreen(
         }
     }
 
+    // Contacts and avatars only. The history has exactly ONE owner — the effect above.
+    // This used to seed it too, with a bare addAll; on a composition that starts with
+    // the Calls tab already visible both effects ran, the second appended the same
+    // entries the first had just loaded, and every id appeared twice — which is a
+    // duplicate-key crash in the list below, not a cosmetic double.
     LaunchedEffect(Unit) {
-        history.addAll(CallLog.all(context))
         if (ApiConfig.ENABLED) {
             runCatching { SyntraClient.getConversations() }
                 .onSuccess { list ->

@@ -65,6 +65,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -191,6 +192,9 @@ fun RoomsScreen(
     var searchQuery by remember { mutableStateOf("") }
     // Room currently joined and shown full-screen (null = browsing the list).
     var openedRoom by remember { mutableStateOf<Room?>(null) }
+    // The room we are connecting to, if any. Set from RoomDetailScreen, read by the
+    // card so the wait is shown on the room you tapped instead of on a spinner page.
+    var joiningRoomId by remember { mutableStateOf<String?>(null) }
     var showCreate by remember { mutableStateOf(false) }
     LaunchedEffect(openedRoom) { onOverlayChange(openedRoom != null) }
     val allRooms = remember { mutableStateListOf<Room>() }
@@ -426,7 +430,11 @@ fun RoomsScreen(
                             room = room,
                             joinable = sfuReady,
                             faces = roomFaces[room.id].orEmpty(),
-                            onJoin = { if (sfuReady) openedRoom = room },
+                            joining = joiningRoomId == room.id,
+                            // One join at a time: the list stays visible while
+                            // connecting, so without this a second tap would swap the
+                            // room out from under a session that is half-open.
+                            onJoin = { if (sfuReady && joiningRoomId == null) openedRoom = room },
                         )
                         if (index != visibleRooms.lastIndex) {
                             Spacer(Modifier.height(14.dp))
@@ -481,8 +489,10 @@ fun RoomsScreen(
                 room = room,
                 onLeave = {
                     openedRoom = null
+                    joiningRoomId = null
                     scope.launch { reload() }
                 },
+                onConnectingChange = { joiningRoomId = if (it) room.id else null },
             )
         }
     }
@@ -922,6 +932,8 @@ private fun RoomCard(
     room: Room,
     joinable: Boolean,
     faces: List<NetRoomParticipant>,
+    /** True while we are connecting to THIS room — the card reports its own wait. */
+    joining: Boolean = false,
     onJoin: () -> Unit,
 ) {
     val shape = RoundedCornerShape(22.dp)
@@ -1035,7 +1047,54 @@ private fun RoomCard(
                 }
             }
         }
+
+        // Joining: a highlight sweeps across this card until the room is live. Last in
+        // the Box so it passes over the artwork and the text alike, and gone the moment
+        // the room opens.
+        if (joining) JoiningSweep(accent = room.accent, modifier = Modifier.matchParentSize())
     }
+}
+
+/**
+ * A band of light travelling across the card, looping while we connect.
+ *
+ * The whole animation is inside one drawWithContent lambda, so it never recomposes
+ * the card underneath it — on a slow phone the join is exactly when the main thread
+ * is busiest, and a skeleton that costs frames would make the wait it reports longer.
+ */
+@Composable
+private fun JoiningSweep(accent: Color, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "joining")
+    val x by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1150, easing = LinearEasing), RepeatMode.Restart),
+        label = "joining-sweep",
+    )
+    Box(
+        modifier = modifier.drawWithContent {
+            drawContent()
+            // A dim wash says "not yours yet"; the band says "still working".
+            drawRect(Color.Black.copy(alpha = 0.22f))
+            val band = size.width * 0.42f
+            val start = (size.width + band) * x - band
+            drawRect(
+                brush = Brush.horizontalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color.White.copy(alpha = 0.16f),
+                        accent.copy(alpha = 0.30f),
+                        Color.White.copy(alpha = 0.16f),
+                        Color.Transparent,
+                    ),
+                    startX = start,
+                    endX = start + band,
+                ),
+                topLeft = androidx.compose.ui.geometry.Offset(start, 0f),
+                size = androidx.compose.ui.geometry.Size(band, size.height),
+            )
+        },
+    )
 }
 
 /** A pulsing "LIVE" pill — a small red dot that breathes next to the label. */

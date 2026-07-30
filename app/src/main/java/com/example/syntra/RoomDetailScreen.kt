@@ -161,7 +161,16 @@ private const val PARTICIPANT_POLL_MS = 20_000L
  * token from `join`.
  */
 @Composable
-fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
+fun RoomDetailScreen(
+    room: Room,
+    onLeave: () -> Unit,
+    /**
+     * True while still connecting. The rooms list uses it to shimmer the card you
+     * tapped — the wait belongs on the thing you are waiting for, not on a separate
+     * screen that hides the app and says nothing a spinner doesn't.
+     */
+    onConnectingChange: (Boolean) -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -607,22 +616,31 @@ fun RoomDetailScreen(room: Room, onLeave: () -> Unit) {
     val speakers = participants.filter { it.role != "listener" }
     val listeners = participants.filter { it.role == "listener" }
 
-    // Crossfade between the join gate and the live room so entering feels smooth
-    // instead of snapping. Hold everything back until the audio session is up —
-    // showing the room while still connecting makes a silent room look broken.
+    // The rooms list shimmers its own card while this is true, so there is nothing to
+    // draw here yet — covering it with a spinner page would hide the very card that
+    // is reporting the wait.
+    LaunchedEffect(joinState) { onConnectingChange(joinState == JoinState.CONNECTING) }
+    DisposableEffect(Unit) { onDispose { onConnectingChange(false) } }
+
+    // Crossfade between the connected room and what precedes it, so entering feels
+    // smooth instead of snapping. Everything is held back until the audio session is
+    // up — showing the room while still connecting makes a silent room look broken.
     androidx.compose.animation.Crossfade(
         targetState = joinState == JoinState.CONNECTED,
         animationSpec = tween(320),
         label = "room-join",
     ) { connected ->
         if (!connected) {
-            JoinGate(
-                room = room,
-                state = joinState,
-                error = joinError,
-                onRetry = { scope.launch { joinAndConnect() } },
-                onCancel = { leave() },
-            )
+            // Failure still needs a screen: it has to say what went wrong and offer
+            // the way out. Only the WAIT moved to the card.
+            if (joinState == JoinState.FAILED) {
+                JoinGate(
+                    room = room,
+                    error = joinError,
+                    onRetry = { scope.launch { joinAndConnect() } },
+                    onCancel = { leave() },
+                )
+            }
             return@Crossfade
         }
 
@@ -1763,10 +1781,13 @@ private fun RoomVtuberSheet(
 // Join gate
 // ---------------------------------------------------------------------------
 
+/**
+ * Shown only when joining FAILED. The connecting case has no screen at all any more —
+ * it is a shimmer on the room's card back in the list.
+ */
 @Composable
 private fun JoinGate(
     room: Room,
-    state: JoinState,
     error: String?,
     onRetry: () -> Unit,
     onCancel: () -> Unit,
@@ -1789,18 +1810,10 @@ private fun JoinGate(
                     .background(room.accent.copy(alpha = 0.16f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                if (state == JoinState.CONNECTING) {
-                    CircularProgressIndicator(
-                        color = room.accent,
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(34.dp),
-                    )
-                } else {
-                    Icon(
-                        Icons.Filled.CallEnd, null,
-                        tint = Color(0xFFFF5D5D), modifier = Modifier.size(30.dp),
-                    )
-                }
+                Icon(
+                    Icons.Filled.CallEnd, null,
+                    tint = Color(0xFFFF5D5D), modifier = Modifier.size(30.dp),
+                )
             }
             Spacer(Modifier.height(22.dp))
             Text(
@@ -1812,37 +1825,31 @@ private fun JoinGate(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            // Saat menyambung: cukup spinner + judul room, tanpa teks "Menyambungkan…"
-            // (diminta user). Teks hanya muncul kalau GAGAL, untuk menerangkan kenapa.
-            if (state == JoinState.FAILED) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = error ?: "Gagal bergabung.",
-                    color = NexusTextSecondary,
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
-                    textAlign = TextAlign.Center,
-                )
-            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = error ?: "Gagal bergabung.",
+                color = NexusTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                textAlign = TextAlign.Center,
+            )
             Spacer(Modifier.height(28.dp))
-            if (state == JoinState.FAILED) {
-                Box(
-                    modifier = Modifier
-                        .background(
-                            Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)),
-                            RoundedCornerShape(50),
-                        )
-                        .clickable(
-                            indication = null,
-                            interactionSource = remember { MutableInteractionSource() },
-                            onClick = onRetry,
-                        )
-                        .padding(horizontal = 28.dp, vertical = 12.dp),
-                ) {
-                    Text("Coba lagi", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                }
-                Spacer(Modifier.height(14.dp))
+            Box(
+                modifier = Modifier
+                    .background(
+                        Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)),
+                        RoundedCornerShape(50),
+                    )
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = onRetry,
+                    )
+                    .padding(horizontal = 28.dp, vertical = 12.dp),
+            ) {
+                Text("Coba lagi", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
+            Spacer(Modifier.height(14.dp))
             Text(
                 text = "Batal",
                 color = NexusTextSecondary,

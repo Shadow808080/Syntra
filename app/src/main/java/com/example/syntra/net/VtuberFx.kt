@@ -347,6 +347,11 @@ class AvatarVideoCapturer(
     override fun initialize(sth: SurfaceTextureHelper, ctx: android.content.Context?, obs: CapturerObserver) {
         // We don't use the SurfaceTexture path (see the class note) — only the observer.
         observer = obs
+        // initialize() can land AFTER startCapture(): VoiceEngine calls startCapture as
+        // soon as createVideoTrack returns, and the observer is wired up by LiveKit on
+        // its own schedule. The started signal we sent then went to a null observer, so
+        // the source never left the stopped state and the track stayed dark forever.
+        if (running) runCatching { obs.onCapturerStarted(true) }
     }
 
     override fun startCapture(w: Int, h: Int, framerate: Int) {
@@ -370,9 +375,17 @@ class AvatarVideoCapturer(
 
     private fun drawOneFrame() {
         val obs = observer ?: return
+        // dispose() recycles the bitmap from whichever thread stops the track, while
+        // this runs on the render thread. Reading a recycled bitmap throws, and an
+        // uncaught throw on a HandlerThread takes the whole process down — turning the
+        // avatar off at the wrong 40ms used to be a crash, not a bug.
+        if (!running || bitmap.isRecycled) return
         val tMs = (System.nanoTime() - startNs) / 1_000_000L
-        runCatching { renderer.draw(canvas, width, height, VtuberFx.avatar, VtuberFx.level, tMs) }
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        val drawn = runCatching {
+            renderer.draw(canvas, width, height, VtuberFx.avatar, VtuberFx.level, tMs)
+            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        }.isSuccess
+        if (!drawn) return
 
         val buffer = JavaI420Buffer.allocate(width, height)
         argbToI420(pixels, width, height, buffer)
@@ -432,7 +445,9 @@ class AvatarVideoCapturer(
 
     override fun dispose() {
         runCatching { stopCapture() }
-        runCatching { bitmap.recycle() }
+        // quitSafely() lets the queued frame finish, so recycling here would still race
+        // it. The bitmap is 480×480 and dies with the capturer anyway; letting GC take
+        // it is the price of not tearing memory out from under a live draw.
     }
 
     override fun isScreencast(): Boolean = false

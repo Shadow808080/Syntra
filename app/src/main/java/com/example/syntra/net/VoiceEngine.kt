@@ -143,38 +143,51 @@ object VoiceEngine {
                             levels[id] = lvl
                             // Drive the VTuber mouth from my own loudness.
                             if (_avatarOn.value) VtuberFx.feedLevel(lvl)
-                            // Gate on INTENT, not on what LiveKit still reports.
+                            // My own tile, gated on INTENT rather than on what LiveKit
+                            // still reports.
                             //
-                            // This is what kept the tile black. After unpublishing the
-                            // avatar (or disabling the camera) LiveKit keeps returning
-                            // the CAMERA publication for a short window, and this loop
-                            // runs every 80 ms — so it re-added the dead track faster
-                            // than setAvatarEnabled/setCameraEnabled could remove it,
-                            // and the grid went on rendering a track with no frames.
-                            // NOTE: no `muted` check here, only intent.
+                            // Reporting is what kept the tile black: after unpublishing,
+                            // LiveKit keeps returning the CAMERA publication for a short
+                            // window, and this loop runs every 80 ms — it re-added the
+                            // dead track faster than setAvatarEnabled/setCameraEnabled
+                            // could remove it, so the grid rendered a track with no
+                            // frames. Hence no `muted` check here either: the avatar is
+                            // published by hand, so its publication reports muted = true
+                            // while happily producing frames, and filtering on it dropped
+                            // the avatar every poll.
                             //
-                            // Adding one broke the VTuber outright. The avatar is
-                            // published by hand (publishVideoTrack) rather than through
-                            // the high-level camera API, so its publication reports
-                            // muted = true even while it is happily producing frames —
-                            // the flag tracks the high-level mute that was never set.
-                            // Filtering on it dropped the avatar every poll, so the tile
-                            // fell back to the profile picture and flickered as the
-                            // explicit set and the poll fought over the same slot.
-                            if (_cameraOn.value || _avatarOn.value) {
-                                (lp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack)
-                                    ?.let { videos[id] = it }
+                            // And for the avatar the answer comes from `avatarTrack`, NOT
+                            // from getTrackPublication. That lookup returns null for a
+                            // beat or two right after publishVideoTrack — one poll in
+                            // that window emptied my slot, the tile fell back to the
+                            // profile picture, and the next poll put it back. Twelve
+                            // times a second, that is the flicker. We published the
+                            // track and hold the reference; there is nothing to ask.
+                            val mine: VideoTrack? = when {
+                                _avatarOn.value -> avatarTrack
+                                _cameraOn.value ->
+                                    lp.getTrackPublication(Track.Source.CAMERA)?.track as? VideoTrack
+                                else -> null
                             }
+                            if (mine != null) videos[id] = mine
                         }
                     }
                     rm.remoteParticipants.values.forEach { rp ->
                         val id = rp.identity?.value ?: return@forEach
                         levels[id] = rp.audioLevel.coerceIn(0f, 1f)
-                        // Same for peers: a muted publication is someone who turned
-                        // their camera off, and rendering it leaves them as a black
-                        // rectangle instead of falling back to their avatar cover.
-                        rp.getTrackPublication(Track.Source.CAMERA)
-                            ?.takeIf { !it.muted }
+                        // Peers: still skip muted publications — a muted one is someone
+                        // who turned their camera off, and rendering it leaves them a
+                        // black rectangle instead of falling back to their cover.
+                        //
+                        // But SCAN, don't ask. getTrackPublication returns the first
+                        // CAMERA-source publication it finds, and a peer can legitimately
+                        // have two: a stale muted camera and the live avatar published
+                        // over the top of it. Picking the wrong one showed their profile
+                        // picture while they were looking at their own avatar.
+                        rp.trackPublications.values
+                            .firstOrNull { pub ->
+                                pub.source == Track.Source.CAMERA && !pub.muted && pub.track is VideoTrack
+                            }
                             ?.let { pub -> (pub.track as? VideoTrack)?.let { videos[id] = it } }
                     }
                     _audioLevels.value = levels
@@ -286,16 +299,33 @@ object VoiceEngine {
                 lp.getTrackPublication(Track.Source.CAMERA)?.track is LocalVideoTrack
             if (hadCamera) {
                 runCatching { lp.setCameraEnabled(false) }
+                // setCameraEnabled(false) does NOT unpublish — LiveKit only sets
+                // publication.muted = true and stops the capturer, leaving a live,
+                // muted CAMERA publication behind. The avatar then publishes a SECOND
+                // track under the same source, and every remote peer's
+                // getTrackPublication(CAMERA) can hand back the stale muted one — which
+                // their "skip muted publications" rule then drops, so they saw my
+                // profile picture while I saw my own avatar perfectly. Free the source
+                // for real.
+                runCatching {
+                    (lp.getTrackPublication(Track.Source.CAMERA)?.track as? LocalVideoTrack)
+                        ?.let { lp.unpublishTrack(it) }
+                }
                 _cameraOn.value = false
                 if (id != null) {
                     val cur = HashMap(_videoTracks.value); cur.remove(id); _videoTracks.value = cur
                 }
                 delay(150)
             }
-            val ok = runCatching {
-                val capturer = AvatarVideoCapturer()
-                val track = lp.createVideoTrack(name = "avatar", capturer = capturer)
-                track.startCapture()
+            // The track is created outside the try so a failed PUBLISH can still tear it
+            // down. It used to be created inside, and a publish that threw left a live
+            // capturer nobody held a reference to — a HandlerThread drawing and encoding
+            // the avatar 24 times a second, invisible, until the room ended.
+            val track = runCatching {
+                lp.createVideoTrack(name = "avatar", capturer = AvatarVideoCapturer())
+                    .also { it.startCapture() }
+            }.getOrNull()
+            val ok = track != null && runCatching {
                 lp.publishVideoTrack(
                     track,
                     io.livekit.android.room.participant.VideoTrackPublishOptions(
@@ -311,11 +341,23 @@ object VoiceEngine {
                     cur[id] = track
                     _videoTracks.value = cur
                 }
-            }
-            // If the publish failed, make sure no stale/dead track is left rendering as
-            // a black tile — clear my slot so it falls back to the avatar-off cover.
-            if (ok.isFailure && id != null) {
-                val cur = HashMap(_videoTracks.value); cur.remove(id); _videoTracks.value = cur
+            }.isSuccess
+            if (!ok) {
+                // No half-on state: drop the dead track and clear my slot, so the tile
+                // falls back to the avatar-off cover instead of rendering nothing.
+                if (track != null) {
+                    withContext(Dispatchers.Default) {
+                        runCatching { lp.unpublishTrack(track) }
+                        runCatching { track.stopCapture() }
+                        runCatching { track.dispose() }
+                    }
+                }
+                avatarTrack = null
+                _avatarOn.value = false
+                VtuberFx.enabled = false
+                if (id != null) {
+                    val cur = HashMap(_videoTracks.value); cur.remove(id); _videoTracks.value = cur
+                }
             }
         } else {
             if (!_avatarOn.value && avatarTrack == null) return
