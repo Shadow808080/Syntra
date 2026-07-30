@@ -3,6 +3,7 @@ package com.example.syntra.net
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.media.audiofx.LoudnessEnhancer
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -19,9 +20,14 @@ object MusicPlayer {
 
     private var player: MediaPlayer? = null
 
-    /** The queue the current track came from, for next/previous. */
-    private var queue: List<MusicTrack> = emptyList()
-    private var index: Int = -1
+    /**
+     * The queue the current track came from — now readable, so the now-playing screen
+     * can show what is coming instead of making people go back to the list to find out.
+     */
+    var queue by mutableStateOf<List<MusicTrack>>(emptyList())
+        private set
+    var index by mutableStateOf(-1)
+        private set
 
     var current by mutableStateOf<MusicTrack?>(null)
         private set
@@ -37,18 +43,95 @@ object MusicPlayer {
     var durationMs by mutableStateOf(0)
         private set
 
-    /** Shuffle auto-advance / skip-next through the queue. */
-    var shuffle by mutableStateOf(false)
+    /**
+     * How the queue plays, as ONE setting rather than two switches.
+     *
+     * Shuffle and repeat used to be separate toggles, which let you set combinations
+     * that contradict each other and made you read two controls to know what would
+     * happen next. This is a single cycle: play through · shuffle · loop the queue ·
+     * loop this track.
+     */
+    enum class Mode { ORDER, SHUFFLE, REPEAT_ALL, REPEAT_ONE }
+
+    var mode by mutableStateOf(Mode.ORDER)
         private set
-    /** Repeat the current track when it ends. */
-    var repeatOne by mutableStateOf(false)
-        private set
+
+    /** True while the queue should be traversed at random. */
+    val shuffle: Boolean get() = mode == Mode.SHUFFLE
+
+    fun cycleMode() {
+        mode = when (mode) {
+            Mode.ORDER -> Mode.SHUFFLE
+            Mode.SHUFFLE -> Mode.REPEAT_ALL
+            Mode.REPEAT_ALL -> Mode.REPEAT_ONE
+            Mode.REPEAT_ONE -> Mode.ORDER
+        }
+    }
+
+    /**
+     * 0f..1f, the app's own level — independent of the device volume keys, so turning
+     * music down doesn't take call audio with it.
+     *
+     * The scale is not linear-to-the-player: the MIDDLE is the phone's own level.
+     * Below 0.5 attenuates the stream; above 0.5 there is nothing left to give (the
+     * player clamps at 1.0), so the extra comes from a [LoudnessEnhancer] on the
+     * session, up to +6 dB — roughly twice as loud — at the top of the slider.
+     */
+    const val UNITY = 0.5f
+
+    private var volumeState by mutableStateOf(UNITY)
+    var volume: Float
+        get() = volumeState
+        set(v) {
+            volumeState = v.coerceIn(0f, 1f)
+            applyVolume()
+        }
+
+    /** Extra gain above the device level. 600 mB = +6 dB ≈ double the loudness. */
+    private const val MAX_BOOST_MB = 600
+
+    private var booster: LoudnessEnhancer? = null
+
+    private fun applyVolume() {
+        val p = player ?: return
+        val v = volumeState
+        runCatching {
+            if (v <= UNITY) p.setVolume(v / UNITY, v / UNITY) else p.setVolume(1f, 1f)
+        }
+        val gain = if (v <= UNITY) 0 else (((v - UNITY) / (1f - UNITY)) * MAX_BOOST_MB).toInt()
+        runCatching {
+            // Built lazily: an enhancer at 0 mB is a no-op, so most sessions never
+            // need one at all, and the effect can legitimately fail to attach on
+            // devices that don't offer it — the base volume still works either way.
+            if (booster == null && gain > 0) {
+                booster = LoudnessEnhancer(p.audioSessionId).apply { enabled = true }
+            }
+            booster?.setTargetGain(gain)
+        }
+    }
+
+    private fun releaseBooster() {
+        runCatching { booster?.release() }
+        booster = null
+    }
 
     val hasNext: Boolean get() = queue.isNotEmpty() && index < queue.lastIndex
     val hasPrevious: Boolean get() = queue.isNotEmpty() && index > 0
 
-    fun toggleShuffle() { shuffle = !shuffle }
-    fun toggleRepeat() { repeatOne = !repeatOne }
+    /**
+     * Whether [next] will actually move — the skip button's enabled look comes from
+     * here, not from [hasNext], because next wraps at the end of the queue. Reading
+     * "is there a later track" would grey out a button that still works.
+     */
+    val canNext: Boolean get() = queue.size > 1 || hasNext
+
+    /** Jumps straight to a track already in the queue (tapped in the queue list). */
+    fun playAt(context: Context, position: Int) {
+        if (position !in queue.indices) return
+        if (position == index && player != null) { togglePlayPause(); return }
+        index = position
+        start(context, queue[position])
+    }
 
     /**
      * Plays [track], setting [queue] as the surrounding list so next/previous
@@ -88,9 +171,14 @@ object MusicPlayer {
 
     fun next(context: Context) {
         if (queue.isEmpty()) return
-        index = if (shuffle && queue.size > 1) randomOtherIndex() else {
-            if (!hasNext) return
-            index + 1
+        index = when {
+            shuffle && queue.size > 1 -> randomOtherIndex()
+            hasNext -> index + 1
+            // Pressing "next" on the last track wraps, whatever the repeat mode says.
+            // Repeat governs what happens when a track ENDS on its own; an explicit
+            // skip is a request, and answering it with nothing reads as a dead button.
+            queue.size > 1 -> 0
+            else -> return
         }
         start(context, queue[index])
     }
@@ -141,6 +229,8 @@ object MusicPlayer {
     }
 
     fun stop() {
+        // The enhancer is bound to this player's audio session, so it goes first.
+        releaseBooster()
         runCatching { player?.release() }
         player = null
         current = null
@@ -154,6 +244,8 @@ object MusicPlayer {
     }
 
     private fun start(context: Context, track: MusicTrack) {
+        // Same as stop(): the effect must not outlive the session it is attached to.
+        releaseBooster()
         runCatching { player?.release() }
         player = null
         current = track
@@ -196,16 +288,22 @@ object MusicPlayer {
             mp.setOnPreparedListener { p ->
                 preparing = false
                 durationMs = runCatching { p.duration }.getOrDefault(0)
+                // Carry the chosen level onto the new player — it belongs to the
+                // session, not to whichever track happens to be loaded.
+                applyVolume()
                 p.start()
                 isPlaying = true
             }
             mp.setOnCompletionListener {
                 when {
                     // Repeat the same track.
-                    repeatOne -> { seekTo(0); player?.start(); isPlaying = true }
-                    // Shuffle or sequential advance; stop cleanly at the very end.
+                    mode == Mode.REPEAT_ONE -> { seekTo(0); player?.start(); isPlaying = true }
+                    // Shuffle or sequential advance.
                     shuffle && queue.size > 1 -> next(appCtx)
                     hasNext -> next(appCtx)
+                    // End of the queue: wrap when looping, stop when playing through.
+                    mode == Mode.REPEAT_ALL && queue.size > 1 -> { index = 0; start(appCtx, queue[0]) }
+                    mode == Mode.REPEAT_ALL -> { seekTo(0); player?.start(); isPlaying = true }
                     else -> { isPlaying = false; progress = 1f }
                 }
             }

@@ -2,7 +2,22 @@ package com.example.syntra
 
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.Dp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,6 +41,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -42,12 +58,14 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Headphones
@@ -67,8 +85,11 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -102,6 +123,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -111,6 +133,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import kotlin.math.roundToInt
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.example.syntra.net.AudioTrimmer
 import com.example.syntra.net.MusicAlbum
 import com.example.syntra.net.MusicArtist
@@ -125,11 +149,13 @@ import com.example.syntra.net.MusicTrack
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusAccentSoft
 import com.example.syntra.ui.theme.NexusBackground
+import com.example.syntra.ui.theme.NexusSearch
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusSurfaceElevated
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -170,7 +196,12 @@ fun MusicScreen(
     val scope = rememberCoroutineScope()
 
     var browse by remember { mutableStateOf(MusicBrowse()) }
-    var loading by remember { mutableStateOf(true) }
+    // Per-source readiness. Each shelf reads only its OWN flag, so one slow source
+    // cannot hold the others behind a skeleton — the page fills in as answers arrive
+    // rather than all at once at the end.
+    var catalogueDone by remember { mutableStateOf(false) }
+    var communityDone by remember { mutableStateOf(false) }
+    var deviceScanDone by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
@@ -182,13 +213,16 @@ fun MusicScreen(
     var scanningDevice by remember { mutableStateOf(false) }
 
     suspend fun scanDevice() {
-        if (!DeviceAudio.hasPermission(context)) { localTracks.clear(); return }
+        // No permission is an ANSWER, not a pending state — the card should say "open
+        // your music folder", not shimmer forever waiting for a scan that will never run.
+        if (!DeviceAudio.hasPermission(context)) { localTracks.clear(); deviceScanDone = true; return }
         scanningDevice = true
         val found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             DeviceAudio.list(context)
         }
         localTracks.clear(); localTracks.addAll(found)
         scanningDevice = false
+        deviceScanDone = true
     }
 
     val askAudioPermission = rememberLauncherForActivityResult(
@@ -236,8 +270,7 @@ fun MusicScreen(
     // SWEEPS THROUGH the intermediate pages. So jumping Chat → Rooms, or dragging
     // toward Music and letting it spring back, made this effect start, burn the latch,
     // and then get cancelled mid-request. On the next real visit the guard returned
-    // immediately: no data, and `loading` stuck true forever, which the UI renders as a
-    // permanent spinner with no retry button (the loading branch wins over failed).
+    // immediately, leaving the tab with no data and no way to ask for any.
     //
     // Latching on success instead means a cancelled or failed attempt simply doesn't
     // count, and opening the tab tries again.
@@ -258,31 +291,49 @@ fun MusicScreen(
     }
     var browseLoaded by remember { mutableStateOf(false) }
 
-    /** Re-fetches the catalogue and the community rail. Shared by refresh and retry. */
-    suspend fun reloadMusic() {
-        val result = runCatching { MusicClient.browse() }
-        (result.exceptionOrNull() as? kotlinx.coroutines.CancellationException)?.let { throw it }
-        result
-            .onSuccess {
-                browse = it
-                failed = it.isEmpty
-                browseLoaded = !it.isEmpty
-            }
-            .onFailure { failed = true }
-        runCatching { com.example.syntra.net.SyntraClient.getMusicFeed() }
-            .onSuccess { communityTracks.clear(); communityTracks.addAll(it) }
+    /**
+     * Re-fetches everything. Shared by pull-to-refresh and the error retry.
+     *
+     * The three sources run CONCURRENTLY here too, for the same reason as on first
+     * load: a refresh should not make the community rail wait on Deezer. Each one
+     * clears its own flag as it finishes, so shelves come back one by one.
+     */
+    suspend fun reloadMusic() = coroutineScope {
+        val catalogue = launch {
+            val result = runCatching { MusicClient.browse() }
+            (result.exceptionOrNull() as? kotlinx.coroutines.CancellationException)?.let { throw it }
+            result
+                .onSuccess {
+                    browse = it
+                    failed = it.isEmpty
+                    browseLoaded = !it.isEmpty
+                }
+                .onFailure { failed = true }
+            catalogueDone = true
+        }
+        val community = launch {
+            runCatching { com.example.syntra.net.SyntraClient.getMusicFeed() }
+                .onSuccess { communityTracks.clear(); communityTracks.addAll(it) }
+            communityDone = true
+        }
         // Re-scan the phone as well, so a song added to the device since the last
         // look shows up. Nothing to do with the community feed above it.
-        scanDevice()
-        loading = false
+        val device = launch { scanDevice() }
+        catalogue.join(); community.join(); device.join()
     }
 
+    // TWO INDEPENDENT LOADS, not one sequence. They used to run one after another in a
+    // single effect, so the community rail could not appear until the Deezer catalogue
+    // had answered — the slowest source set the pace for everything. Separate effects
+    // mean each shelf swaps its skeleton for content the moment its OWN data lands, in
+    // whatever order that happens.
     LaunchedEffect(visible) {
         if (!visible || browseLoaded) return@LaunchedEffect
+        catalogueDone = false
         val result = runCatching { MusicClient.browse() }
         // runCatching swallows CancellationException too. A cancelled effect must not
-        // report failure or clear `loading` — it must leave everything untouched so the
-        // next visit retries cleanly.
+        // report failure or mark itself done — it must leave everything untouched so
+        // the next visit retries cleanly.
         (result.exceptionOrNull() as? kotlinx.coroutines.CancellationException)?.let { throw it }
         result
             .onSuccess {
@@ -293,10 +344,15 @@ fun MusicScreen(
                 browseLoaded = !it.isEmpty
             }
             .onFailure { failed = true }
+        catalogueDone = true
+    }
+
+    LaunchedEffect(visible) {
+        if (!visible || communityDone) return@LaunchedEffect
         // Community catalogue is a bonus rail — its absence must not fail the tab.
         runCatching { com.example.syntra.net.SyntraClient.getMusicFeed() }
             .onSuccess { communityTracks.clear(); communityTracks.addAll(it) }
-        loading = false
+        communityDone = true
     }
 
     // A detail page or the upload screen counts as a full-screen overlay (hide the bottom bar).
@@ -409,9 +465,10 @@ fun MusicScreen(
             )
 
             when {
-                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
-                }
+                // No full-screen spinner. The page renders immediately and each shelf
+                // carries its own skeleton, so the parts that are ready — liked songs
+                // and the device card are local and ready at once — are usable while
+                // the network shelves are still filling in.
                 searching -> MusicSearchBody(
                     query = query,
                     localTracks = localTracks,
@@ -419,7 +476,7 @@ fun MusicScreen(
                     onOpenArtist = { detail = MusicDetail.Artist(it) },
                     onOpenAlbum = { detail = MusicDetail.Album(it) },
                 )
-                failed -> MusicError { scope.launch { loading = true; failed = false; reloadMusic() } }
+                failed -> MusicError { scope.launch { failed = false; reloadMusic() } }
                 else -> PullToRefreshBox(
                     isRefreshing = refreshing,
                     onRefresh = {
@@ -485,6 +542,9 @@ fun MusicScreen(
                     // list only knows the artist's name, not the catalogue id needed
                     // to open their page directly.
                     onSearchArtist = { name -> query = name; searching = true },
+                    catalogueDone = catalogueDone,
+                    communityDone = communityDone,
+                    deviceScanDone = deviceScanDone,
                 )
                 }
             }
@@ -672,6 +732,10 @@ private fun MusicBrowseBody(
     onOpenArtist: (MusicArtist) -> Unit,
     onSearchArtist: (String) -> Unit = {},
     onOpenLocal: () -> Unit = {},
+    /** Per-source readiness — each shelf shows a skeleton until its own source answers. */
+    catalogueDone: Boolean = true,
+    communityDone: Boolean = true,
+    deviceScanDone: Boolean = true,
 ) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { LikedMusicStore.ensure(context) }
@@ -717,14 +781,30 @@ private fun MusicBrowseBody(
         // had been added. Since the thing that populated that list was the PUBLIC
         // publish flow, the local feature appeared to come alive only after an upload
         // it has nothing to do with. Now it is a straight read of MediaStore.
-        item { DeviceMusicCard(count = localTracks.size, onOpen = onOpenLocal) }
+        item {
+            if (deviceScanDone) {
+                DeviceMusicCard(count = localTracks.size, onOpen = onOpenLocal)
+            } else {
+                // Card-shaped, exactly where the real one lands, so it does not jump.
+                Shimmer(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .height(74.dp)
+                        .clip(RoundedCornerShape(14.dp)),
+                )
+            }
+        }
 
         // Community uploads — public tracks other people added from their devices.
         //
         // The publish action is the headphone-with-a-plus in the top bar now — a
         // one-off action does not belong as a full-width card in the middle of content
         // you scroll past every time.
-        if (communityTracks.isNotEmpty()) {
+        if (!communityDone) {
+            item { SectionHeaderSkeleton() }
+            item { ShelfSkeleton(cardWidth = 140.dp, cardHeight = 140.dp) }
+        } else if (communityTracks.isNotEmpty()) {
             item { SectionHeader("Unggahan komunitas") }
             item {
                 LazyRow(
@@ -739,6 +819,17 @@ private fun MusicBrowseBody(
                     }
                 }
             }
+        }
+
+        // The four catalogue shelves share ONE source, so they share one flag — but
+        // they are still independent of the community rail and the device card above.
+        if (!catalogueDone) {
+            item { SectionHeaderSkeleton() }
+            item { ShelfSkeleton(cardWidth = 140.dp, cardHeight = 140.dp) }
+            item { SectionHeaderSkeleton() }
+            item { ShelfSkeleton(cardWidth = 150.dp, cardHeight = 150.dp) }
+            item { SectionHeaderSkeleton() }
+            item { ShelfSkeleton(cardWidth = 120.dp, cardHeight = 120.dp, round = true) }
         }
 
         if (browse.trending.isNotEmpty()) {
@@ -1074,15 +1165,47 @@ private fun MusicDetailScreen(
     val subtitle: String
     val artwork: String?
     val round: Boolean
+    // The eyebrow above the title, so the page says WHAT it is without spending a
+    // whole line on it.
+    val kindLabel: String
     when (detail) {
-        is MusicDetail.Playlist -> { title = detail.item.title; subtitle = detail.item.subtitle; artwork = detail.item.pictureUrl; round = false }
-        is MusicDetail.Album -> { title = detail.item.title; subtitle = detail.item.artist; artwork = detail.item.artworkUrl; round = false }
-        is MusicDetail.Artist -> { title = detail.item.name; subtitle = "Artis"; artwork = detail.item.pictureUrl; round = true }
+        is MusicDetail.Playlist -> { title = detail.item.title; subtitle = detail.item.subtitle; artwork = detail.item.pictureUrl; round = false; kindLabel = "Playlist" }
+        is MusicDetail.Album -> { title = detail.item.title; subtitle = detail.item.artist; artwork = detail.item.artworkUrl; round = false; kindLabel = "Album" }
+        is MusicDetail.Artist -> { title = detail.item.name; subtitle = "Lagu teratas"; artwork = detail.item.pictureUrl; round = true; kindLabel = "Artis" }
         is MusicDetail.Local -> {
             title = "Lagu di perangkat"
-            subtitle = "${detail.tracks.size} lagu tersimpan di perangkat ini"
+            // The count moved to the meta line below, where it sits with the running
+            // time; repeating it here said the same thing twice.
+            subtitle = "Tersimpan di penyimpanan telepon ini"
             artwork = detail.tracks.firstOrNull()?.artworkUrl
             round = false
+            kindLabel = "Folder"
+        }
+    }
+
+    // Sort + filter live here rather than in the shelf: this is the only screen where
+    // you are looking AT a list instead of skimming past one.
+    var sort by remember(detail) { mutableStateOf(TrackSort.DEFAULT) }
+    var sortMenu by remember(detail) { mutableStateOf(false) }
+    var filter by remember(detail) { mutableStateOf("") }
+
+    // Computed straight, NOT wrapped in remember(shown, ...). For everything but the
+    // device folder `shown` is a SnapshotStateList whose identity never changes as it
+    // fills, so keying a remember on it would cache the empty first pass and leave
+    // every album and artist page permanently blank. These lists are a few hundred
+    // items at most; sorting one per recomposition costs nothing worth guarding.
+    val listed: List<MusicTrack> = run {
+        val q = filter.trim()
+        val matched = if (q.isBlank()) shown else shown.filter {
+            it.title.contains(q, ignoreCase = true) || it.artist.contains(q, ignoreCase = true)
+        }
+        when (sort) {
+            // DEFAULT is the source's own order — for an album that is the track
+            // listing, which no alphabetical sort should ever override by accident.
+            TrackSort.DEFAULT -> matched
+            TrackSort.TITLE -> matched.sortedBy { it.title.lowercase() }
+            TrackSort.ARTIST -> matched.sortedBy { it.artist.lowercase() }
+            TrackSort.LONGEST -> matched.sortedByDescending { it.durationSec }
         }
     }
 
@@ -1124,56 +1247,185 @@ private fun MusicDetailScreen(
                             contentAlignment = Alignment.Center,
                         ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Kembali", tint = NexusTextPrimary, modifier = Modifier.size(23.dp)) }
                     }
-                    // Big header art + title.
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
+
+                    // HEADER. Art on the left with the text beside it, not a centred
+                    // poster with everything stacked under it. A centred column pushes
+                    // the first song most of a screen down and leaves two dead columns
+                    // of background either side of the title; side-by-side gives the
+                    // title real width and gets the list above the fold.
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 6.dp),
+                        verticalAlignment = Alignment.Bottom,
                     ) {
                         ArtworkImage(
                             url = artwork,
-                            modifier = Modifier.size(180.dp).clip(RoundedCornerShape(if (round) 90.dp else 14.dp)),
+                            modifier = Modifier.size(132.dp).clip(RoundedCornerShape(if (round) 66.dp else 12.dp)),
                         )
-                        Spacer(Modifier.height(16.dp))
-                        Text(title, color = NexusTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        if (subtitle.isNotBlank()) {
-                            Spacer(Modifier.height(4.dp))
-                            Text(subtitle, color = NexusTextSecondary, fontSize = 13.sp)
-                        }
-                        Spacer(Modifier.height(16.dp))
-                        // Play-all button.
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(50))
-                                .background(Brush.horizontalGradient(listOf(NexusAccentSoft, NexusAccent)))
-                                .clickable(
-                                    indication = null, interactionSource = remember { MutableInteractionSource() },
-                                ) { shown.firstOrNull()?.let { onPlay(it, shown.toList()) } }
-                                .padding(horizontal = 32.dp, vertical = 12.dp),
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(20.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Putar", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(16.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                kindLabel.uppercase(),
+                                color = NexusTextSecondary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.2.sp,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                title, color = NexusTextPrimary, fontSize = 21.sp, fontWeight = FontWeight.Bold,
+                                lineHeight = 26.sp, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                            )
+                            if (subtitle.isNotBlank()) {
+                                Spacer(Modifier.height(5.dp))
+                                Text(
+                                    subtitle, color = NexusTextSecondary, fontSize = 13.sp,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                )
                             }
                         }
                     }
+
+                    // Meta line: how much there is to listen to. A count on its own
+                    // doesn't answer "have I got time for this".
+                    if (shown.isNotEmpty()) {
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            buildString {
+                                append("${shown.size} lagu")
+                                val total = shown.sumOf { it.durationSec }
+                                if (total > 0) { append(" · "); append(longDuration(total)) }
+                            },
+                            color = NexusTextSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                        )
+                    }
+
+                    // ACTIONS. Flat fills, no gradient — the gradient pill was the one
+                    // loud object on an otherwise quiet page.
+                    Spacer(Modifier.height(14.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        DetailAction(
+                            icon = Icons.Filled.PlayArrow,
+                            label = "Putar",
+                            filled = true,
+                            enabled = shown.isNotEmpty(),
+                        ) { shown.firstOrNull()?.let { onPlay(it, shown.toList()) } }
+                        Spacer(Modifier.width(10.dp))
+                        DetailAction(
+                            icon = Icons.Filled.Shuffle,
+                            label = "Acak",
+                            filled = false,
+                            enabled = shown.size > 1,
+                        ) {
+                            val order = shown.shuffled()
+                            order.firstOrNull()?.let { onPlay(it, order) }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        // Sort is worth a control here and nowhere else: a folder is
+                        // whatever order MediaStore happened to return, which is nobody's
+                        // idea of an order.
+                        if (shown.size > 1) {
+                            Box {
+                                IconPill(Icons.AutoMirrored.Filled.Sort, "Urutkan") { sortMenu = true }
+                                DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                                    TrackSort.entries.forEach { s ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    s.label,
+                                                    color = if (s == sort) NexusAccentSoft else NexusTextPrimary,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = if (s == sort) FontWeight.SemiBold else FontWeight.Normal,
+                                                )
+                                            },
+                                            onClick = { sort = s; sortMenu = false },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Filter within the list. Only once the list is long enough that
+                    // scrolling it is the slower way to find one song.
+                    if (shown.size > 8) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(NexusSearch)
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Filled.Search, null, tint = NexusTextSecondary, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(9.dp))
+                            Box(Modifier.weight(1f)) {
+                                if (filter.isEmpty()) {
+                                    Text("Cari di daftar ini", color = NexusTextSecondary, fontSize = 13.sp)
+                                }
+                                BasicTextField(
+                                    value = filter,
+                                    onValueChange = { filter = it },
+                                    singleLine = true,
+                                    textStyle = TextStyle(color = NexusTextPrimary, fontSize = 13.sp),
+                                    cursorBrush = SolidColor(NexusAccentSoft),
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                            if (filter.isNotEmpty()) {
+                                Icon(
+                                    Icons.Filled.Close, "Bersihkan", tint = NexusTextSecondary,
+                                    modifier = Modifier.size(17.dp).clickable(
+                                        indication = null,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                    ) { filter = "" },
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
                 }
             }
             if (loading) {
-                item {
-                    Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.dp)
+                // Skeleton rows, not a spinner — same reason as the browse page: the
+                // shape of what is coming is more use than a turning circle.
+                items(6) { i ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Shimmer(Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Shimmer(Modifier.fillMaxWidth(if (i % 2 == 0) 0.62f else 0.48f).height(13.dp).clip(RoundedCornerShape(4.dp)))
+                            Spacer(Modifier.height(6.dp))
+                            Shimmer(Modifier.fillMaxWidth(0.32f).height(11.dp).clip(RoundedCornerShape(4.dp)))
+                        }
                     }
                 }
-            } else if (localList != null) {
+            } else if (listed.isEmpty()) {
+                item {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 44.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            if (filter.isNotBlank()) "Tidak ada yang cocok" else "Belum ada lagu di sini",
+                            color = NexusTextSecondary, fontSize = 13.sp,
+                        )
+                    }
+                }
+            } else {
                 // Device songs are a READ of MediaStore, so there is nothing to remove
                 // — the file belongs to the phone, not to us. The × used to delete an
                 // entry from our own curated list; keeping it here would either do
                 // nothing or imply we had deleted someone's music.
-                items(shown, key = { it.id }) { t -> TrackRow(t) { onPlay(t, shown.toList()) } }
-            } else {
-                items(shown, key = { it.id }) { t -> TrackRow(t) { onPlay(t, shown.toList()) } }
+                itemsIndexed(listed, key = { _, t -> t.id }) { i, t ->
+                    DetailTrackRow(track = t, position = i + 1) { onPlay(t, listed) }
+                }
             }
         }
     }
@@ -1302,6 +1554,215 @@ private fun SectionHeader(title: String) {
     )
 }
 
+/** How a detail list is ordered. [DEFAULT] is the source's own order. */
+private enum class TrackSort(val label: String) {
+    DEFAULT("Urutan asli"),
+    TITLE("Judul A–Z"),
+    ARTIST("Artis A–Z"),
+    LONGEST("Terpanjang"),
+}
+
+/** "1 jam 24 mnt" / "24 mnt" / "48 dtk" — a running time you can plan around. */
+private fun longDuration(totalSec: Int): String {
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    return when {
+        h > 0 && m > 0 -> "$h jam $m mnt"
+        h > 0 -> "$h jam"
+        m > 0 -> "$m mnt"
+        else -> "$totalSec dtk"
+    }
+}
+
+/** Primary/secondary pill for the detail header. Flat fills, no gradient. */
+@Composable
+private fun DetailAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    filled: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val alpha = if (enabled) 1f else 0.4f
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .then(
+                if (filled) Modifier.background(NexusAccent.copy(alpha = alpha))
+                else Modifier.border(1.dp, NexusStroke, RoundedCornerShape(50)),
+            )
+            .clickable(
+                enabled = enabled,
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val tint = if (filled) Color.White.copy(alpha = alpha) else NexusTextPrimary.copy(alpha = alpha)
+        Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = tint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** A bordered icon button, matching the secondary pill's weight. */
+@Composable
+private fun IconPill(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .border(1.dp, NexusStroke, CircleShape)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, description, tint = NexusTextPrimary, modifier = Modifier.size(19.dp))
+    }
+}
+
+/**
+ * A track row for the detail list: position, art, title/artist, length.
+ *
+ * The number matters here in a way it does not on a shelf — on this screen the list
+ * IS the content, and "track 7" is how people refer to it.
+ */
+@Composable
+private fun DetailTrackRow(track: MusicTrack, position: Int, onClick: () -> Unit) {
+    val isCurrent = MusicPlayer.current?.id == track.id
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) {
+            if (isCurrent) {
+                NowPlayingBadge()
+            } else {
+                Text("$position", color = NexusTextSecondary, fontSize = 12.sp)
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)))
+        Spacer(Modifier.width(13.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(track.artist, color = NexusTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (track.durationSec > 0) {
+            Spacer(Modifier.width(10.dp))
+            Text(
+                "%d:%02d".format(track.durationSec / 60, track.durationSec % 60),
+                color = NexusTextSecondary, fontSize = 12.sp,
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skeletons
+// ---------------------------------------------------------------------------
+
+/**
+ * A shimmering placeholder block.
+ *
+ * ONE animation drives every skeleton on screen: the phase comes from a single
+ * `rememberInfiniteTransition` per composable, and the sweep is computed in the draw
+ * lambda. On the low-end phones this app targets, a spinner told you nothing while
+ * costing a full-screen recomposition; this costs a shader per block and tells you the
+ * SHAPE of what is coming.
+ */
+@Composable
+private fun Shimmer(modifier: Modifier) {
+    val transition = rememberInfiniteTransition(label = "skeleton")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1150, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "sweep",
+    )
+    val base = NexusSurface
+    val high = NexusSurfaceElevated
+    Box(
+        modifier.drawBehind {
+            // The band travels from off-screen left to off-screen right, so there is no
+            // visible jump when the animation restarts.
+            val span = size.width * 2f
+            val start = -size.width + phase * span
+            drawRect(
+                Brush.linearGradient(
+                    colors = listOf(base, high, base),
+                    start = Offset(start, 0f),
+                    end = Offset(start + size.width, 0f),
+                ),
+            )
+        },
+    )
+}
+
+/** A row of card placeholders, shaped like the real shelf it stands in for. */
+@Composable
+private fun ShelfSkeleton(
+    cardWidth: Dp,
+    cardHeight: Dp,
+    round: Boolean = false,
+    count: Int = 4,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState(), enabled = false)
+            .padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        repeat(count) {
+            Column(
+                horizontalAlignment = if (round) Alignment.CenterHorizontally else Alignment.Start,
+            ) {
+                Shimmer(
+                    Modifier
+                        .size(cardWidth, cardHeight)
+                        .clip(if (round) CircleShape else RoundedCornerShape(12.dp)),
+                )
+                Spacer(Modifier.height(8.dp))
+                Shimmer(Modifier.width(cardWidth * 0.8f).height(11.dp).clip(RoundedCornerShape(4.dp)))
+                Spacer(Modifier.height(5.dp))
+                Shimmer(Modifier.width(cardWidth * 0.5f).height(9.dp).clip(RoundedCornerShape(4.dp)))
+            }
+        }
+    }
+}
+
+/** The section title placeholder, so a pending shelf still has a heading-sized gap. */
+@Composable
+private fun SectionHeaderSkeleton() {
+    Shimmer(
+        Modifier
+            .padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 14.dp)
+            .width(150.dp)
+            .height(19.dp)
+            .clip(RoundedCornerShape(5.dp)),
+    )
+}
+
 /** Device-music add banner — a big tappable card with the "+" at the start. */
 @Composable
 private fun DeviceMusicCard(count: Int, onOpen: () -> Unit) {
@@ -1319,11 +1780,14 @@ private fun DeviceMusicCard(count: Int, onOpen: () -> Unit) {
         // A folder with a note in the corner — it has to say "files on this phone"
         // before it says "music", because everything else on this screen is music
         // and none of it is local.
+        // Neutral, not accented. This is a shelf on a page of album art; a blue tile
+        // with a blue glyph pulled the eye to the one row that has no artwork of its
+        // own, which is exactly backwards.
         Box(
-            modifier = Modifier.size(46.dp).clip(RoundedCornerShape(12.dp)).background(NexusAccent.copy(alpha = 0.16f)),
+            modifier = Modifier.size(46.dp).clip(RoundedCornerShape(12.dp)).background(NexusSurfaceElevated),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.Folder, null, tint = NexusAccentSoft, modifier = Modifier.size(25.dp))
+            Icon(Icons.Filled.Folder, null, tint = NexusTextSecondary, modifier = Modifier.size(25.dp))
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -1333,7 +1797,7 @@ private fun DeviceMusicCard(count: Int, onOpen: () -> Unit) {
                     .background(NexusSurface),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Filled.MusicNote, null, tint = NexusAccentSoft, modifier = Modifier.size(11.dp))
+                Icon(Icons.Filled.MusicNote, null, tint = NexusTextSecondary, modifier = Modifier.size(11.dp))
             }
         }
         Spacer(Modifier.width(14.dp))
@@ -1407,7 +1871,6 @@ private fun TrackCard(
         Box {
             ArtworkImage(
                 url = localArt ?: track.artworkUrl,
-                seed = track.id,
                 modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)),
             )
             if (isCurrent) NowPlayingBadge(Modifier.align(Alignment.BottomEnd).padding(8.dp))
@@ -1426,7 +1889,7 @@ private fun PlaylistCard(p: MusicPlaylist, onClick: () -> Unit) {
             .width(150.dp)
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
     ) {
-        ArtworkImage(url = p.pictureUrl, seed = p.id, modifier = Modifier.size(150.dp).clip(RoundedCornerShape(12.dp)))
+        ArtworkImage(url = p.pictureUrl, modifier = Modifier.size(150.dp).clip(RoundedCornerShape(12.dp)))
         Spacer(Modifier.height(8.dp))
         Text(p.title, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 17.sp)
@@ -1441,7 +1904,7 @@ private fun ArtistCard(a: MusicArtist, onClick: () -> Unit) {
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        ArtworkImage(url = a.pictureUrl, seed = a.id, modifier = Modifier.size(120.dp).clip(CircleShape))
+        ArtworkImage(url = a.pictureUrl, modifier = Modifier.size(120.dp).clip(CircleShape))
         Spacer(Modifier.height(8.dp))
         Text(a.name, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1455,7 +1918,7 @@ private fun AlbumCard(a: MusicAlbum, onClick: () -> Unit) {
             .width(140.dp)
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
     ) {
-        ArtworkImage(url = a.artworkUrl, seed = a.id, modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)))
+        ArtworkImage(url = a.artworkUrl, modifier = Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)))
         Spacer(Modifier.height(8.dp))
         Text(a.title, color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1473,7 +1936,7 @@ private fun TrackRow(track: MusicTrack, onClick: () -> Unit) {
             .padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ArtworkImage(url = rememberTrackArt(track), seed = track.id, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+        ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(track.title, color = if (isCurrent) NexusAccentSoft else NexusTextPrimary, fontSize = 15.sp,
@@ -1501,45 +1964,35 @@ private fun NowPlayingBadge(modifier: Modifier = Modifier) {
 
 /** Artwork with a subtle placeholder while it loads / when absent. */
 @Composable
-private fun ArtworkImage(url: String?, modifier: Modifier = Modifier, seed: String = "") {
+private fun ArtworkImage(url: String?, modifier: Modifier = Modifier) {
+    // A URL is not the same as a picture. Device songs always carry an albumart URI —
+    // MediaStore hands one out for every album id, whether or not there is artwork
+    // behind it — so "url != null" left the whole local list as blank grey squares.
+    // The fallback has to be driven by the load actually failing, not by the string.
+    var failed by remember(url) { mutableStateOf(false) }
     Box(
-        // A cover of its own when there is no cover: a gradient in the theme with the
-        // note on top, instead of a flat grey square with a grey glyph. A shelf of
-        // identical grey squares reads as a list that failed to load; a shelf of
-        // different-coloured ones reads as a shelf of different songs.
-        //
-        // The tint is derived from the track key, so the same song keeps the same
-        // colour everywhere it appears — card, row, mini-player, now-playing.
-        modifier = modifier.background(if (url.isNullOrBlank()) defaultArtBrush(seed) else SolidColor(NexusSurface)),
+        // Plain: the surface colour and a note. The coloured gradients this used to
+        // draw turned a list of songs into a paint chart, and the tint said nothing —
+        // it was derived from the id, not from anything about the song.
+        modifier = modifier.background(NexusSurface),
         contentAlignment = Alignment.Center,
     ) {
-        if (!url.isNullOrBlank()) {
-            AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize())
+        if (!url.isNullOrBlank() && !failed) {
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                onError = { failed = true },
+                modifier = Modifier.fillMaxSize(),
+            )
         } else {
             Icon(
                 Icons.Filled.MusicNote, null,
-                tint = Color.White.copy(alpha = 0.9f),
+                tint = NexusTextSecondary,
                 modifier = Modifier.fillMaxSize(0.34f),
             )
         }
     }
-}
-
-/** One of a few theme-derived gradients, picked deterministically from [seed]. */
-private fun defaultArtBrush(seed: String): Brush {
-    val shift = if (seed.isBlank()) 0f else ((seed.hashCode() and 0x7FFFFFFF) % 5) * 26f - 52f
-    val top = shiftMusicHue(NexusAccentSoft, shift)
-    val bottom = shiftMusicHue(NexusAccent, shift)
-    return Brush.linearGradient(listOf(top, bottom))
-}
-
-private fun shiftMusicHue(color: Color, degrees: Float): Color {
-    if (degrees == 0f) return color
-    val hsv = FloatArray(3)
-    android.graphics.Color.colorToHSV(color.toArgb(), hsv)
-    hsv[0] = (hsv[0] + degrees + 360f) % 360f
-    return Color(android.graphics.Color.HSVToColor(hsv))
 }
 
 @Composable
@@ -2038,7 +2491,7 @@ fun MusicMiniPlayer(modifier: Modifier = Modifier, onExpand: () -> Unit) {
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ArtworkImage(url = rememberTrackArt(track), seed = track.id, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
+            ArtworkImage(url = rememberTrackArt(track), modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(track.title, color = NexusTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
@@ -2068,6 +2521,10 @@ fun NowPlayingScreen(onClose: () -> Unit) {
     // to care about. The image is stored on THIS DEVICE only — see TrackArtStore.
     val artCtx = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
+    var queueOpen by remember { mutableStateOf(false) }
+    var volumeOpen by remember { mutableStateOf(false) }
+    // Remembered so un-muting returns to the level that was set, not to full blast.
+    var lastVolume by remember { mutableStateOf(MusicPlayer.volume) }
     val nowTrack = MusicPlayer.current
     val pickTrackArt = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
@@ -2176,12 +2633,13 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             ) {
                 ArtworkImage(
                     url = rememberTrackArt(track),
-                    seed = track.id,
                     modifier = Modifier.fillMaxWidth(0.88f).aspectRatio(1f).clip(RoundedCornerShape(18.dp)),
                 )
             }
-            // Title + artist + like.
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            // Title + artist + like + volume. The like sits at the TOP of the row, level
+            // with the title it belongs to, rather than floating halfway down beside
+            // the artist name.
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
                     Text(track.title, color = NexusTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -2194,20 +2652,48 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                     size = 44.dp, iconSize = 26.dp,
                     tint = if (liked) NexusAccentSoft else NexusTextPrimary,
                 ) { LikedMusicStore.toggle(context, track) }
+                // Volume lives with the track, not up in the header: it is a playback
+                // control, and the header is for leaving the screen. Still an icon
+                // until asked — the slider is a flyout.
+                Box {
+                    PlayerIconButton(
+                        icon = if (MusicPlayer.volume <= 0f) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        size = 44.dp, iconSize = 24.dp,
+                        tint = if (volumeOpen) NexusAccentSoft else NexusTextPrimary,
+                    ) { volumeOpen = !volumeOpen }
+                    if (volumeOpen) {
+                        VolumeFlyout(
+                            onDismiss = { volumeOpen = false },
+                            onMuteToggle = {
+                                if (MusicPlayer.volume > 0f) { lastVolume = MusicPlayer.volume; MusicPlayer.volume = 0f }
+                                else MusicPlayer.volume = if (lastVolume > 0f) lastVolume else MusicPlayer.UNITY
+                            },
+                        )
+                    }
+                }
             }
             Spacer(Modifier.height(18.dp))
             NowPlayingSeekBar()
             Spacer(Modifier.height(14.dp))
-            // Controls: shuffle · prev · play · next · repeat.
+            // Controls: mode · prev · play · next · antrean. One row, everything that
+            // steers playback in it — the second row underneath was a leftover shelf.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PlayerIconButton(Icons.Filled.Shuffle, size = 46.dp, iconSize = 24.dp,
-                    tint = if (MusicPlayer.shuffle) NexusAccentSoft else NexusTextSecondary) {
-                    MusicPlayer.toggleShuffle()
-                }
+                // Acak and ulangi are ONE control: urut → acak → ulangi semua →
+                // ulangi satu. Two buttons could be set to contradict each other and
+                // made you read both to know what happens after this track.
+                PlayerIconButton(
+                    icon = when (MusicPlayer.mode) {
+                        MusicPlayer.Mode.SHUFFLE -> Icons.Filled.Shuffle
+                        MusicPlayer.Mode.REPEAT_ONE -> Icons.Filled.RepeatOne
+                        else -> Icons.Filled.Repeat
+                    },
+                    size = 46.dp, iconSize = 24.dp,
+                    tint = if (MusicPlayer.mode == MusicPlayer.Mode.ORDER) NexusTextSecondary else NexusAccentSoft,
+                ) { MusicPlayer.cycleMode() }
                 PlayerIconButton(Icons.Filled.SkipPrevious, size = 52.dp, iconSize = 34.dp,
                     tint = if (MusicPlayer.hasPrevious) NexusTextPrimary else NexusTextPrimary.copy(alpha = 0.3f)) {
                     MusicPlayer.previous(context)
@@ -2227,17 +2713,184 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                     }
                 }
                 PlayerIconButton(Icons.Filled.SkipNext, size = 52.dp, iconSize = 34.dp,
-                    tint = if (MusicPlayer.hasNext || MusicPlayer.shuffle) NexusTextPrimary else NexusTextPrimary.copy(alpha = 0.3f)) {
+                    tint = if (MusicPlayer.canNext) NexusTextPrimary else NexusTextPrimary.copy(alpha = 0.3f)) {
                     MusicPlayer.next(context)
                 }
-                PlayerIconButton(
-                    icon = if (MusicPlayer.repeatOne) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
-                    size = 46.dp, iconSize = 24.dp,
-                    tint = if (MusicPlayer.repeatOne) NexusAccentSoft else NexusTextSecondary,
-                ) { MusicPlayer.toggleRepeat() }
+                PlayerIconButton(Icons.Filled.QueueMusic, size = 46.dp, iconSize = 24.dp,
+                    tint = if (queueOpen) NexusAccentSoft else NexusTextSecondary) { queueOpen = !queueOpen }
             }
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(18.dp))
             Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(12.dp))
+        }
+
+        // Antrean, as a panel over this screen rather than another destination — the
+        // whole complaint was having to go back and forth to see what else is queued.
+        AnimatedVisibility(
+            visible = queueOpen,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            QueuePanel(onClose = { queueOpen = false })
+        }
+    }
+}
+
+/**
+ * The queue as it will actually play, with the current track marked and every row
+ * tappable to jump straight there.
+ */
+@Composable
+private fun QueuePanel(onClose: () -> Unit) {
+    val context = LocalContext.current
+    val queue = MusicPlayer.queue
+    val playing = MusicPlayer.index
+    BackHandler(onBack = onClose)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .fillMaxHeight(0.62f)
+            .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+            .background(NexusSurfaceElevated)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {},
+    ) {
+        Box(
+            Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(Modifier.size(width = 38.dp, height = 4.dp).clip(RoundedCornerShape(50)).background(NexusTextPrimary.copy(alpha = 0.22f)))
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 6.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Antrean", color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(8.dp))
+            Text("${queue.size} lagu", color = NexusTextSecondary, fontSize = 12.sp)
+            Spacer(Modifier.weight(1f))
+            PlayerIconButton(Icons.Filled.Close, size = 40.dp, iconSize = 20.dp, tint = NexusTextSecondary, onClick = onClose)
+        }
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(bottom = 20.dp),
+        ) {
+            itemsIndexed(queue, key = { i, t -> "$i-${t.id}" }) { i, t ->
+                val active = i == playing
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { MusicPlayer.playAt(context, i) }
+                        .background(if (active) NexusAccent.copy(alpha = 0.10f) else Color.Transparent)
+                        .padding(horizontal = 20.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ArtworkImage(
+                        url = rememberTrackArt(t),
+                        modifier = Modifier.size(42.dp).clip(RoundedCornerShape(8.dp)),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(t.title, color = if (active) NexusAccentSoft else NexusTextPrimary,
+                            fontSize = 14.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(t.artist, color = NexusTextSecondary, fontSize = 12.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (active) {
+                        Spacer(Modifier.width(10.dp))
+                        // The row that is sounding right now says so, and doubles as the
+                        // pause target — otherwise "tap the playing row" would restart it.
+                        Icon(
+                            if (MusicPlayer.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            null, tint = NexusAccentSoft, modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars))
+    }
+}
+
+/**
+ * Vertical volume, hanging off the icon in the header.
+ *
+ * The midpoint is the phone's own level: below it the stream is attenuated, above it
+ * a LoudnessEnhancer pushes to roughly twice as loud. That line is drawn on the track
+ * so "louder than the phone" is a place you can see, not a surprise.
+ */
+@Composable
+private fun VolumeFlyout(onDismiss: () -> Unit, onMuteToggle: () -> Unit) {
+    // Opens UPWARDS. Anchored beside the title, most of the screen below it is the
+    // seek bar and transport; a downward flyout would cover the controls it is a
+    // sibling of, and on a short screen would run past the bottom edge.
+    Popup(
+        alignment = Alignment.BottomCenter,
+        offset = IntOffset(0, with(LocalDensity.current) { -(52.dp).roundToPx() }),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .width(48.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(NexusSurfaceElevated)
+                .padding(vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            // The slider's own scale, so the default reads 50% and the top reads 100%.
+            // Printing "200%" at the top would be technically truer and completely
+            // baffling on a control whose track clearly ends there.
+            Text(
+                "${(MusicPlayer.volume * 100).roundToInt()}%",
+                color = if (MusicPlayer.volume > MusicPlayer.UNITY) NexusAccentSoft else NexusTextSecondary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(8.dp))
+            var height by remember { mutableStateOf(1) }
+            // Bottom is 0, top is max — so dragging up makes it louder, which is the
+            // only direction anyone expects a vertical volume to run.
+            fun set(yPx: Float) { MusicPlayer.volume = 1f - (yPx / height).coerceIn(0f, 1f) }
+            Box(
+                modifier = Modifier
+                    .width(26.dp)
+                    .height(132.dp)
+                    .onSizeChanged { height = it.height.coerceAtLeast(1) }
+                    .pointerInput(Unit) { detectTapGestures { off -> set(off.y) } }
+                    .pointerInput(Unit) {
+                        detectVerticalDragGestures { change, _ -> change.consume(); set(change.position.y) }
+                    },
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                Box(
+                    Modifier.width(6.dp).fillMaxHeight()
+                        .clip(RoundedCornerShape(50))
+                        .background(NexusTextPrimary.copy(alpha = 0.16f)),
+                )
+                // The "phone level" mark, at the halfway point.
+                Box(
+                    Modifier
+                        .align(Alignment.Center)
+                        .width(14.dp)
+                        .height(1.dp)
+                        .background(NexusTextPrimary.copy(alpha = 0.30f)),
+                )
+                Box(
+                    Modifier.width(6.dp).fillMaxHeight(MusicPlayer.volume.coerceAtLeast(0.02f))
+                        .clip(RoundedCornerShape(50))
+                        .background(
+                            if (MusicPlayer.volume > MusicPlayer.UNITY) NexusAccentSoft else NexusAccent,
+                        ),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            PlayerIconButton(
+                icon = if (MusicPlayer.volume <= 0f) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                size = 30.dp, iconSize = 17.dp,
+                tint = NexusTextSecondary,
+                onClick = onMuteToggle,
+            )
         }
     }
 }
