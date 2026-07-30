@@ -20,15 +20,17 @@ val Pink40 = Color(0xFF7D5260)
  * making them observable lets a theme change repaint the whole app instantly
  * without touching a single call site. See [AppTheme].
  */
-var NexusBackground by mutableStateOf(Color(0xFF121212))
-var NexusSurface by mutableStateOf(Color(0xFF16161E))
-var NexusSurfaceElevated by mutableStateOf(Color(0xFF1C1C26))
-var NexusSearch by mutableStateOf(Color(0xFF12121A))
-var NexusStroke by mutableStateOf(Color(0xFF24242F))
+// The initial values ARE Choice.DARK (Bawaan Syntra). They have to match, or the first
+// frame — drawn before AppTheme.load() runs — flashes the old colours.
+var NexusBackground by mutableStateOf(Color(0xFF000000))
+var NexusSurface by mutableStateOf(Color(0xFF101014))
+var NexusSurfaceElevated by mutableStateOf(Color(0xFF18181F))
+var NexusSearch by mutableStateOf(Color(0xFF0C0C10))
+var NexusStroke by mutableStateOf(Color(0xFF24242E))
 var NexusTextPrimary by mutableStateOf(Color(0xFFF4F4F8))
-var NexusTextSecondary by mutableStateOf(Color(0xFF8A8A9A))
-var NexusAccent by mutableStateOf(Color(0xFF3B68F5))
-var NexusAccentSoft by mutableStateOf(Color(0xFF6E8BFF))
+var NexusTextSecondary by mutableStateOf(Color(0xFF8B8B99))
+var NexusAccent by mutableStateOf(Color(0xFF3B7BFF))
+var NexusAccentSoft by mutableStateOf(Color(0xFF7BA5FF))
 var NexusRing by mutableStateOf(Color(0xFF6C5CE7))
 
 /**

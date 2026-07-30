@@ -29,7 +29,7 @@ data class Palette(
 object AppTheme {
 
     enum class Choice(val label: String, val description: String) {
-        DARK("Gelap", "Bawaan Syntra"),
+        DARK("Bawaan Syntra", "Hitam pekat, aksen biru"),
         LIGHT("Terang", "Untuk ruangan yang benderang"),
         MIDNIGHT("Midnight", "Hitam pekat, hemat baterai OLED"),
         OCEAN("Ocean", "Biru laut yang tenang"),
@@ -49,20 +49,29 @@ object AppTheme {
     var customAccent by mutableStateOf(Color(0xFF2E6BF0))
         private set
 
-    var current by mutableStateOf(Choice.MIDNIGHT)
+    var current by mutableStateOf(Choice.DARK)
         private set
 
     fun paletteOf(choice: Choice): Palette = when (choice) {
+        // Bawaan Syntra. Short-video dark: the background is true black, like TikTok's
+        // feed, so video and photos have nothing competing with them and the whole app
+        // matches the Shorts player instead of stepping down to grey around it.
+        // Surfaces climb in small steps from there, which is what keeps a black UI
+        // legible — depth has to come from the surfaces, since the base cannot go lower.
+        //
+        // The accent stays Syntra blue — that is the brand, not a starting point.
+        // Only the base moved to black; the blue is lifted a little because a mid blue
+        // that reads fine on #121212 loses its edge against true black.
         Choice.DARK -> Palette(
-            background = Color(0xFF121212),
-            surface = Color(0xFF16161E),
-            surfaceElevated = Color(0xFF1C1C26),
-            search = Color(0xFF12121A),
-            stroke = Color(0xFF24242F),
+            background = Color(0xFF000000),
+            surface = Color(0xFF101014),
+            surfaceElevated = Color(0xFF18181F),
+            search = Color(0xFF0C0C10),
+            stroke = Color(0xFF24242E),
             textPrimary = Color(0xFFF4F4F8),
-            textSecondary = Color(0xFF8A8A9A),
-            accent = Color(0xFF3B68F5),
-            accentSoft = Color(0xFF6E8BFF),
+            textSecondary = Color(0xFF8B8B99),
+            accent = Color(0xFF3B7BFF),
+            accentSoft = Color(0xFF7BA5FF),
             ring = Color(0xFF6C5CE7),
             online = Color(0xFF23C55E),
             isDark = true,
@@ -189,8 +198,10 @@ object AppTheme {
         val saved = prefs.getLong(KEY_CUSTOM, 0L)
         if (saved != 0L) customAccent = Color(saved.toULong())
         val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
-        // Default is Midnight (pure-black OLED) when the user hasn't picked a theme.
-        val choice = Choice.entries.firstOrNull { it.name == name } ?: Choice.MIDNIGHT
+        // Default is the house theme, not Midnight. Midnight is a deliberate choice
+        // someone makes for their OLED; what a new install should open in is Syntra's
+        // own look.
+        val choice = Choice.entries.firstOrNull { it.name == name } ?: Choice.DARK
         apply(choice)
     }
 
