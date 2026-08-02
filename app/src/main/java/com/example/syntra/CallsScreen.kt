@@ -464,7 +464,7 @@ fun CallsScreen(
                 if (shown.isEmpty()) {
                     item { EmptyCalls(missedOnly = filter == 1 && query.isBlank()) }
                 } else {
-                    items(shown, key = { it.id }) { entry ->
+                    items(shown, key = { it.id }, contentType = { "call" }) { entry ->
                         CallRow(
                             entry = entry,
                             avatarUrl = avatars[entry.peerId],
