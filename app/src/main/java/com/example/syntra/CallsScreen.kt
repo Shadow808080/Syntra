@@ -776,20 +776,27 @@ private val callGradients = listOf(
 private fun callGradient(key: String): List<Color> =
     callGradients[(key.hashCode() and Int.MAX_VALUE) % callGradients.size]
 
+// Formatters are built ONCE and reused. They used to be `new SimpleDateFormat(...)`
+// created inside phoneCallTime — i.e. on every composition of every visible row — and
+// building a SimpleDateFormat (pattern parse + locale data load) on each frame while
+// scrolling is what made the call list stutter. DateTimeFormatter is immutable and
+// thread-safe, so a single shared instance is safe to reuse.
+private val callTimeLocale = java.util.Locale.forLanguageTag("id-ID")
+private val callClockFmt = java.time.format.DateTimeFormatter.ofPattern("HH.mm", callTimeLocale)
+private val callDayFmt = java.time.format.DateTimeFormatter.ofPattern("EEEE", callTimeLocale)
+private val callDateFmt = java.time.format.DateTimeFormatter.ofPattern("d MMM", callTimeLocale)
+
 /** Phone-app style timestamp: clock today, "Kemarin", day name this week, else date. */
 private fun phoneCallTime(at: Long): String {
-    val now = java.util.Calendar.getInstance()
-    val then = java.util.Calendar.getInstance().apply { timeInMillis = at }
-    fun sameDay(a: java.util.Calendar, b: java.util.Calendar) =
-        a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR) &&
-            a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR)
-    val yesterday = (now.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_YEAR, -1) }
+    val zone = java.time.ZoneId.systemDefault()
+    val then = java.time.Instant.ofEpochMilli(at).atZone(zone)
+    val today = java.time.LocalDate.now(zone)
+    val thenDate = then.toLocalDate()
     return when {
-        sameDay(now, then) -> java.text.SimpleDateFormat("HH.mm", java.util.Locale("id")).format(at)
-        sameDay(yesterday, then) -> "Kemarin"
-        (now.timeInMillis - at) < 7L * 24 * 3600_000 ->
-            java.text.SimpleDateFormat("EEEE", java.util.Locale("id")).format(at)
-        else -> java.text.SimpleDateFormat("d MMM", java.util.Locale("id")).format(at)
+        thenDate == today -> then.format(callClockFmt)
+        thenDate == today.minusDays(1) -> "Kemarin"
+        thenDate.isAfter(today.minusDays(7)) -> then.format(callDayFmt)
+        else -> then.format(callDateFmt)
     }
 }
 
