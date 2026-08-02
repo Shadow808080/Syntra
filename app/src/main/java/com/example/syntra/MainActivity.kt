@@ -722,29 +722,38 @@ private fun MainTabs(onSignOut: () -> Unit) {
                 }
             }
             // Sticky bottom section: mini-player + nav bar, in the layout so content
-            // above never gets covered. Shown/hidden instantly by the scroll watcher.
-            if (barShown) {
-                MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
-                NexusBottomBar(
-                    selected = tabOrder[pager.currentPage],
-                    onSelect = { goTo(it) },
-                )
-            } else if (!overlay && !com.example.syntra.net.CleanScreen.on) {
-                // The bottom bar auto-hides in the immersive Shorts feed (moving to a
-                // later reel drops it). The mini-player used to be bundled inside that
-                // same block, so swiping to Shorts made the music box — and its controls
-                // — vanish. Keep it mounted on its own whenever the bar is merely
-                // auto-hidden (not a real full-screen overlay, and not the clean-screen
-                // mode that deliberately strips everything but the video). It carries the
-                // nav-bar inset itself now that nothing sits below it, and MusicMiniPlayer
-                // self-hides when nothing is playing, so this shows only with live music.
+            // above never gets covered.
+            //
+            // The mini-player lives in ONE fixed slot, never inside the bottom-bar
+            // branch. The bottom bar auto-hides in the immersive Shorts feed (moving to a
+            // later reel drops it); when the mini-player was bundled into that same
+            // branch, hiding the bar tore it out of one slot and rebuilt it in another —
+            // that remount is what made the music box blink out on the way into Shorts.
+            // Now only the bar toggles around it, so the box holds its place and its
+            // playback state across the transition.
+            //
+            // It shows whenever music is playing and no real full-screen overlay is up
+            // (and not the clean-screen mode that deliberately strips everything but the
+            // video). It owns the nav-bar inset only when the bar isn't there to; when
+            // the bar is shown, the bar carries it. MusicMiniPlayer self-hides when
+            // nothing is playing, so an empty slot costs nothing.
+            if (!overlay && !com.example.syntra.net.CleanScreen.on) {
                 Column(
                     Modifier
                         .fillMaxWidth()
                         .background(NexusBackground)
-                        .windowInsetsPadding(WindowInsets.navigationBars),
+                        .then(
+                            if (BottomBarVisibility.visible) Modifier
+                            else Modifier.windowInsetsPadding(WindowInsets.navigationBars),
+                        ),
                 ) {
                     MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
+                }
+                if (BottomBarVisibility.visible) {
+                    NexusBottomBar(
+                        selected = tabOrder[pager.currentPage],
+                        onSelect = { goTo(it) },
+                    )
                 }
             }
         }
