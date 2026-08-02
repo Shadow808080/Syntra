@@ -232,6 +232,21 @@ private data class Message(
      * centred grey text between the messages instead.
      */
     val isSystem: Boolean = false,
+    /**
+     * Present when this row is a call-history entry woven into the conversation
+     * (WhatsApp-style: "Panggilan suara keluar · 1 mnt 20 dtk"). Rendered centred, no
+     * bubble — [isSystem] is also true so it never counts as something a person said.
+     * The data comes from the device-local [CallLog], keyed to this chat's peer.
+     */
+    val call: ChatCallLog? = null,
+)
+
+/** A call-log entry rendered inline in the chat. Mirrors the fields of a [CallEntry]. */
+data class ChatCallLog(
+    val video: Boolean,
+    val direction: CallDirection,
+    /** Seconds; 0 for a missed/unanswered call. */
+    val durationSec: Int,
 )
 
 /** Marker prefix for a story reply: "STORYREPLY<0x1>url<0x1>text". */
@@ -383,6 +398,50 @@ private fun parseEpoch(iso: String): Long {
     return runCatching { java.time.Instant.parse(iso).toEpochMilli() }
         .getOrDefault(System.currentTimeMillis())
 }
+
+/** Epoch millis → local HH:mm (for call-log rows, which carry millis, not an ISO string). */
+private fun clockOfEpoch(at: Long): String = runCatching {
+    val local = java.time.Instant.ofEpochMilli(at).atZone(java.time.ZoneId.systemDefault())
+    java.time.format.DateTimeFormatter.ofPattern("HH:mm").format(local)
+}.getOrDefault("")
+
+/** Human call length in Indonesian: "" for a missed call, "45 dtk", "2 mnt 5 dtk". */
+private fun callDurationLabel(sec: Int): String = when {
+    sec <= 0 -> ""
+    sec < 60 -> "$sec dtk"
+    sec % 60 == 0 -> "${sec / 60} mnt"
+    else -> "${sec / 60} mnt ${sec % 60} dtk"
+}
+
+/**
+ * Weaves the device-local call log into the message list by time. [messages] is
+ * oldest-first; each call row is spliced in at its timestamp WITHOUT disturbing the
+ * messages' own relative order, then the whole thing is reversed for the newest-first
+ * (reverseLayout) list.
+ */
+private fun mergeCallLog(messages: List<Message>, calls: List<CallEntry>): List<Message> {
+    val callRows = calls.map { it.toChatMessage() }.sortedBy { it.at }
+    val out = ArrayList<Message>(messages.size + callRows.size)
+    var ci = 0
+    for (m in messages) {
+        while (ci < callRows.size && callRows[ci].at <= m.at) { out.add(callRows[ci]); ci++ }
+        out.add(m)
+    }
+    while (ci < callRows.size) { out.add(callRows[ci]); ci++ }
+    return out.asReversed()
+}
+
+/** A device-local [CallEntry] as an inline, centred call-log row for the chat. */
+private fun CallEntry.toChatMessage(): Message = Message(
+    id = id,
+    text = "",
+    fromMe = direction == CallDirection.OUTGOING,
+    senderId = null,
+    time = clockOfEpoch(at),
+    at = at,
+    isSystem = true,
+    call = ChatCallLog(video = video, direction = direction, durationSec = durationSec),
+)
 
 /** yyy-MM-dd key for grouping messages by calendar day (local time). */
 private fun dayKey(at: Long): String =
@@ -630,6 +689,26 @@ fun ChatDetailScreen(
             peerId = conversation.counterpartId.orEmpty(),
             video = video,
         )
+    }
+
+    // Call-history rows woven into this chat (WhatsApp-style). The log is device-local
+    // (CallLog) and written when a call tears down, so we re-read it on open and every
+    // time an active call clears — a call placed from here then shows up in the thread.
+    val callLog = remember(conversation.id) { mutableStateListOf<CallEntry>() }
+    LaunchedEffect(conversation.id, CallController.call) {
+        fun reload() {
+            val peerId = conversation.counterpartId
+            val fresh = if (peerId.isNullOrBlank()) emptyList()
+            else CallLog.all(context).filter { it.peerId == peerId }
+            if (fresh.map { it.id } != callLog.map { it.id }) {
+                callLog.clear(); callLog.addAll(fresh)
+            }
+        }
+        reload()
+        // The entry is stamped during the call screen's teardown, which can land a beat
+        // after `call` clears — re-read once more so a just-ended call doesn't wait for
+        // the next open to appear.
+        if (CallController.call == null) { delay(400); reload() }
     }
     val listState = rememberLazyListState()
 
@@ -1645,7 +1724,10 @@ fun ChatDetailScreen(
         ) {
             // Feed the list newest-first (a reversed view of the oldest-first
             // `messages`), so reversed index 0 == newest == bottom.
-            val ordered = messages.asReversed()
+            // Splice the device-local call log into the thread by timestamp. Fast path:
+            // a chat with no calls keeps the O(1) reversed view and pays nothing.
+            val ordered = if (callLog.isEmpty()) messages.asReversed()
+            else mergeCallLog(messages, callLog)
             itemsIndexed(ordered, key = { _, m -> m.id }) { index, msg ->
                 // Date chip heads each day. The next item in the data (index + 1) is
                 // the OLDER message; when it's a different day — or this is the very
@@ -1660,6 +1742,17 @@ fun ChatDetailScreen(
                     val older = ordered.getOrNull(index + 1)
                     if (older == null || dayKey(older.at) != dayKey(msg.at)) {
                         DateChip(dayLabel(msg.at))
+                    }
+                    // A call-log row: centred, tappable to call back with the same kind
+                    // (voice/video). Checked before the generic system branch because it
+                    // carries no text — the system notice would render nothing.
+                    msg.call?.let { info ->
+                        CallNotice(
+                            info = info,
+                            timeLabel = msg.time,
+                            onCallAgain = { if (!peerBlocked && !blockedByPeer) startCall(info.video) },
+                        )
+                        return@Column
                     }
                     // Group events are notices, not messages — no bubble, no sender, no
                     // selection, no reply. Everything below this point is about talking
@@ -3692,6 +3785,57 @@ private val senderNameColors = listOf(
 /** Stable per-person colour: the same sender is the same colour in every session. */
 private fun senderColor(key: String): Color =
     senderNameColors[(key.hashCode() and Int.MAX_VALUE) % senderNameColors.size]
+
+/**
+ * A call-history row inside the conversation, WhatsApp-style: a centred pill with a
+ * voice/video icon, the direction ("keluar"/"masuk"/"tak terjawab"), the length, and
+ * the time. Tapping it starts a new call of the same kind. A missed call is tinted red.
+ */
+@Composable
+private fun CallNotice(info: ChatCallLog, timeLabel: String, onCallAgain: () -> Unit) {
+    val accent = if (info.direction == CallDirection.MISSED) Color(0xFFE5484D) else NexusAccentSoft
+    val label = when (info.direction) {
+        CallDirection.OUTGOING -> if (info.video) "Panggilan video keluar" else "Panggilan suara keluar"
+        CallDirection.INCOMING -> if (info.video) "Panggilan video masuk" else "Panggilan suara masuk"
+        CallDirection.MISSED -> if (info.video) "Panggilan video tak terjawab" else "Panggilan suara tak terjawab"
+    }
+    val dur = callDurationLabel(info.durationSec)
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(NexusSurface.copy(alpha = 0.75f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onCallAgain,
+                )
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                if (info.video) Icons.Filled.Videocam else Icons.Filled.Call,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(Modifier.width(7.dp))
+            Text(
+                text = buildString {
+                    append(label)
+                    if (dur.isNotEmpty()) append(" · ").append(dur)
+                    if (timeLabel.isNotBlank()) append("  ").append(timeLabel)
+                },
+                color = NexusTextSecondary,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+            )
+        }
+    }
+}
 
 /**
  * A group event, quiet and centred: "Budi mengubah foto grup", "Ani keluar dari grup".
