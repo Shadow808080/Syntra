@@ -15,10 +15,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.ui.unit.dp
@@ -49,6 +53,7 @@ import com.example.syntra.net.SyntraClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.example.syntra.ui.theme.AppTheme
+import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.SyntraTheme
 
 /**
@@ -724,6 +729,23 @@ private fun MainTabs(onSignOut: () -> Unit) {
                     selected = tabOrder[pager.currentPage],
                     onSelect = { goTo(it) },
                 )
+            } else if (!overlay && !com.example.syntra.net.CleanScreen.on) {
+                // The bottom bar auto-hides in the immersive Shorts feed (moving to a
+                // later reel drops it). The mini-player used to be bundled inside that
+                // same block, so swiping to Shorts made the music box — and its controls
+                // — vanish. Keep it mounted on its own whenever the bar is merely
+                // auto-hidden (not a real full-screen overlay, and not the clean-screen
+                // mode that deliberately strips everything but the video). It carries the
+                // nav-bar inset itself now that nothing sits below it, and MusicMiniPlayer
+                // self-hides when nothing is playing, so this shows only with live music.
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(NexusBackground)
+                        .windowInsetsPadding(WindowInsets.navigationBars),
+                ) {
+                    MusicMiniPlayer(onExpand = { MusicUi.showNowPlaying = true })
+                }
             }
         }
 
