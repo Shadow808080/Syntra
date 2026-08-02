@@ -43,8 +43,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -343,6 +345,23 @@ fun CallsScreen(
                         modifier = Modifier.padding(start = 6.dp),
                     )
                     Spacer(Modifier.weight(1f))
+                    // Select-all / deselect-all over exactly the rows currently on screen
+                    // (respects the Missed filter and any search), so "pilih semua" never
+                    // silently grabs entries the list is hiding. Toggles: once everything
+                    // shown is picked, the same button clears the selection.
+                    val shownIds = shown.map { it.id }
+                    val allSelected = shownIds.isNotEmpty() && shownIds.all { it in selectedCalls }
+                    CallIconButton(
+                        if (allSelected) Icons.Filled.Deselect else Icons.Filled.SelectAll,
+                        if (allSelected) "Batal pilih semua" else "Pilih semua",
+                    ) {
+                        if (allSelected) {
+                            selectedCalls.clear()
+                        } else {
+                            selectedCalls.clear()
+                            selectedCalls.addAll(shownIds)
+                        }
+                    }
                     // Only offered for a single pick: calling back, messaging and the
                     // detail sheet are all about ONE conversation, and picking an
                     // arbitrary one of several would be worse than not offering it.
