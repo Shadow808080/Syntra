@@ -2211,6 +2211,17 @@ fun ChatDetailScreen(
                         messages.clear()
                         reactions.clear()
                         MessageCache.clearConversation(context, conversation.id)
+                        // Bersihkan obrolan juga menghapus riwayat panggilan dengan orang
+                        // ini — riwayat itu tampil di dalam percakapan (gaya WhatsApp), jadi
+                        // membiarkannya berarti obrolan "dibersihkan" tapi log panggilan tetap
+                        // muncul. Hapus dari penyimpanan lokal lalu kosongkan tampilannya.
+                        val peerId = conversation.counterpartId
+                        if (!peerId.isNullOrBlank()) {
+                            CallLog.all(context)
+                                .filter { it.peerId == peerId }
+                                .forEach { CallLog.remove(context, it.id) }
+                        }
+                        callLog.clear()
                         Toast.makeText(context, "Obrolan dibersihkan.", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(
