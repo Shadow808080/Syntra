@@ -1020,7 +1020,10 @@ fun ChatScreen(
     fun addStory(media: StoryImage, music: com.example.syntra.net.StoryMusic? = null) {
         // Local (optimistic) story; id is a client id until the backend acks it.
         val storyId = newLocalId()
-        val item = StoryItem(storyId, media, viewed = true)
+        // Carry the picked song onto the optimistic item too — without it the story
+        // you view immediately after posting (before the server refresh) is silent,
+        // even though the reloaded copy plays fine (see the server→item map above).
+        val item = StoryItem(storyId, media, viewed = true, music = music)
         // My stories are one circle with a ring segment per post — appending must
         // add a segment, not a second "Your story" bubble next to the first.
         val mineIdx = stories.indexOfFirst { it.isMine }
