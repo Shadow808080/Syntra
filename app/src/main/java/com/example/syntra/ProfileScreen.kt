@@ -1101,8 +1101,12 @@ private fun StatDivider() {
 
 /** 1234 -> "1,2rb", 1_500_000 -> "1,5jt". Keeps the stats card compact. */
 private fun formatCount(n: Int): String = when {
-    n >= 1_000_000 -> String.format("%.1fjt", n / 1_000_000.0).replace(".0", "").replace(".", ",")
-    n >= 1_000 -> String.format("%.1frb", n / 1_000.0).replace(".0", "").replace(".", ",")
+    // Force a dot from the formatter regardless of device locale: the cleanup below
+    // strips a trailing ".0" and only then swaps the dot for the Indonesian comma.
+    // On an id-ID device the default locale would already emit a comma, so ".0" would
+    // never match and "2jt" came out as "2,0jt".
+    n >= 1_000_000 -> String.format(java.util.Locale.US, "%.1fjt", n / 1_000_000.0).replace(".0", "").replace(".", ",")
+    n >= 1_000 -> String.format(java.util.Locale.US, "%.1frb", n / 1_000.0).replace(".0", "").replace(".", ",")
     else -> n.toString()
 }
 

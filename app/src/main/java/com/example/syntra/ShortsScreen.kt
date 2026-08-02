@@ -4290,9 +4290,11 @@ private fun relativeCommentTime(iso: String): String {
 private fun compactCount(n: Int): String = when {
     n <= 0 -> "0"
     n < 1000 -> n.toString()
-    // Indonesian style: "88,4K", and a whole thousand shows as "1K".
-    n < 1_000_000 -> "%.1f".format(n / 1000f).removeSuffix(".0").replace('.', ',') + "K"
-    else -> "%.1f".format(n / 1_000_000f).removeSuffix(".0").replace('.', ',') + "M"
+    // Indonesian style: "88,4K", and a whole thousand shows as "1K". Format with a dot
+    // (Locale.US) so removeSuffix(".0") can drop it before the dot becomes a comma —
+    // on an id-ID device the default locale emits a comma and "1K" came out as "1,0K".
+    n < 1_000_000 -> String.format(java.util.Locale.US, "%.1f", n / 1000f).removeSuffix(".0").replace('.', ',') + "K"
+    else -> String.format(java.util.Locale.US, "%.1f", n / 1_000_000f).removeSuffix(".0").replace('.', ',') + "M"
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF090910, widthDp = 360, heightDp = 780)
