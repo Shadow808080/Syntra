@@ -492,27 +492,6 @@ fun CallsScreen(
                             },
                         )
                     }
-                    if (query.isBlank()) {
-                        item {
-                            Text(
-                                text = "Bersihkan riwayat",
-                                color = Color(0xFFFF5D5D),
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable(
-                                        indication = null,
-                                        interactionSource = remember { MutableInteractionSource() },
-                                    ) {
-                                        CallLog.clear(context)
-                                        history.clear()
-                                    }
-                                    .padding(vertical = 20.dp),
-                                textAlign = TextAlign.Center,
-                            )
-                        }
-                    }
                 }
             }
         }
