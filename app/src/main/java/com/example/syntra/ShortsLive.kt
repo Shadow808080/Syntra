@@ -40,6 +40,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Close
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.FileUpload
@@ -66,6 +68,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -434,6 +438,13 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
     val hearts = remember { mutableStateListOf<Long>() }
     var nextId by remember { mutableStateOf(0L) }
     var draft by remember { mutableStateOf("") }
+    // A comment the host tapped (its Balas/Sematkan sheet is open), and the one
+    // currently pinned to the top for everyone.
+    var actionFor by remember { mutableStateOf<LiveComment?>(null) }
+    var pinned by remember { mutableStateOf<LiveComment?>(null) }
+    val commentFocus = remember { FocusRequester() }
+    var focusTick by remember { mutableStateOf(0) }
+    LaunchedEffect(focusTick) { if (focusTick > 0) runCatching { commentFocus.requestFocus() } }
 
     fun sendComment() {
         val text = draft.trim()
@@ -441,6 +452,16 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
         comments.add(LiveComment(nextId++, "Kamu", text))
         if (comments.size > 40) comments.removeAt(0)
         draft = ""
+    }
+    fun replyTo(c: LiveComment) {
+        actionFor = null
+        // Start the reply already addressed to them, then open the keyboard.
+        if (!draft.trimStart().startsWith("@${c.user}")) draft = "@${c.user} "
+        focusTick++
+    }
+    fun togglePin(c: LiveComment) {
+        pinned = if (pinned?.id == c.id) null else c
+        actionFor = null
     }
 
     BackHandler { confirmEnd = true }
@@ -549,6 +570,29 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
                     .background(Color.Black.copy(alpha = 0.3f))
                     .padding(horizontal = 10.dp, vertical = 4.dp),
             )
+            // Pinned comment banner — tap to unpin.
+            pinned?.let { p ->
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.Black.copy(alpha = 0.4f))
+                        .border(1.dp, Color(0xFFFFC24D).copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { pinned = null }
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.PushPin, null, tint = Color(0xFFFFC24D), modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("@${p.user} · disematkan", color = Color(0xFFFFC24D), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                        Text(p.text, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Icon(Icons.Filled.Close, "Lepas sematan", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
+                }
+            }
         }
 
         // Comments — newest at the bottom, trickling up above the control bar.
@@ -562,7 +606,15 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
             reverseLayout = true,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(comments.asReversed(), key = { it.id }) { c -> LiveCommentRow(c) }
+            items(comments.asReversed(), key = { it.id }) { c ->
+                LiveCommentRow(
+                    c,
+                    isPinned = pinned?.id == c.id,
+                    // Tapping an audience comment opens Balas / Sematkan; the host's own
+                    // lines aren't actionable.
+                    onClick = if (c.user == "Kamu") null else { { actionFor = c } },
+                )
+            }
         }
 
         // Bottom control bar: editable comment box + mic + flip + heart. The whole bar
@@ -598,7 +650,7 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
                         cursorBrush = SolidColor(Color.White),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(onSend = { sendComment() }),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().focusRequester(commentFocus),
                     )
                 }
                 // Send appears only when there's something to send.
@@ -625,6 +677,16 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
         }
     }
 
+    actionFor?.let { c ->
+        CommentActionSheet(
+            comment = c,
+            isPinned = pinned?.id == c.id,
+            onReply = { replyTo(c) },
+            onTogglePin = { togglePin(c) },
+            onDismiss = { actionFor = null },
+        )
+    }
+
     if (confirmEnd) {
         EndLiveDialog(
             viewers = viewers,
@@ -643,27 +705,79 @@ private fun liveClock(totalSec: Int): String {
 }
 
 @Composable
-private fun LiveCommentRow(c: LiveComment) {
+private fun LiveCommentRow(c: LiveComment, isPinned: Boolean = false, onClick: (() -> Unit)? = null) {
     // The host's own messages read as "you": accent name + a tinted bubble.
     val isHost = c.user == "Kamu"
+    val bubble = Modifier
+        .clip(RoundedCornerShape(12.dp))
+        .background(if (isHost) Color(0xFFE5484D).copy(alpha = 0.32f) else Color.Black.copy(alpha = 0.32f))
+        .then(
+            if (onClick != null) {
+                Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            } else Modifier,
+        )
+        .padding(horizontal = 10.dp, vertical = 6.dp)
     Row(verticalAlignment = Alignment.Top) {
         Box(
             Modifier.size(26.dp).clip(CircleShape).background(Brush.linearGradient(liveGradient(c.user))),
             contentAlignment = Alignment.Center,
         ) { Text(c.user.take(1).uppercase(), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
         Spacer(Modifier.width(8.dp))
-        Column(
-            Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .background(if (isHost) Color(0xFFE5484D).copy(alpha = 0.32f) else Color.Black.copy(alpha = 0.32f))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-        ) {
-            Text(
-                c.user,
-                color = if (isHost) Color(0xFFFF9DAE) else Color.White.copy(alpha = 0.7f),
-                fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
-            )
+        Column(bubble) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    c.user,
+                    color = if (isHost) Color(0xFFFF9DAE) else Color.White.copy(alpha = 0.7f),
+                    fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                )
+                if (isPinned) {
+                    Spacer(Modifier.width(5.dp))
+                    Icon(Icons.Filled.PushPin, "Disematkan", tint = Color(0xFFFFC24D), modifier = Modifier.size(11.dp))
+                }
+            }
             Text(c.text, color = Color.White, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/** Balas / Sematkan sheet for a tapped audience comment. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CommentActionSheet(
+    comment: LiveComment,
+    isPinned: Boolean,
+    onReply: () -> Unit,
+    onTogglePin: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = NexusSurface,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            // Which comment this is about.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Box(
+                    Modifier.size(30.dp).clip(CircleShape).background(Brush.linearGradient(liveGradient(comment.user))),
+                    contentAlignment = Alignment.Center,
+                ) { Text(comment.user.take(1).uppercase(), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text("@${comment.user}", color = NexusTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    Text(comment.text, color = NexusTextPrimary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            CreateRow(Icons.AutoMirrored.Filled.Reply, "Balas", "Balas @${comment.user}") { onReply() }
+            CreateRow(
+                Icons.Filled.PushPin,
+                if (isPinned) "Lepas sematan" else "Sematkan komentar",
+                if (isPinned) "Berhenti menampilkan di atas" else "Tampilkan di atas untuk semua penonton",
+            ) { onTogglePin() }
         }
     }
 }
