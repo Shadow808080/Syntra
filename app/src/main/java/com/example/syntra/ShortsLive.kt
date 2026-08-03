@@ -494,20 +494,9 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
     }
 
     Box(Modifier.fillMaxSize().background(Color(0xFF0B0B10))) {
-        // Camera-preview placeholder.
-        Box(
-            Modifier.fillMaxSize().background(Brush.verticalGradient(liveGradient(if (frontCam) "front" else "back"))),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Filled.Videocam, null, tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(46.dp))
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    if (frontCam) "Pratinjau kamera depan" else "Pratinjau kamera belakang",
-                    color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp,
-                )
-            }
-        }
+        // Real camera preview (CameraX). The flip button drives [frontCam], which
+        // rebinds the lens live.
+        LiveCameraPreview(frontCam = frontCam, modifier = Modifier.fillMaxSize())
 
         // Floating hearts (bottom-right).
         hearts.forEach { id ->
