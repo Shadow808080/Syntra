@@ -1,6 +1,8 @@
 package com.example.syntra
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,25 +15,34 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FiberManualRecord
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.FileUpload
@@ -41,12 +52,21 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -56,6 +76,7 @@ import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
+import kotlinx.coroutines.delay
 
 /**
  * LIVE — UI SCAFFOLD ONLY (no real streaming yet).
@@ -267,24 +288,37 @@ fun LiveViewerScreen(stream: LiveStream, onClose: () -> Unit) {
                     .padding(horizontal = 16.dp, vertical = 12.dp),
             ) { Text("Tambahkan komentar…", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp) }
             Spacer(Modifier.width(10.dp))
-            Icon(Icons.Filled.Send, "Kirim", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(22.dp))
+            Icon(Icons.AutoMirrored.Filled.Send, "Kirim", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(22.dp))
         }
     }
 }
 
 /**
- * Go-live setup screen opened from the "+" sheet — a placeholder that shows the
- * intended pre-broadcast form (title + start) without actually opening a camera or
- * a stream.
+ * Go-live flow opened from the "+" sheet. Two steps, both UI-only:
+ *  1. SETUP — name the stream + a camera-preview placeholder + "Mulai siaran".
+ *  2. BROADCAST — [LiveBroadcastScreen], the screen shown while actually live.
+ * No camera or stream is opened yet; the broadcast step is a faithful shell.
  */
 @Composable
 fun GoLiveScreen(onClose: () -> Unit) {
+    var broadcasting by remember { mutableStateOf(false) }
+    var title by remember { mutableStateOf("") }
+
+    if (broadcasting) {
+        LiveBroadcastScreen(
+            title = title.ifBlank { "Siaran langsung" },
+            onEnd = onClose,
+        )
+        return
+    }
+
     BackHandler(onBack = onClose)
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(NexusBackground)
             .windowInsetsPadding(WindowInsets.statusBars)
+            .imePadding()
             .padding(20.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -322,18 +356,385 @@ fun GoLiveScreen(onClose: () -> Unit) {
                 .background(NexusSurface)
                 .border(1.dp, NexusStroke, RoundedCornerShape(14.dp))
                 .padding(16.dp),
-        ) { Text("Beri judul siaranmu…", color = NexusTextSecondary, fontSize = 14.sp) }
+        ) {
+            if (title.isEmpty()) Text("Beri judul siaranmu…", color = NexusTextSecondary, fontSize = 14.sp)
+            BasicTextField(
+                value = title,
+                onValueChange = { title = it.take(80) },
+                singleLine = true,
+                textStyle = TextStyle(color = NexusTextPrimary, fontSize = 14.sp),
+                cursorBrush = SolidColor(NexusTextPrimary),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Spacer(Modifier.weight(1f))
         Box(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xFF2A2A33))
+                .background(Color(0xFFE5484D))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) { broadcasting = true }
                 .padding(vertical = 16.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Text("Fitur menyiarkan segera hadir", color = NexusTextSecondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.FiberManualRecord, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Mulai siaran", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast — the screen shown WHILE the user is live (UI scaffold)
+// ---------------------------------------------------------------------------
+
+private data class LiveComment(val id: Long, val user: String, val text: String)
+
+/** Placeholder audience chatter that trickles in while "live". */
+private val sampleChatter = listOf(
+    "budi_92" to "halo bang! 👋",
+    "sinta.ay" to "suaranya jernih bgt",
+    "roni" to "dari Surabaya nyimak 🔥",
+    "mega.w" to "first! ❤️",
+    "yoga_p" to "mantap kontennya",
+    "dewi" to "salam kenal semuaa",
+    "arif.hd" to "gaskeun 🚀",
+    "nabila" to "lucu bangett 😂",
+    "topan" to "kualitas videonya bagus",
+    "vina.s" to "izin share ya kak",
+    "galih" to "hadir full sampai habis",
+    "citra_a" to "request lagu dong 🎶",
+)
+
+/**
+ * What the broadcaster sees while streaming: a camera-preview placeholder with the
+ * live overlay — timer + viewer count up top, audience comments trickling up from
+ * the bottom-left, tap-to-heart floating reactions, and the controls (mic, flip
+ * camera, and a prominent End). Everything is simulated; no camera or network yet.
+ */
+@Composable
+fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
+    var confirmEnd by remember { mutableStateOf(false) }
+    var micOn by remember { mutableStateOf(true) }
+    var frontCam by remember { mutableStateOf(true) }
+    var viewers by remember { mutableStateOf(1) }
+    var likes by remember { mutableStateOf(0) }
+    var seconds by remember { mutableStateOf(0) }
+    val comments = remember { mutableStateListOf<LiveComment>() }
+    val hearts = remember { mutableStateListOf<Long>() }
+    var nextId by remember { mutableStateOf(0L) }
+
+    BackHandler { confirmEnd = true }
+
+    // Elapsed timer.
+    LaunchedEffect(Unit) {
+        while (true) { delay(1000); seconds++ }
+    }
+    // Viewers climb (with a little jitter) as if people are joining.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1800)
+            viewers = (viewers + (1..7).random()).coerceAtMost(99_999)
+            if ((0..4).random() == 0 && viewers > 3) viewers -= (1..2).random()
+        }
+    }
+    // Comments trickle in.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay((1400..2600).random().toLong())
+            val (u, t) = sampleChatter.random()
+            comments.add(LiveComment(nextId++, u, t))
+            if (comments.size > 40) comments.removeAt(0)
+        }
+    }
+
+    fun spawnHeart() {
+        likes++
+        hearts.add(nextId++)
+    }
+
+    Box(Modifier.fillMaxSize().background(Color(0xFF0B0B10))) {
+        // Camera-preview placeholder.
+        Box(
+            Modifier.fillMaxSize().background(Brush.verticalGradient(liveGradient(if (frontCam) "front" else "back"))),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Filled.Videocam, null, tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(46.dp))
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    if (frontCam) "Pratinjau kamera depan" else "Pratinjau kamera belakang",
+                    color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp,
+                )
+            }
+        }
+
+        // Floating hearts (bottom-right).
+        hearts.forEach { id ->
+            key(id) { FloatingHeart(onDone = { hearts.remove(id) }) }
+        }
+
+        // Top overlay: host + LIVE + timer, and viewer count + close.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.35f))
+                        .padding(start = 5.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("A", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("Kamu", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(liveClock(seconds), color = Color.White.copy(alpha = 0.8f), fontSize = 10.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    LiveBadge()
+                }
+                Spacer(Modifier.weight(1f))
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.35f))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Visibility, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text(compactViewers(viewers), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier
+                        .size(34.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.35f))
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { confirmEnd = true },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.Close, "Akhiri", tint = Color.White, modifier = Modifier.size(20.dp)) }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                title,
+                color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.Black.copy(alpha = 0.3f))
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+            )
+        }
+
+        // Comments — newest at the bottom, trickling up above the control bar.
+        LazyColumn(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth(0.72f)
+                .fillMaxHeight(0.42f)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(start = 12.dp, bottom = 76.dp),
+            reverseLayout = true,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(comments.asReversed(), key = { it.id }) { c -> LiveCommentRow(c) }
+        }
+
+        // Bottom control bar: comment box + mic + flip + heart.
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(50))
+                    .padding(horizontal = 16.dp, vertical = 11.dp),
+            ) { Text("Tambahkan komentar…", color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp) }
+            Spacer(Modifier.width(8.dp))
+            LiveControlButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff, if (micOn) "Bisukan" else "Nyalakan mik", active = !micOn) { micOn = !micOn }
+            Spacer(Modifier.width(8.dp))
+            LiveControlButton(Icons.Filled.Cameraswitch, "Balik kamera") { frontCam = !frontCam }
+            Spacer(Modifier.width(8.dp))
+            LiveControlButton(Icons.Filled.Favorite, "Suka", tint = Color(0xFFFF5D8F)) { spawnHeart() }
+        }
+    }
+
+    if (confirmEnd) {
+        EndLiveDialog(
+            viewers = viewers,
+            likes = likes,
+            duration = liveClock(seconds),
+            onDismiss = { confirmEnd = false },
+            onConfirm = onEnd,
+        )
+    }
+}
+
+private fun liveClock(totalSec: Int): String {
+    val m = totalSec / 60
+    val s = totalSec % 60
+    return "%d:%02d".format(m, s)
+}
+
+@Composable
+private fun LiveCommentRow(c: LiveComment) {
+    Row(verticalAlignment = Alignment.Top) {
+        Box(
+            Modifier.size(26.dp).clip(CircleShape).background(Brush.linearGradient(liveGradient(c.user))),
+            contentAlignment = Alignment.Center,
+        ) { Text(c.user.take(1).uppercase(), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+        Spacer(Modifier.width(8.dp))
+        Column(
+            Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.Black.copy(alpha = 0.32f))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Text(c.user, color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            Text(c.text, color = Color.White, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun LiveControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    active: Boolean = false,
+    tint: Color = Color.White,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(if (active) Color(0xFFE5484D) else Color.White.copy(alpha = 0.14f))
+            .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Icon(icon, label, tint = if (active) Color.White else tint, modifier = Modifier.size(22.dp)) }
+}
+
+/** A single heart that rises and fades, then removes itself. */
+@Composable
+private fun FloatingHeart(onDone: () -> Unit) {
+    val rise = remember { Animatable(0f) }
+    val drift = remember { (-1f..1f).random() }
+    LaunchedEffect(Unit) {
+        rise.animateTo(1f, animationSpec = tween(2200))
+        onDone()
+    }
+    Box(Modifier.fillMaxSize()) {
+        Icon(
+            Icons.Filled.Favorite,
+            null,
+            tint = Color(0xFFFF5D8F).copy(alpha = (1f - rise.value).coerceIn(0f, 1f)),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 24.dp, bottom = 90.dp)
+                .size(28.dp)
+                .graphicsLayer {
+                    translationY = -rise.value * 320f
+                    translationX = drift * 60f * rise.value
+                    val sc = 0.7f + 0.5f * rise.value
+                    scaleX = sc
+                    scaleY = sc
+                },
+        )
+    }
+}
+
+private fun ClosedFloatingPointRange<Float>.random(): Float =
+    start + (endInclusive - start) * Math.random().toFloat()
+
+/** Confirm-then-summary sheet shown when ending the broadcast. */
+@Composable
+private fun EndLiveDialog(
+    viewers: Int,
+    likes: Int,
+    duration: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDismiss),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.86f)
+                .clip(RoundedCornerShape(20.dp))
+                .background(NexusSurface)
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
+                .padding(22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("Akhiri siaran?", color = NexusTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text("Penonton akan diberi tahu siaran berakhir.", color = NexusTextSecondary, fontSize = 13.sp)
+            Spacer(Modifier.height(18.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(NexusBackground)
+                    .padding(vertical = 14.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                LiveStat(duration, "Durasi")
+                LiveStat(compactViewers(viewers), "Penonton")
+                LiveStat(compactViewers(likes), "Suka")
+            }
+            Spacer(Modifier.height(18.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFFE5484D))
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onConfirm)
+                    .padding(vertical = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) { Text("Akhiri siaran", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.height(8.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDismiss)
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) { Text("Lanjut siaran", color = NexusTextSecondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+        }
+    }
+}
+
+@Composable
+private fun LiveStat(value: String, label: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, color = NexusTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(2.dp))
+        Text(label, color = NexusTextSecondary, fontSize = 11.sp)
     }
 }
 
