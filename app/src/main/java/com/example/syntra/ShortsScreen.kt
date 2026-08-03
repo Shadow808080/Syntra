@@ -2639,7 +2639,7 @@ private fun ShortsHeader(
         Row(
             modifier = Modifier.align(Alignment.Center),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(18.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             ShortsTab("Live", active = live) { onSelectLive() }
             ShortsTab("Mengikuti", active = !live && following) { onSelectFollowing(true) }
@@ -2688,7 +2688,10 @@ private fun ShortsTab(text: String, active: Boolean, onClick: () -> Unit) {
             // ONE size for both states — weight and opacity carry the selection, so
             // the label never changes width and the row never reflows.
             color = Color.White.copy(alpha = alpha),
-            fontSize = 16.sp,
+            // 14sp (was 16): with three tabs the centred row grew wide enough that
+            // "Live" crowded the "+" button on the left — a smaller label pulls the
+            // whole row in and restores the gap.
+            fontSize = 14.sp,
             fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
             maxLines = 1,
             // A soft shadow so white text stays readable over a bright video frame.
