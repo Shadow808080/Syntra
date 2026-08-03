@@ -321,6 +321,16 @@ fun ShortsScreen(
     // feed already carries is_following per reel). Own reels are excluded so it
     // reads like TikTok's Following, not a mix with your own uploads.
     var showFollowing by remember { mutableStateOf(false) }
+    // LIVE (scaffold): a third header tab that swaps the reel feed for a grid of
+    // ongoing streams, plus its two entry points. All placeholder for now — see
+    // ShortsLive.kt. Kept as separate flags so the reel VerticalPager (and its video
+    // decoders) simply isn't composed while Live is on screen.
+    var showLive by remember { mutableStateOf(false) }
+    var showCreateSheet by remember { mutableStateOf(false) }
+    var openLive by remember { mutableStateOf<LiveStream?>(null) }
+    var goLive by remember { mutableStateOf(false) }
+    // Back on the Live grid returns to the reel feed, not out of Shorts.
+    androidx.activity.compose.BackHandler(enabled = showLive) { showLive = false }
     val displayReels by remember {
         derivedStateOf {
             // distinctBy is the last line of defence: the pager keys pages by reel id,
@@ -531,6 +541,17 @@ fun ShortsScreen(
     // The add-reels flow is its OWN full screen: trim → details. While it is up we
     // do NOT compose the feed at all — the reel video surface leaves the
     // composition entirely, so it can never bleed over or fight the preview.
+    // Live viewer / go-live are their OWN full screens (placeholder), rendered
+    // instead of the feed so no reel decoder is held behind them.
+    openLive?.let { stream ->
+        LiveViewerScreen(stream = stream, onClose = { openLive = null })
+        return
+    }
+    if (goLive) {
+        GoLiveScreen(onClose = { goLive = false })
+        return
+    }
+
     val rawVideo = pendingVideo
     if (rawVideo != null) {
         val trimmed = trimmedVideo
@@ -579,7 +600,16 @@ fun ShortsScreen(
             .fillMaxSize()
             .background(NexusBackground),
     ) {
+        // Live is a browsable grid, not the immersive reel feed: keep the bottom bar
+        // visible whenever it's on screen (the reel auto-hide effects below never run
+        // while Live is shown, since the pager branch isn't composed).
+        LaunchedEffect(showLive) { if (showLive) BottomBarVisibility.visible = true }
+
         when {
+            // The "Live" tab: a grid of ongoing streams (placeholder data). Takes
+            // priority over the reel feed's loading/empty states.
+            showLive -> LiveGrid(onOpen = { openLive = it })
+
             loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = NexusAccentSoft, strokeWidth = 2.5.dp)
             }
@@ -690,12 +720,25 @@ fun ShortsScreen(
         // Header floats over the feed — gone entirely in full-screen.
         if (!fullscreen) {
             ShortsHeader(
+                live = showLive,
                 following = showFollowing,
-                onSelectFollowing = { showFollowing = it },
-                onPost = {
-                    if (posting) return@ShortsHeader
-                    pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                onSelectLive = { showLive = true },
+                onSelectFollowing = { showLive = false; showFollowing = it },
+                onPost = { showCreateSheet = true },
+            )
+        }
+
+        // "+" create menu: upload a video, or go live (placeholder).
+        if (showCreateSheet) {
+            ShortsCreateSheet(
+                onDismiss = { showCreateSheet = false },
+                onUploadVideo = {
+                    showCreateSheet = false
+                    if (!posting) {
+                        pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                    }
                 },
+                onGoLive = { showCreateSheet = false; goLive = true },
             )
         }
 
@@ -731,7 +774,7 @@ fun ShortsScreen(
         // instead of appearing out of nowhere mid-scroll.
         AnimatedVisibility(
             visible = displayReels.isNotEmpty() && pager.currentPage > 0 &&
-                !uploadCardVisible && !fullscreen,
+                !uploadCardVisible && !fullscreen && !showLive,
             enter = fadeIn(tween(180)) + slideInVertically(tween(220)) { -it / 2 },
             exit = fadeOut(tween(140)) + slideOutVertically(tween(180)) { -it / 2 },
             modifier = Modifier
@@ -761,8 +804,9 @@ fun ShortsScreen(
 
         // Full-screen toggle. The SAME button in both states — it swaps its icon (and
         // label) for the exit affordance once the chrome is gone, so there is always
-        // exactly one visible way back out. Sits opposite the "Ke atas" pill.
-        if (displayReels.isNotEmpty()) {
+        // exactly one visible way back out. Sits opposite the "Ke atas" pill. Hidden on
+        // the Live grid, which isn't the immersive reel view.
+        if (displayReels.isNotEmpty() && !showLive) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -2561,7 +2605,9 @@ private fun SpinningMusicDisc(avatarUrl: String?, spinning: Boolean = true) {
 
 @Composable
 private fun ShortsHeader(
+    live: Boolean,
     following: Boolean,
+    onSelectLive: () -> Unit,
     onSelectFollowing: (Boolean) -> Unit,
     onPost: () -> Unit,
 ) {
@@ -2586,16 +2632,18 @@ private fun ShortsHeader(
         ) {
             Icon(Icons.Rounded.Add, "Unggah", tint = Color(0xFF0A1414), modifier = Modifier.size(26.dp))
         }
-        // Centre: the two feeds. Indonesian, because every other label in the app is
+        // Centre: the feeds. Indonesian, because every other label in the app is
         // ("Untuk Kamu" / "Mengikuti") — an English pair here read as a leftover from
-        // a different product.
+        // a different product. "Live" leads (like TikTok/IG) and is mutually exclusive
+        // with the two reel feeds.
         Row(
             modifier = Modifier.align(Alignment.Center),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            horizontalArrangement = Arrangement.spacedBy(18.dp),
         ) {
-            ShortsTab("Mengikuti", active = following) { onSelectFollowing(true) }
-            ShortsTab("Untuk Kamu", active = !following) { onSelectFollowing(false) }
+            ShortsTab("Live", active = live) { onSelectLive() }
+            ShortsTab("Mengikuti", active = !live && following) { onSelectFollowing(true) }
+            ShortsTab("Untuk Kamu", active = !live && !following) { onSelectFollowing(false) }
         }
         // Right: search.
         Icon(
