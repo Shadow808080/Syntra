@@ -19,11 +19,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -34,6 +36,8 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -68,6 +72,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -428,6 +433,15 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
     val comments = remember { mutableStateListOf<LiveComment>() }
     val hearts = remember { mutableStateListOf<Long>() }
     var nextId by remember { mutableStateOf(0L) }
+    var draft by remember { mutableStateOf("") }
+
+    fun sendComment() {
+        val text = draft.trim()
+        if (text.isEmpty()) return
+        comments.add(LiveComment(nextId++, "Kamu", text))
+        if (comments.size > 40) comments.removeAt(0)
+        draft = ""
+    }
 
     BackHandler { confirmEnd = true }
 
@@ -543,7 +557,7 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
                 .align(Alignment.BottomStart)
                 .fillMaxWidth(0.72f)
                 .fillMaxHeight(0.42f)
-                .windowInsetsPadding(WindowInsets.navigationBars)
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
                 .padding(start = 12.dp, bottom = 76.dp),
             reverseLayout = true,
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -551,29 +565,63 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
             items(comments.asReversed(), key = { it.id }) { c -> LiveCommentRow(c) }
         }
 
-        // Bottom control bar: comment box + mic + flip + heart.
+        // Bottom control bar: editable comment box + mic + flip + heart. The whole bar
+        // rises with the keyboard (union of nav-bar and IME insets: whichever is taller,
+        // never both stacked). While typing, the send button replaces the three controls
+        // so the field has room.
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars)
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
                 .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                Modifier
+            Row(
+                modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(50))
                     .background(Color.White.copy(alpha = 0.14f))
                     .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(50))
-                    .padding(horizontal = 16.dp, vertical = 11.dp),
-            ) { Text("Tambahkan komentar…", color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp) }
-            Spacer(Modifier.width(8.dp))
-            LiveControlButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff, if (micOn) "Bisukan" else "Nyalakan mik", active = !micOn) { micOn = !micOn }
-            Spacer(Modifier.width(8.dp))
-            LiveControlButton(Icons.Filled.Cameraswitch, "Balik kamera") { frontCam = !frontCam }
-            Spacer(Modifier.width(8.dp))
-            LiveControlButton(Icons.Filled.Favorite, "Suka", tint = Color(0xFFFF5D8F)) { spawnHeart() }
+                    .padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f).padding(vertical = 7.dp)) {
+                    if (draft.isEmpty()) {
+                        Text("Tambahkan komentar…", color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp)
+                    }
+                    BasicTextField(
+                        value = draft,
+                        onValueChange = { draft = it.take(200) },
+                        singleLine = true,
+                        textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { sendComment() }),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                // Send appears only when there's something to send.
+                if (draft.isNotBlank()) {
+                    Box(
+                        Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFE5484D))
+                            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { sendComment() },
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.AutoMirrored.Filled.Send, "Kirim", tint = Color.White, modifier = Modifier.size(18.dp)) }
+                }
+            }
+            // Mic / flip / heart hide while typing to give the field room.
+            if (draft.isBlank()) {
+                Spacer(Modifier.width(8.dp))
+                LiveControlButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff, if (micOn) "Bisukan" else "Nyalakan mik", active = !micOn) { micOn = !micOn }
+                Spacer(Modifier.width(8.dp))
+                LiveControlButton(Icons.Filled.Cameraswitch, "Balik kamera") { frontCam = !frontCam }
+                Spacer(Modifier.width(8.dp))
+                LiveControlButton(Icons.Filled.Favorite, "Suka", tint = Color(0xFFFF5D8F)) { spawnHeart() }
+            }
         }
     }
 
@@ -596,6 +644,8 @@ private fun liveClock(totalSec: Int): String {
 
 @Composable
 private fun LiveCommentRow(c: LiveComment) {
+    // The host's own messages read as "you": accent name + a tinted bubble.
+    val isHost = c.user == "Kamu"
     Row(verticalAlignment = Alignment.Top) {
         Box(
             Modifier.size(26.dp).clip(CircleShape).background(Brush.linearGradient(liveGradient(c.user))),
@@ -605,10 +655,14 @@ private fun LiveCommentRow(c: LiveComment) {
         Column(
             Modifier
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color.Black.copy(alpha = 0.32f))
+                .background(if (isHost) Color(0xFFE5484D).copy(alpha = 0.32f) else Color.Black.copy(alpha = 0.32f))
                 .padding(horizontal = 10.dp, vertical = 6.dp),
         ) {
-            Text(c.user, color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                c.user,
+                color = if (isHost) Color(0xFFFF9DAE) else Color.White.copy(alpha = 0.7f),
+                fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+            )
             Text(c.text, color = Color.White, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
         }
     }
