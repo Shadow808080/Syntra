@@ -205,6 +205,15 @@ data class NetLiveJoin(
     val sfuUrl: String,
 )
 
+/** Ephemeral live comment (never stored server-side). Username is resolved server-side. */
+data class NetLiveMessage(
+    val liveId: String,
+    val senderId: String,
+    val senderUsername: String = "",
+    val body: String,
+    val createdAt: String = "",
+)
+
 /** Ephemeral room chat message (never stored server-side). */
 data class NetRoomMessage(
     val roomId: String,

@@ -96,7 +96,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.syntra.net.LiveEngine
 import com.example.syntra.net.NetLive
+import com.example.syntra.net.NetLiveMessage
+import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
+import java.util.concurrent.atomic.AtomicLong
 import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
@@ -320,8 +323,13 @@ fun LiveViewerScreen(stream: LiveStream, onClose: () -> Unit) {
     // (404) means the host ended it, so we close.
     LaunchedEffect(stream.id) {
         val join = runCatching { SyntraClient.joinLive(stream.id) }.getOrNull()
-        if (join != null && join.sfuToken.isNotBlank()) {
-            runCatching { LiveEngine.connect(context, join.sfuUrl, join.sfuToken, asHost = false) }
+        if (join != null) {
+            // Subscribe only AFTER join records us in live_viewers, or the topic
+            // authorization (IsLiveViewer) would deny it.
+            SyntraClient.subscribe(listOf("live:${stream.id}"))
+            if (join.sfuToken.isNotBlank()) {
+                runCatching { LiveEngine.connect(context, join.sfuUrl, join.sfuToken, asHost = false) }
+            }
         }
         while (true) {
             delay(5_000)
@@ -347,29 +355,36 @@ private fun ViewerBody(stream: LiveStream, viewers: Int, onClose: () -> Unit) {
         return true
     }
 
-    // Local comment scaffold: a typeable field + list, with simulated audience chatter.
+    // Realtime comments over WebSocket: a typeable field + list. Sending goes out as a
+    // live.comment; everyone subscribed to live:<id> receives it back as live.message.
     val comments = remember { mutableStateListOf<LiveComment>() }
     var draft by remember { mutableStateOf("") }
-    var nextCommentId by remember { mutableStateOf(1000L) }
+    val commentIds = remember { AtomicLong(1_000_000L) }
     val commentListState = rememberLazyListState()
     val commentFocus = remember { FocusRequester() }
     fun sendComment() {
         val text = draft.trim()
         if (text.isEmpty()) return
-        comments.add(LiveComment(nextCommentId++, "Kamu", text))
+        comments.add(LiveComment(commentIds.incrementAndGet(), "Kamu", text))
         if (comments.size > 40) comments.removeAt(0)
+        SyntraClient.liveComment(stream.id, text)
         draft = ""
     }
     LaunchedEffect(comments.lastOrNull()?.id) {
         if (comments.isNotEmpty()) runCatching { commentListState.animateScrollToItem(0) }
     }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay((1600..2800).random().toLong())
-            val (u, t) = sampleChatter.random()
-            comments.add(LiveComment(nextCommentId++, u, t))
-            if (comments.size > 40) comments.removeAt(0)
+    // Append incoming comments (skipping our own echo — added optimistically). The
+    // subscribe itself happens in LiveViewerScreen, after join records us as a viewer.
+    DisposableEffect(stream.id) {
+        val listener = object : SocketListener {
+            override fun onLiveMessage(message: NetLiveMessage) {
+                if (message.liveId != stream.id || message.senderId == SyntraClient.myUserId) return
+                comments.add(LiveComment(commentIds.incrementAndGet(), message.senderUsername.ifBlank { "penonton" }, message.body))
+                if (comments.size > 40) comments.removeAt(0)
+            }
         }
+        SyntraClient.addListener(listener)
+        onDispose { SyntraClient.removeListener(listener) }
     }
 
     Box(Modifier.fillMaxSize().background(Color(0xFF0B0B10))) {
@@ -725,6 +740,7 @@ fun LiveBroadcastScreen(liveId: String, title: String, onEnd: () -> Unit) {
     val floatingGifts = remember { mutableStateListOf<FloatingGift>() }
     var giftAlert by remember { mutableStateOf<GiftAlert?>(null) }
     var nextId by remember { mutableStateOf(0L) }
+    val commentIds = remember { AtomicLong(1_000_000L) }
     var draft by remember { mutableStateOf("") }
     var actionFor by remember { mutableStateOf<LiveComment?>(null) }
     var pinned by remember { mutableStateOf<LiveComment?>(null) }
@@ -752,8 +768,9 @@ fun LiveBroadcastScreen(liveId: String, title: String, onEnd: () -> Unit) {
     fun sendComment() {
         val text = draft.trim()
         if (text.isEmpty()) return
-        comments.add(LiveComment(nextId++, "Kamu", text))
+        comments.add(LiveComment(commentIds.incrementAndGet(), "Kamu", text))
         if (comments.size > 40) comments.removeAt(0)
+        SyntraClient.liveComment(liveId, text)
         draft = ""
     }
     fun replyTo(c: LiveComment) {
@@ -779,15 +796,19 @@ fun LiveBroadcastScreen(liveId: String, title: String, onEnd: () -> Unit) {
             runCatching { SyntraClient.getLive(liveId) }.onSuccess { viewers = it.viewerCount }
         }
     }
-    // Comments trickle in (local scaffold). Frozen while paused.
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay((1400..2600).random().toLong())
-            if (paused) continue
-            val (u, t) = sampleChatter.random()
-            comments.add(LiveComment(nextId++, u, t))
-            if (comments.size > 40) comments.removeAt(0)
+    // Real comments over WebSocket: subscribe to the live channel and append incoming
+    // viewer comments (skipping our own echo — added optimistically in sendComment).
+    DisposableEffect(liveId) {
+        SyntraClient.subscribe(listOf("live:$liveId"))
+        val listener = object : SocketListener {
+            override fun onLiveMessage(message: NetLiveMessage) {
+                if (message.liveId != liveId || message.senderId == SyntraClient.myUserId) return
+                comments.add(LiveComment(commentIds.incrementAndGet(), message.senderUsername.ifBlank { "penonton" }, message.body))
+                if (comments.size > 40) comments.removeAt(0)
+            }
         }
+        SyntraClient.addListener(listener)
+        onDispose { SyntraClient.removeListener(listener) }
     }
     // Viewers occasionally send GIF gifts (bought with coins on their side) — the host
     // sees them float up plus a top banner. Local scaffold. Frozen while paused.

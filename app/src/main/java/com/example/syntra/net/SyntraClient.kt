@@ -70,6 +70,9 @@ interface SocketListener {
     fun onReconnect() {}
     /** Ephemeral room chat message. */
     fun onRoomMessage(message: NetRoomMessage) {}
+
+    /** Ephemeral live comment (never stored). */
+    fun onLiveMessage(message: NetLiveMessage) {}
     /** Authoritative participant list — replace whatever is held locally. */
     fun onRoomParticipants(roomId: String, participants: List<NetRoomParticipant>) {}
     /** Someone asked to speak. Only delivered to hosts/moderators. */
@@ -1268,6 +1271,10 @@ object SyntraClient {
     fun roomChat(roomId: String, body: String) =
         sendFrame("room.chat", JSONObject().put("room_id", roomId).put("body", body.take(500)))
 
+    /** Ephemeral live comment — max 300 chars, never stored. */
+    fun liveComment(liveId: String, body: String) =
+        sendFrame("live.comment", JSONObject().put("live_id", liveId).put("body", body.take(300)))
+
     // -----------------------------------------------------------------------
     // Media — three-step upload (api.md §8)
     // -----------------------------------------------------------------------
@@ -1658,6 +1665,16 @@ object SyntraClient {
                         createdAt = d.optString("created_at"),
                     )
                     dispatch { it.onRoomMessage(m) }
+                }
+                "live.message" -> (data as? JSONObject)?.let { d ->
+                    val m = NetLiveMessage(
+                        liveId = d.optString("live_id"),
+                        senderId = d.optString("sender_id"),
+                        senderUsername = d.optString("sender_username"),
+                        body = d.optString("body"),
+                        createdAt = d.optString("created_at"),
+                    )
+                    dispatch { it.onLiveMessage(m) }
                 }
                 "ack" -> {
                     // The presence.query reply comes back as an ack whose data is an
