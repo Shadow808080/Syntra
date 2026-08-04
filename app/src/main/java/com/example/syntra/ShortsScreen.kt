@@ -2611,16 +2611,20 @@ private fun ShortsHeader(
     onSelectFollowing: (Boolean) -> Unit,
     onPost: () -> Unit,
 ) {
-    Box(
+    // A single Row with three zones — [+] · flexible centred tabs · [search] — so the
+    // tabs live in their OWN space and can never overlap the side icons the way the old
+    // absolutely-positioned Box let them on narrow screens. The two side slots are the
+    // same width (38dp) so the tab group stays optically centred on the screen.
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         // Left: white round create/upload button.
         Box(
             modifier = Modifier
-                .align(Alignment.CenterStart)
                 .size(38.dp)
                 .background(Color.White, CircleShape)
                 .clickable(
@@ -2635,25 +2639,30 @@ private fun ShortsHeader(
         // Centre: the feeds. Indonesian, because every other label in the app is
         // ("Untuk Kamu" / "Mengikuti") — an English pair here read as a leftover from
         // a different product. "Live" leads (like TikTok/IG) and is mutually exclusive
-        // with the two reel feeds.
+        // with the two reel feeds. weight(1f) + spacedBy(_, CenterHorizontally) keeps the
+        // group centred inside whatever space is left after the two icons.
         Row(
-            modifier = Modifier.align(Alignment.Center),
+            modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
         ) {
             ShortsTab("Live", active = live) { onSelectLive() }
             ShortsTab("Mengikuti", active = !live && following) { onSelectFollowing(true) }
             ShortsTab("Untuk Kamu", active = !live && !following) { onSelectFollowing(false) }
         }
-        // Right: search.
-        Icon(
-            imageVector = Icons.Rounded.Search,
-            contentDescription = "Cari",
-            tint = Color.White,
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .size(26.dp),
-        )
+        // Right: search — wrapped in a 38dp slot mirroring the left button so the tabs
+        // sit dead centre.
+        Box(
+            modifier = Modifier.size(38.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Search,
+                contentDescription = "Cari",
+                tint = Color.White,
+                modifier = Modifier.size(26.dp),
+            )
+        }
     }
 }
 

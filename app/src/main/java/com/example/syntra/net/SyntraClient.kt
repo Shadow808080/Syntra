@@ -1168,6 +1168,75 @@ object SyntraClient {
         postData("/api/v1/rooms/$roomId/leave", JSONObject())
     }
 
+    // -----------------------------------------------------------------------
+    // Live streaming (migration 66). A live is one host publishing camera video
+    // to many viewers over the SAME LiveKit the voice rooms use — the backend
+    // only mints the sfu_token; video flows host↔SFU↔viewer.
+    // -----------------------------------------------------------------------
+
+    /** Ongoing lives plus whether the media server is configured at all. */
+    suspend fun getLives(): NetLiveList = withContext(Dispatchers.IO) {
+        val text = http.newCall(Request.Builder().url(rest("/api/v1/lives")).auth().get().build())
+            .execute().use { it.body?.string().orEmpty() }
+        val root = JSONObject(text)
+        if (root.has("error")) {
+            val err = root.getJSONObject("error")
+            throw ApiException(err.optString("code", "internal"), err.optString("message", "gagal memuat live"))
+        }
+        NetLiveList(
+            lives = (root.optJSONArray("data") ?: JSONArray()).mapObjects { it.toLive() },
+            sfuReady = root.optJSONObject("meta")?.optBoolean("sfu_ready", false) ?: false,
+        )
+    }
+
+    /** One live by id — used by viewers to poll whether the stream is still up (404 = ended). */
+    suspend fun getLive(liveId: String): NetLive =
+        (getData("/api/v1/lives/$liveId") as JSONObject).toLive()
+
+    /**
+     * Starts a live. The response already carries a `join` block with the SFU
+     * credentials, so the host can publish the camera without a second call.
+     */
+    suspend fun createLive(title: String, category: String = ""): Pair<NetLive, NetLiveJoin?> {
+        val payload = JSONObject().put("title", title).put("category", category)
+        val data = postData("/api/v1/lives", payload) as JSONObject
+        val live = data.toLive()
+        val join = data.optJSONObject("join")?.let { j ->
+            NetLiveJoin(
+                liveId = j.optString("live_id", live.id),
+                role = j.optString("role", "host"),
+                canPublish = j.optBoolean("can_publish", true),
+                sfuRoomId = j.optString("sfu_room_id", ""),
+                sfuToken = j.optString("sfu_token", ""),
+                sfuUrl = j.optString("sfu_url", ""),
+            )
+        }
+        return live to join
+    }
+
+    /** Joins a live as a viewer and returns the LiveKit credentials to subscribe to the host. */
+    suspend fun joinLive(liveId: String): NetLiveJoin {
+        val d = postData("/api/v1/lives/$liveId/join", JSONObject()) as JSONObject
+        return NetLiveJoin(
+            liveId = d.optString("live_id", liveId),
+            role = d.optString("role", "viewer"),
+            canPublish = d.optBoolean("can_publish", false),
+            sfuRoomId = d.optString("sfu_room_id", ""),
+            sfuToken = d.optString("sfu_token", ""),
+            sfuUrl = d.optString("sfu_url", ""),
+        )
+    }
+
+    /** Leave a live (a viewer stops watching; the host leaving ends the live). */
+    suspend fun leaveLive(liveId: String) {
+        postData("/api/v1/lives/$liveId/leave", JSONObject())
+    }
+
+    /** Host-only: end the broadcast. */
+    suspend fun endLive(liveId: String) {
+        postData("/api/v1/lives/$liveId/end", JSONObject())
+    }
+
     suspend fun getRoomParticipants(roomId: String): List<NetRoomParticipant> =
         (getData("/api/v1/rooms/$roomId/participants") as JSONArray).mapObjects { it.toParticipant() }
 
@@ -1706,6 +1775,18 @@ private fun JSONObject.toRoom() = NetRoom(
     participantCount = optInt("participant_count", 0),
     speakerCount = optInt("speaker_count", 0),
     maxParticipants = optInt("max_participants", 50),
+    startedAt = optString("started_at", ""),
+)
+
+private fun JSONObject.toLive() = NetLive(
+    id = getString("id"),
+    hostId = optString("host_id", ""),
+    hostUsername = optString("host_username", ""),
+    hostName = optString("host_name", ""),
+    hostAvatarUrl = strOrNull("host_avatar_url"),
+    title = optString("title", ""),
+    category = optString("category", ""),
+    viewerCount = optInt("viewer_count", 0),
     startedAt = optString("started_at", ""),
 )
 

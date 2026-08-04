@@ -1,6 +1,10 @@
 package com.example.syntra
 
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -30,6 +34,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -43,27 +48,33 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.FileUpload
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,31 +85,40 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import com.example.syntra.net.LiveEngine
+import com.example.syntra.net.NetLive
+import com.example.syntra.net.SyntraClient
+import com.example.syntra.ui.theme.NexusAccent
 import com.example.syntra.ui.theme.NexusBackground
 import com.example.syntra.ui.theme.NexusStroke
 import com.example.syntra.ui.theme.NexusSurface
 import com.example.syntra.ui.theme.NexusTextPrimary
 import com.example.syntra.ui.theme.NexusTextSecondary
+import io.livekit.android.renderer.TextureViewRenderer
+import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
- * LIVE — UI SCAFFOLD ONLY (no real streaming yet).
+ * LIVE — now wired to the backend.
  *
- * This is the front-end shell for a future live feature: a browsable grid of
- * ongoing streams (the "Live" tab in the Shorts header) and the two entry points a
- * real feature needs — a viewer screen (tap a tile) and a go-live setup screen (the
- * "+" create sheet). Everything here runs on placeholder data ([LiveSamples]); the
- * actual broadcast/watch plumbing is a backend job (a LiveKit room per broadcaster,
- * a `/lives` listing, viewer tokens) that Rooms' audio stack can be extended into.
+ * A live is one host publishing camera video to many viewers over LiveKit (the same
+ * SFU voice rooms use). The backend `/lives` endpoints mint the sfu_token; video flows
+ * host↔SFU↔viewer and never through Syntra. [LiveEngine] drives the media session.
  *
- * Kept in its own file so the (already large) ShortsScreen only has to hold a couple
- * of flags and hand off rendering.
+ * Real: the browsable grid ([LiveGrid] ← GET /lives), going live ([GoLiveScreen] →
+ * POST /lives + publish camera), watching ([LiveViewerScreen] → join + subscribe), and
+ * the viewer count. Still local scaffold (a future backend job): the ephemeral comments,
+ * the coin-powered GIF gifts, and floating hearts.
  */
 data class LiveStream(
     val id: String,
@@ -106,19 +126,20 @@ data class LiveStream(
     val title: String,
     val viewers: Int,
     val category: String,
+    val hostId: String = "",
+    val avatarUrl: String? = null,
 )
 
-/** Placeholder streams shown until a real `/lives` endpoint exists. */
-internal object LiveSamples {
-    val streams = listOf(
-        LiveStream("l1", "rani.mp", "Ngobrol santai malam mingguan ✨", 1240, "Obrolan"),
-        LiveStream("l2", "dev.arya", "Live coding: bikin fitur Syntra", 320, "Teknologi"),
-        LiveStream("l3", "chef.wulan", "Masak bareng: nasi goreng spesial", 2115, "Kuliner"),
-        LiveStream("l4", "gilang.beats", "Sesi produksi musik lo-fi 🎧", 540, "Musik"),
-        LiveStream("l5", "tania.art", "Menggambar digital dari nol", 178, "Seni"),
-        LiveStream("l6", "fajar.games", "Push rank ditemani penonton", 3890, "Game"),
-    )
-}
+/** Map a backend live onto the UI model the Live screens already speak. */
+internal fun NetLive.toStream() = LiveStream(
+    id = id,
+    host = hostUsername.ifBlank { hostName },
+    title = title,
+    viewers = viewerCount,
+    category = category,
+    hostId = hostId,
+    avatarUrl = hostAvatarUrl,
+)
 
 /** A stable, id-derived gradient so a stream tile always looks the same. */
 private fun liveGradient(seed: String): List<Color> {
@@ -139,18 +160,49 @@ private fun compactViewers(n: Int): String = when {
     else -> String.format(java.util.Locale.US, "%.1f", n / 1_000_000f).removeSuffix(".0").replace('.', ',') + "jt"
 }
 
-/** The "Live" tab body: a 2-column grid of ongoing streams (placeholder data). */
+/** The "Live" tab body: a 2-column grid of the streams that are actually live now. */
 @Composable
 fun LiveGrid(onOpen: (LiveStream) -> Unit) {
-    val streams = remember { LiveSamples.streams }
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = Modifier.fillMaxSize().background(NexusBackground),
-        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 74.dp, bottom = 96.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        items(streams, key = { it.id }) { s -> LiveTile(s, onOpen = { onOpen(s) }) }
+    var streams by remember { mutableStateOf<List<LiveStream>?>(null) }
+
+    // Load on open and refresh every 10s so newly-started (and ended) streams appear
+    // without the user having to leave and come back.
+    LaunchedEffect(Unit) {
+        while (true) {
+            val fresh = runCatching { SyntraClient.getLives().lives.map { it.toStream() } }.getOrNull()
+            if (fresh != null) streams = fresh
+            delay(10_000)
+        }
+    }
+
+    val list = streams
+    when {
+        list == null -> Box(
+            Modifier.fillMaxSize().background(NexusBackground),
+            contentAlignment = Alignment.Center,
+        ) { CircularProgressIndicator(color = NexusAccent) }
+
+        list.isEmpty() -> Column(
+            modifier = Modifier.fillMaxSize().background(NexusBackground).padding(40.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Icon(Icons.Filled.Videocam, null, tint = NexusTextSecondary, modifier = Modifier.size(44.dp))
+            Spacer(Modifier.height(14.dp))
+            Text("Belum ada yang siaran", color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            Text("Mulai siaranmu sendiri lewat tombol +", color = NexusTextSecondary, fontSize = 13.sp)
+        }
+
+        else -> LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize().background(NexusBackground),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 74.dp, bottom = 96.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(list, key = { it.id }) { s -> LiveTile(s, onOpen = { onOpen(s) }) }
+        }
     }
 }
 
@@ -168,7 +220,6 @@ private fun LiveTile(stream: LiveStream, onOpen: () -> Unit) {
                 onClick = onOpen,
             ),
     ) {
-        // LIVE badge (top-left) + viewer count (top-right).
         Row(
             modifier = Modifier.fillMaxWidth().padding(10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -187,7 +238,6 @@ private fun LiveTile(stream: LiveStream, onOpen: () -> Unit) {
                 Text(compactViewers(stream.viewers), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             }
         }
-        // Host + title (bottom).
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -221,16 +271,131 @@ private fun LiveBadge() {
     }
 }
 
+/** Renders a LiveKit [VideoTrack] full-bleed — shared by the host self-preview and
+ *  the viewer stage. Keyed on the track so a new publication swaps renderers cleanly. */
+@Composable
+private fun LiveVideoRenderer(track: VideoTrack, modifier: Modifier = Modifier, mirror: Boolean = false) {
+    key(track) {
+        AndroidView(
+            modifier = modifier,
+            factory = { ctx ->
+                TextureViewRenderer(ctx).apply {
+                    LiveEngine.initRenderer(this)
+                    setMirror(mirror)
+                    runCatching { setEnableHardwareScaler(true) }
+                    runCatching { track.addRenderer(this) }
+                }
+            },
+            onRelease = { view ->
+                runCatching { track.removeRenderer(view) }
+                runCatching { view.release() }
+            },
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Viewer — watching someone else's live
+// ---------------------------------------------------------------------------
+
 /**
- * Viewer screen opened by tapping a tile — a full-screen placeholder that lays out
- * the intended live UI (host bar, stage, comment input) but shows a "coming soon"
- * stage instead of a real video track.
+ * Viewer screen opened by tapping a tile. Joins the live on the backend, connects to
+ * LiveKit as a silent subscriber, and renders the host's camera track. Comments and
+ * GIF gifts are still local scaffold; the video and viewer count are real.
  */
 @Composable
 fun LiveViewerScreen(stream: LiveStream, onClose: () -> Unit) {
-    BackHandler(onBack = onClose)
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(liveGradient(stream.id)))) {
-        // Top: host + LIVE + close.
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var viewers by remember { mutableStateOf(stream.viewers) }
+
+    fun leave() {
+        scope.launch { runCatching { SyntraClient.leaveLive(stream.id) } }
+        LiveEngine.disconnect()
+        onClose()
+    }
+    BackHandler(onBack = { leave() })
+
+    // Join → connect as viewer. Then poll: viewer count updates, and an empty result
+    // (404) means the host ended it, so we close.
+    LaunchedEffect(stream.id) {
+        val join = runCatching { SyntraClient.joinLive(stream.id) }.getOrNull()
+        if (join != null && join.sfuToken.isNotBlank()) {
+            runCatching { LiveEngine.connect(context, join.sfuUrl, join.sfuToken, asHost = false) }
+        }
+        while (true) {
+            delay(5_000)
+            val live = runCatching { SyntraClient.getLive(stream.id) }
+            live.onSuccess { viewers = it.viewerCount }
+                .onFailure { leave(); return@LaunchedEffect }
+        }
+    }
+    DisposableEffect(Unit) { onDispose { LiveEngine.disconnect() } }
+
+    ViewerBody(stream = stream, viewers = viewers, onClose = { leave() })
+}
+
+@Composable
+private fun ViewerBody(stream: LiveStream, viewers: Int, onClose: () -> Unit) {
+    val floatingGifts = remember { mutableStateListOf<FloatingGift>() }
+    var showGiftPicker by remember { mutableStateOf(false) }
+    var nextGiftId by remember { mutableStateOf(0L) }
+    fun sendGift(gift: LiveGift): Boolean {
+        if (LiveCoins.balance < gift.cost) return false
+        LiveCoins.balance -= gift.cost
+        floatingGifts.add(FloatingGift(nextGiftId++, gift.emoji))
+        return true
+    }
+
+    // Local comment scaffold: a typeable field + list, with simulated audience chatter.
+    val comments = remember { mutableStateListOf<LiveComment>() }
+    var draft by remember { mutableStateOf("") }
+    var nextCommentId by remember { mutableStateOf(1000L) }
+    val commentListState = rememberLazyListState()
+    val commentFocus = remember { FocusRequester() }
+    fun sendComment() {
+        val text = draft.trim()
+        if (text.isEmpty()) return
+        comments.add(LiveComment(nextCommentId++, "Kamu", text))
+        if (comments.size > 40) comments.removeAt(0)
+        draft = ""
+    }
+    LaunchedEffect(comments.lastOrNull()?.id) {
+        if (comments.isNotEmpty()) runCatching { commentListState.animateScrollToItem(0) }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay((1600..2800).random().toLong())
+            val (u, t) = sampleChatter.random()
+            comments.add(LiveComment(nextCommentId++, u, t))
+            if (comments.size > 40) comments.removeAt(0)
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color(0xFF0B0B10))) {
+        // Real host video (or a "connecting" state until they publish).
+        val remote = LiveEngine.remoteVideo
+        if (remote != null) {
+            LiveVideoRenderer(remote, Modifier.fillMaxSize())
+        } else {
+            Box(
+                Modifier.fillMaxSize().background(Brush.verticalGradient(liveGradient(stream.id))),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color.White)
+                    Spacer(Modifier.height(12.dp))
+                    Text("Menghubungkan ke siaran…", color = Color.White, fontSize = 14.sp)
+                }
+            }
+        }
+
+        // Floating GIF gifts the viewer has sent.
+        floatingGifts.forEach { g ->
+            key(g.id) { FloatingGiftView(emoji = g.emoji, onDone = { floatingGifts.remove(g) }) }
+        }
+
+        // Top: host + LIVE + viewers + close.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -241,9 +406,7 @@ fun LiveViewerScreen(stream: LiveStream, onClose: () -> Unit) {
             Box(
                 Modifier.size(40.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.2f)),
                 contentAlignment = Alignment.Center,
-            ) {
-                Text(stream.host.take(1).uppercase(), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            }
+            ) { Text(stream.host.take(1).uppercase(), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text("@${stream.host}", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -252,72 +415,152 @@ fun LiveViewerScreen(stream: LiveStream, onClose: () -> Unit) {
                     Spacer(Modifier.width(8.dp))
                     Icon(Icons.Filled.Visibility, null, tint = Color.White, modifier = Modifier.size(13.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text(compactViewers(stream.viewers), color = Color.White, fontSize = 12.sp)
+                    Text(compactViewers(viewers), color = Color.White, fontSize = 12.sp)
                 }
             }
             Box(
                 Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.3f))
+                    .size(38.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.3f))
                     .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClose),
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Filled.Close, "Tutup", tint = Color.White, modifier = Modifier.size(22.dp)) }
         }
 
-        // Centre stage placeholder.
-        Column(
-            modifier = Modifier.align(Alignment.Center).padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+        // Comments — newest at the bottom, trickling up above the input bar.
+        LazyColumn(
+            state = commentListState,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth(0.72f)
+                .fillMaxHeight(0.4f)
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                .padding(start = 12.dp, bottom = 76.dp),
+            reverseLayout = true,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(Icons.Filled.Videocam, null, tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(44.dp))
-            Spacer(Modifier.height(12.dp))
-            Text("Siaran langsung segera hadir", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Ini pratinjau tampilan. Pemutaran siaran nyata menyusul saat backend live siap.",
-                color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp,
-            )
+            items(comments.asReversed(), key = { it.id }) { c -> LiveCommentRow(c) }
         }
 
-        // Bottom mock comment bar (disabled).
+        // Bottom bar: editable comment field + coin-powered GIF sender. Rises with the
+        // keyboard; the GIF button hides while typing to give the field room.
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                Modifier
+            Row(
+                modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(50))
-                    .background(Color.Black.copy(alpha = 0.35f))
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            ) { Text("Tambahkan komentar…", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp) }
-            Spacer(Modifier.width(10.dp))
-            Icon(Icons.AutoMirrored.Filled.Send, "Kirim", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(22.dp))
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(50))
+                    .padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f).padding(vertical = 7.dp)) {
+                    if (draft.isEmpty()) {
+                        Text("Tambahkan komentar…", color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp)
+                    }
+                    BasicTextField(
+                        value = draft,
+                        onValueChange = { draft = it.take(200) },
+                        singleLine = true,
+                        textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { sendComment() }),
+                        modifier = Modifier.fillMaxWidth().focusRequester(commentFocus),
+                    )
+                }
+                if (draft.isNotBlank()) {
+                    Box(
+                        Modifier
+                            .size(34.dp).clip(CircleShape).background(Color(0xFFE5484D))
+                            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { sendComment() },
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.AutoMirrored.Filled.Send, "Kirim", tint = Color.White, modifier = Modifier.size(18.dp)) }
+                }
+            }
+            if (draft.isBlank()) {
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier
+                        .size(46.dp).clip(CircleShape).background(Color(0xFFFFC24D))
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { showGiftPicker = true },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.CardGiftcard, "Kirim GIF", tint = Color(0xFF141726), modifier = Modifier.size(24.dp)) }
+            }
         }
+    }
+
+    if (showGiftPicker) {
+        GiftPickerSheet(
+            balance = LiveCoins.balance,
+            onSend = { gift -> if (sendGift(gift)) showGiftPicker = false },
+            onTopUp = { LiveCoins.balance += 100 },
+            onDismiss = { showGiftPicker = false },
+        )
     }
 }
 
+// ---------------------------------------------------------------------------
+// Go live — setup then broadcast
+// ---------------------------------------------------------------------------
+
 /**
- * Go-live flow opened from the "+" sheet. Two steps, both UI-only:
- *  1. SETUP — name the stream + a camera-preview placeholder + "Mulai siaran".
- *  2. BROADCAST — [LiveBroadcastScreen], the screen shown while actually live.
- * No camera or stream is opened yet; the broadcast step is a faithful shell.
+ * Go-live flow opened from the "+" sheet:
+ *  1. SETUP — name the stream + "Mulai siaran".
+ *  2. BROADCAST — creates the live on the backend, publishes the camera over LiveKit,
+ *     then shows [LiveBroadcastScreen].
+ * Needs CAMERA + RECORD_AUDIO at runtime; asks before starting.
  */
 @Composable
 fun GoLiveScreen(onClose: () -> Unit) {
-    var broadcasting by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var title by remember { mutableStateOf("") }
+    var liveId by remember { mutableStateOf<String?>(null) }
+    var starting by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
 
-    if (broadcasting) {
-        LiveBroadcastScreen(
-            title = title.ifBlank { "Siaran langsung" },
-            onEnd = onClose,
-        )
+    fun startBroadcast() {
+        if (starting) return
+        starting = true
+        error = null
+        scope.launch {
+            val result = runCatching {
+                val (live, join) = SyntraClient.createLive(title.ifBlank { "Siaran langsung" })
+                val j = join ?: throw IllegalStateException("Media server belum siap")
+                if (j.sfuToken.isBlank()) throw IllegalStateException("Media server belum dikonfigurasi")
+                LiveEngine.connect(context, j.sfuUrl, j.sfuToken, asHost = true)
+                live.id
+            }
+            starting = false
+            result.onSuccess { liveId = it }
+                .onFailure { error = it.message ?: "Gagal memulai siaran" }
+        }
+    }
+
+    val permLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        val cam = grants[Manifest.permission.CAMERA] ?: false
+        val mic = grants[Manifest.permission.RECORD_AUDIO] ?: false
+        if (cam && mic) startBroadcast() else error = "Butuh izin kamera & mikrofon untuk siaran"
+    }
+
+    fun onStartClicked() {
+        val camOk = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val micOk = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (camOk && micOk) startBroadcast()
+        else permLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
+    }
+
+    liveId?.let { id ->
+        LiveBroadcastScreen(liveId = id, title = title.ifBlank { "Siaran langsung" }, onEnd = onClose)
         return
     }
 
@@ -352,7 +595,7 @@ fun GoLiveScreen(onClose: () -> Unit) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Filled.Videocam, null, tint = Color.White, modifier = Modifier.size(40.dp))
                 Spacer(Modifier.height(8.dp))
-                Text("Pratinjau kamera", color = Color.White, fontSize = 13.sp)
+                Text("Kamera menyala saat kamu mulai siaran", color = Color.White, fontSize = 13.sp)
             }
         }
         Spacer(Modifier.height(20.dp))
@@ -376,6 +619,10 @@ fun GoLiveScreen(onClose: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+        error?.let {
+            Spacer(Modifier.height(12.dp))
+            Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp)
+        }
         Spacer(Modifier.weight(1f))
         Box(
             Modifier
@@ -385,26 +632,30 @@ fun GoLiveScreen(onClose: () -> Unit) {
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
-                ) { broadcasting = true }
+                ) { onStartClicked() }
                 .padding(vertical = 16.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.FiberManualRecord, null, tint = Color.White, modifier = Modifier.size(14.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Mulai siaran", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            if (starting) {
+                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(22.dp))
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.FiberManualRecord, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Mulai siaran", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Broadcast — the screen shown WHILE the user is live (UI scaffold)
+// Broadcast — the screen shown WHILE the user is live
 // ---------------------------------------------------------------------------
 
 private data class LiveComment(val id: Long, val user: String, val text: String)
 
-/** Placeholder audience chatter that trickles in while "live". */
+/** Placeholder audience chatter that trickles in while live (comments are local scaffold). */
 private val sampleChatter = listOf(
     "budi_92" to "halo bang! 👋",
     "sinta.ay" to "suaranya jernih bgt",
@@ -421,30 +672,82 @@ private val sampleChatter = listOf(
 )
 
 /**
- * What the broadcaster sees while streaming: a camera-preview placeholder with the
- * live overlay — timer + viewer count up top, audience comments trickling up from
- * the bottom-left, tap-to-heart floating reactions, and the controls (mic, flip
- * camera, and a prominent End). Everything is simulated; no camera or network yet.
+ * A GIF/gift the audience can send. [emoji] stands in for the real animated GIF until
+ * a GIF source (GIPHY/backend) is wired; [cost] is the price in coins.
+ */
+private data class LiveGift(val id: String, val emoji: String, val name: String, val cost: Int)
+
+private val liveGifts = listOf(
+    LiveGift("rose", "🌹", "Mawar", 1),
+    LiveGift("heart", "💖", "Hati", 5),
+    LiveGift("clap", "👏", "Tepuk", 8),
+    LiveGift("fire", "🔥", "Api", 12),
+    LiveGift("party", "🎉", "Pesta", 20),
+    LiveGift("crown", "👑", "Mahkota", 50),
+    LiveGift("unicorn", "🦄", "Unicorn", 99),
+    LiveGift("rocket", "🚀", "Roket", 199),
+    LiveGift("diamond", "💎", "Berlian", 500),
+)
+
+/**
+ * The signed-in user's coin wallet — a process-wide placeholder until the backend owns
+ * the balance (top-ups, spend history). Sending a GIF spends from here.
+ */
+internal object LiveCoins {
+    var balance by mutableStateOf(120)
+}
+
+/** One in-flight floating GIF, animating up over the stream. */
+private data class FloatingGift(val id: Long, val emoji: String)
+
+/** A transient "X sent a GIF" banner shown just above the comments for ~2s. */
+private data class GiftAlert(val id: Long, val user: String, val emoji: String, val name: String)
+
+/**
+ * What the broadcaster sees while streaming: the real camera preview (LiveKit) with the
+ * live overlay — timer + real viewer count up top, audience comments trickling up from
+ * the bottom-left, floating hearts + incoming GIF gifts, pause, and controls. The video
+ * and viewer count are real; comments, hearts, and incoming gifts are local scaffold.
  */
 @Composable
-fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
+fun LiveBroadcastScreen(liveId: String, title: String, onEnd: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var confirmEnd by remember { mutableStateOf(false) }
-    var micOn by remember { mutableStateOf(true) }
+    var paused by remember { mutableStateOf(false) }
     var frontCam by remember { mutableStateOf(true) }
-    var viewers by remember { mutableStateOf(1) }
+    var viewers by remember { mutableStateOf(0) }
     var likes by remember { mutableStateOf(0) }
     var seconds by remember { mutableStateOf(0) }
     val comments = remember { mutableStateListOf<LiveComment>() }
     val hearts = remember { mutableStateListOf<Long>() }
+    val floatingGifts = remember { mutableStateListOf<FloatingGift>() }
+    var giftAlert by remember { mutableStateOf<GiftAlert?>(null) }
     var nextId by remember { mutableStateOf(0L) }
     var draft by remember { mutableStateOf("") }
-    // A comment the host tapped (its Balas/Sematkan sheet is open), and the one
-    // currently pinned to the top for everyone.
     var actionFor by remember { mutableStateOf<LiveComment?>(null) }
     var pinned by remember { mutableStateOf<LiveComment?>(null) }
     val commentFocus = remember { FocusRequester() }
     var focusTick by remember { mutableStateOf(0) }
     LaunchedEffect(focusTick) { if (focusTick > 0) runCatching { commentFocus.requestFocus() } }
+    val commentListState = rememberLazyListState()
+    // Auto-scroll to the newest comment. Keyed on the newest id (not size) so it keeps
+    // working after the list caps at 40 and the size stops changing.
+    LaunchedEffect(comments.lastOrNull()?.id) {
+        if (comments.isNotEmpty()) runCatching { commentListState.animateScrollToItem(0) }
+    }
+    // Gift banner lives ~2 seconds, then disappears.
+    LaunchedEffect(giftAlert?.id) {
+        if (giftAlert != null) { delay(2000); giftAlert = null }
+    }
+
+    // End the broadcast for real: tell the backend, drop the media session, leave.
+    fun endBroadcast() {
+        scope.launch { runCatching { SyntraClient.endLive(liveId) } }
+        LiveEngine.disconnect()
+        onEnd()
+    }
 
     fun sendComment() {
         val text = draft.trim()
@@ -455,7 +758,6 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
     }
     fun replyTo(c: LiveComment) {
         actionFor = null
-        // Start the reply already addressed to them, then open the keyboard.
         if (!draft.trimStart().startsWith("@${c.user}")) draft = "@${c.user} "
         focusTick++
     }
@@ -466,25 +768,37 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
 
     BackHandler { confirmEnd = true }
 
-    // Elapsed timer.
+    // Elapsed timer. Frozen while paused.
     LaunchedEffect(Unit) {
-        while (true) { delay(1000); seconds++ }
+        while (true) { delay(1000); if (!paused) seconds++ }
     }
-    // Viewers climb (with a little jitter) as if people are joining.
-    LaunchedEffect(Unit) {
+    // Real viewer count — poll the backend.
+    LaunchedEffect(liveId) {
         while (true) {
-            delay(1800)
-            viewers = (viewers + (1..7).random()).coerceAtMost(99_999)
-            if ((0..4).random() == 0 && viewers > 3) viewers -= (1..2).random()
+            delay(5000)
+            runCatching { SyntraClient.getLive(liveId) }.onSuccess { viewers = it.viewerCount }
         }
     }
-    // Comments trickle in.
+    // Comments trickle in (local scaffold). Frozen while paused.
     LaunchedEffect(Unit) {
         while (true) {
             delay((1400..2600).random().toLong())
+            if (paused) continue
             val (u, t) = sampleChatter.random()
             comments.add(LiveComment(nextId++, u, t))
             if (comments.size > 40) comments.removeAt(0)
+        }
+    }
+    // Viewers occasionally send GIF gifts (bought with coins on their side) — the host
+    // sees them float up plus a top banner. Local scaffold. Frozen while paused.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay((5000..11000).random().toLong())
+            if (paused) continue
+            val (u, _) = sampleChatter.random()
+            val gift = liveGifts.random()
+            floatingGifts.add(FloatingGift(nextId++, gift.emoji))
+            giftAlert = GiftAlert(nextId++, u, gift.emoji, gift.name)
         }
     }
 
@@ -494,16 +808,27 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
     }
 
     Box(Modifier.fillMaxSize().background(Color(0xFF0B0B10))) {
-        // Real camera preview (CameraX). The flip button drives [frontCam], which
-        // rebinds the lens live.
-        LiveCameraPreview(frontCam = frontCam, modifier = Modifier.fillMaxSize())
+        // Real camera preview via LiveKit. [frontCam] mirrors the self-view; the flip
+        // button drives [LiveEngine.switchCamera].
+        val local = LiveEngine.localVideo
+        if (local != null) {
+            LiveVideoRenderer(local, Modifier.fillMaxSize(), mirror = frontCam)
+        } else {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = Color.White)
+            }
+        }
 
         // Floating hearts (bottom-right).
         hearts.forEach { id ->
             key(id) { FloatingHeart(onDone = { hearts.remove(id) }) }
         }
+        // Floating GIF gifts drifting up the centre.
+        floatingGifts.forEach { g ->
+            key(g.id) { FloatingGiftView(emoji = g.emoji, onDone = { floatingGifts.remove(g) }) }
+        }
 
-        // Top overlay: host + LIVE + timer, and viewer count + close.
+        // Top overlay: host + LIVE + timer, viewer count, and pause.
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -546,9 +871,9 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
                 Box(
                     Modifier
                         .size(34.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.35f))
-                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { confirmEnd = true },
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { paused = true },
                     contentAlignment = Alignment.Center,
-                ) { Icon(Icons.Filled.Close, "Akhiri", tint = Color.White, modifier = Modifier.size(20.dp)) }
+                ) { Icon(Icons.Filled.Pause, "Jeda", tint = Color.White, modifier = Modifier.size(20.dp)) }
             }
             Spacer(Modifier.height(8.dp))
             Text(
@@ -559,7 +884,6 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
                     .background(Color.Black.copy(alpha = 0.3f))
                     .padding(horizontal = 10.dp, vertical = 4.dp),
             )
-            // Pinned comment banner — tap to unpin.
             pinned?.let { p ->
                 Spacer(Modifier.height(8.dp))
                 Row(
@@ -584,32 +908,37 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
             }
         }
 
-        // Comments — newest at the bottom, trickling up above the control bar.
-        LazyColumn(
+        // Comments (newest at the bottom) with the incoming-GIF banner pinned just
+        // above them — like TikTok's gift alerts.
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth(0.72f)
-                .fillMaxHeight(0.42f)
                 .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
                 .padding(start = 12.dp, bottom = 76.dp),
-            reverseLayout = true,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(comments.asReversed(), key = { it.id }) { c ->
-                LiveCommentRow(
-                    c,
-                    isPinned = pinned?.id == c.id,
-                    // Tapping an audience comment opens Balas / Sematkan; the host's own
-                    // lines aren't actionable.
-                    onClick = if (c.user == "Kamu") null else { { actionFor = c } },
-                )
+            giftAlert?.let { g ->
+                GiftAlertBanner(g)
+                Spacer(Modifier.height(8.dp))
+            }
+            LazyColumn(
+                state = commentListState,
+                modifier = Modifier.fillMaxWidth().fillMaxHeight(0.42f),
+                reverseLayout = true,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(comments.asReversed(), key = { it.id }) { c ->
+                    LiveCommentRow(
+                        c,
+                        isPinned = pinned?.id == c.id,
+                        onClick = if (c.user == "Kamu") null else { { actionFor = c } },
+                    )
+                }
             }
         }
 
-        // Bottom control bar: editable comment box + mic + flip + heart. The whole bar
-        // rises with the keyboard (union of nav-bar and IME insets: whichever is taller,
-        // never both stacked). While typing, the send button replaces the three controls
-        // so the field has room.
+        // Bottom control bar: editable comment box + mic + flip + heart. While typing,
+        // the send button replaces the three controls so the field has room.
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -642,26 +971,72 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
                         modifier = Modifier.fillMaxWidth().focusRequester(commentFocus),
                     )
                 }
-                // Send appears only when there's something to send.
                 if (draft.isNotBlank()) {
                     Box(
                         Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFFE5484D))
+                            .size(34.dp).clip(CircleShape).background(Color(0xFFE5484D))
                             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { sendComment() },
                         contentAlignment = Alignment.Center,
                     ) { Icon(Icons.AutoMirrored.Filled.Send, "Kirim", tint = Color.White, modifier = Modifier.size(18.dp)) }
                 }
             }
-            // Mic / flip / heart hide while typing to give the field room.
             if (draft.isBlank()) {
+                val micOn = LiveEngine.micEnabled
                 Spacer(Modifier.width(8.dp))
-                LiveControlButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff, if (micOn) "Bisukan" else "Nyalakan mik", active = !micOn) { micOn = !micOn }
+                LiveControlButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff, if (micOn) "Bisukan" else "Nyalakan mik", active = !micOn) { LiveEngine.fireMic() }
                 Spacer(Modifier.width(8.dp))
-                LiveControlButton(Icons.Filled.Cameraswitch, "Balik kamera") { frontCam = !frontCam }
+                LiveControlButton(Icons.Filled.Cameraswitch, "Balik kamera") { frontCam = !frontCam; LiveEngine.switchCamera() }
                 Spacer(Modifier.width(8.dp))
                 LiveControlButton(Icons.Filled.Favorite, "Suka", tint = Color(0xFFFF5D8F)) { spawnHeart() }
+            }
+        }
+
+        // Paused overlay — covers the stream (counters & comments frozen while up).
+        if (paused) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Box(
+                    Modifier.size(72.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.Pause, null, tint = Color.White, modifier = Modifier.size(38.dp)) }
+                Spacer(Modifier.height(16.dp))
+                Text("Siaran dijeda", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Text("Penonton melihat layar jeda. Lanjutkan kapan saja.", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+                Spacer(Modifier.height(24.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth(0.7f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.White)
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { paused = false }
+                        .padding(vertical = 14.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.PlayArrow, null, tint = Color(0xFF141726), modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Lanjutkan siaran", color = Color(0xFF141726), fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth(0.7f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { endBroadcast() }
+                        .padding(vertical = 13.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Hentikan siaran", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
             }
         }
     }
@@ -682,7 +1057,7 @@ fun LiveBroadcastScreen(title: String, onEnd: () -> Unit) {
             likes = likes,
             duration = liveClock(seconds),
             onDismiss = { confirmEnd = false },
-            onConfirm = onEnd,
+            onConfirm = { endBroadcast() },
         )
     }
 }
@@ -695,7 +1070,6 @@ private fun liveClock(totalSec: Int): String {
 
 @Composable
 private fun LiveCommentRow(c: LiveComment, isPinned: Boolean = false, onClick: (() -> Unit)? = null) {
-    // The host's own messages read as "you": accent name + a tinted bubble.
     val isHost = c.user == "Kamu"
     val bubble = Modifier
         .clip(RoundedCornerShape(12.dp))
@@ -729,6 +1103,30 @@ private fun LiveCommentRow(c: LiveComment, isPinned: Boolean = false, onClick: (
     }
 }
 
+/** TikTok-style "@user sent a GIF" banner, shown just above the comment stream. */
+@Composable
+private fun GiftAlertBanner(g: GiftAlert) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color(0xFF141726).copy(alpha = 0.9f))
+            .border(1.dp, Color(0xFFFFC24D).copy(alpha = 0.6f), RoundedCornerShape(50))
+            .padding(start = 6.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(26.dp).clip(CircleShape).background(Brush.linearGradient(liveGradient(g.user))),
+            contentAlignment = Alignment.Center,
+        ) { Text(g.user.take(1).uppercase(), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+        Spacer(Modifier.width(8.dp))
+        Text("@${g.user}", color = Color(0xFFFFC24D), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.width(5.dp))
+        Text("mengirim", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp)
+        Spacer(Modifier.width(6.dp))
+        Text(g.emoji, fontSize = 18.sp)
+    }
+}
+
 /** Balas / Sematkan sheet for a tapped audience comment. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -745,7 +1143,6 @@ private fun CommentActionSheet(
         containerColor = NexusSurface,
     ) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-            // Which comment this is about.
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.Top,
@@ -816,6 +1213,115 @@ private fun FloatingHeart(onDone: () -> Unit) {
                     scaleY = sc
                 },
         )
+    }
+}
+
+/** A GIF gift that floats up the centre of the stream, then removes itself. */
+@Composable
+private fun FloatingGiftView(emoji: String, onDone: () -> Unit) {
+    val rise = remember { Animatable(0f) }
+    val drift = remember { (-1f..1f).random() }
+    LaunchedEffect(Unit) {
+        rise.animateTo(1f, animationSpec = tween(2600))
+        onDone()
+    }
+    Box(Modifier.fillMaxSize()) {
+        Text(
+            emoji,
+            fontSize = 56.sp,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 140.dp)
+                .graphicsLayer {
+                    translationY = -rise.value * 360f
+                    translationX = drift * 80f * rise.value
+                    val sc = 0.6f + 0.7f * rise.value
+                    scaleX = sc
+                    scaleY = sc
+                    alpha = (1f - (rise.value - 0.6f) / 0.4f).coerceIn(0f, 1f)
+                },
+        )
+    }
+}
+
+/**
+ * GIF/gift picker — spend coins to send a GIF. Shows the wallet balance and an "Isi
+ * koin" top-up (placeholder), then a grid of gifts; ones you can't afford are dimmed.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GiftPickerSheet(
+    balance: Int,
+    onSend: (LiveGift) -> Unit,
+    onTopUp: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = NexusSurface,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Kirim GIF", color = NexusTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(NexusBackground)
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onTopUp)
+                        .padding(start = 12.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("🪙", fontSize = 14.sp)
+                    Spacer(Modifier.width(6.dp))
+                    Text(balance.toString(), color = NexusTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        Modifier.size(20.dp).clip(CircleShape).background(Color(0xFFFFC24D)),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("+", color = Color(0xFF141726), fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+            Text(
+                "Butuh koin untuk mengirim GIF. Ketuk 🪙 untuk isi ulang.",
+                color = NexusTextSecondary, fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 22.dp, vertical = 2.dp),
+            )
+            Spacer(Modifier.height(10.dp))
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                modifier = Modifier.fillMaxWidth().height(320.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(liveGifts, key = { it.id }) { gift ->
+                    val affordable = balance >= gift.cost
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(NexusBackground)
+                            .then(if (affordable) Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onSend(gift) } else Modifier)
+                            .padding(vertical = 14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(gift.emoji, fontSize = 30.sp, modifier = Modifier.graphicsLayer { alpha = if (affordable) 1f else 0.4f })
+                        Spacer(Modifier.height(6.dp))
+                        Text(gift.name, color = if (affordable) NexusTextPrimary else NexusTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("🪙", fontSize = 10.sp)
+                            Spacer(Modifier.width(3.dp))
+                            Text(gift.cost.toString(), color = if (affordable) Color(0xFFFFC24D) else NexusTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

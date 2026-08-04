@@ -174,6 +174,37 @@ data class NetRoomJoin(
     val sfuUrl: String,
 )
 
+// Live streaming — shapes from rest/handler/live.go (migration 66).
+
+/** One ongoing live broadcast (GET /lives, GET /lives/{id}). */
+data class NetLive(
+    val id: String,
+    val hostId: String = "",
+    val hostUsername: String = "",
+    val hostName: String = "",
+    val hostAvatarUrl: String? = null,
+    val title: String = "",
+    val category: String = "",
+    val viewerCount: Int = 0,
+    val startedAt: String = "",
+)
+
+/** Live list plus `meta.sfu_ready` — the Go Live button must be hidden when the SFU is off. */
+data class NetLiveList(
+    val lives: List<NetLive>,
+    val sfuReady: Boolean,
+)
+
+/** Result of POST /lives or /lives/{id}/join — carries the LiveKit credentials. */
+data class NetLiveJoin(
+    val liveId: String,
+    val role: String,
+    val canPublish: Boolean,
+    val sfuRoomId: String,
+    val sfuToken: String,
+    val sfuUrl: String,
+)
+
 /** Ephemeral room chat message (never stored server-side). */
 data class NetRoomMessage(
     val roomId: String,
