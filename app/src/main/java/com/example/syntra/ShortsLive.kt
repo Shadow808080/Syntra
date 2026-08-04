@@ -2,6 +2,7 @@ package com.example.syntra
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -96,6 +97,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.syntra.net.LiveEngine
 import com.example.syntra.net.NetLive
+import com.example.syntra.net.NetLiveGift
 import com.example.syntra.net.NetLiveMessage
 import com.example.syntra.net.SocketListener
 import com.example.syntra.net.SyntraClient
@@ -345,14 +347,29 @@ fun LiveViewerScreen(stream: LiveStream, onClose: () -> Unit) {
 
 @Composable
 private fun ViewerBody(stream: LiveStream, viewers: Int, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val floatingGifts = remember { mutableStateListOf<FloatingGift>() }
+    val giftIds = remember { AtomicLong(0L) }
     var showGiftPicker by remember { mutableStateOf(false) }
-    var nextGiftId by remember { mutableStateOf(0L) }
-    fun sendGift(gift: LiveGift): Boolean {
-        if (LiveCoins.balance < gift.cost) return false
-        LiveCoins.balance -= gift.cost
-        floatingGifts.add(FloatingGift(nextGiftId++, gift.emoji))
-        return true
+    var gifts by remember { mutableStateOf(liveGifts) }
+    // Load the wallet balance + gift catalog from the backend.
+    LaunchedEffect(Unit) {
+        runCatching { SyntraClient.getWallet() }.onSuccess { LiveCoins.balance = it }
+        runCatching { SyntraClient.getGifts() }.onSuccess { list -> if (list.isNotEmpty()) gifts = list.map { it.toLiveGift() } }
+    }
+    // Spend coins to send a gift — the SERVER is authoritative (deducts atomically and
+    // broadcasts). The gift floats when the live.gift echo arrives, so we don't float
+    // optimistically here.
+    fun sendGift(gift: LiveGift) {
+        scope.launch {
+            runCatching { SyntraClient.sendGift(stream.id, gift.id) }
+                .onSuccess { LiveCoins.balance = it.balance; showGiftPicker = false }
+                .onFailure {
+                    val msg = if (it is com.example.syntra.net.ApiException && it.code == "insufficient_coins") "Koin tidak cukup" else "Gagal mengirim GIF"
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
+        }
     }
 
     // Realtime comments over WebSocket: a typeable field + list. Sending goes out as a
@@ -381,6 +398,11 @@ private fun ViewerBody(stream: LiveStream, viewers: Int, onClose: () -> Unit) {
                 if (message.liveId != stream.id || message.senderId == SyntraClient.myUserId) return
                 comments.add(LiveComment(commentIds.incrementAndGet(), message.senderUsername.ifBlank { "penonton" }, message.body))
                 if (comments.size > 40) comments.removeAt(0)
+            }
+            // Float every gift, including our own (TikTok shows your own gift too).
+            override fun onLiveGift(gift: NetLiveGift) {
+                if (gift.liveId != stream.id) return
+                floatingGifts.add(FloatingGift(giftIds.incrementAndGet(), gift.emoji))
             }
         }
         SyntraClient.addListener(listener)
@@ -514,8 +536,9 @@ private fun ViewerBody(stream: LiveStream, viewers: Int, onClose: () -> Unit) {
     if (showGiftPicker) {
         GiftPickerSheet(
             balance = LiveCoins.balance,
-            onSend = { gift -> if (sendGift(gift)) showGiftPicker = false },
-            onTopUp = { LiveCoins.balance += 100 },
+            gifts = gifts,
+            onSend = { gift -> sendGift(gift) },
+            onTopUp = { scope.launch { runCatching { SyntraClient.topUpWallet(100) }.onSuccess { LiveCoins.balance = it } } },
             onDismiss = { showGiftPicker = false },
         )
     }
@@ -670,28 +693,17 @@ fun GoLiveScreen(onClose: () -> Unit) {
 
 private data class LiveComment(val id: Long, val user: String, val text: String)
 
-/** Placeholder audience chatter that trickles in while live (comments are local scaffold). */
-private val sampleChatter = listOf(
-    "budi_92" to "halo bang! 👋",
-    "sinta.ay" to "suaranya jernih bgt",
-    "roni" to "dari Surabaya nyimak 🔥",
-    "mega.w" to "first! ❤️",
-    "yoga_p" to "mantap kontennya",
-    "dewi" to "salam kenal semuaa",
-    "arif.hd" to "gaskeun 🚀",
-    "nabila" to "lucu bangett 😂",
-    "topan" to "kualitas videonya bagus",
-    "vina.s" to "izin share ya kak",
-    "galih" to "hadir full sampai habis",
-    "citra_a" to "request lagu dong 🎶",
-)
-
 /**
  * A GIF/gift the audience can send. [emoji] stands in for the real animated GIF until
  * a GIF source (GIPHY/backend) is wired; [cost] is the price in coins.
  */
 private data class LiveGift(val id: String, val emoji: String, val name: String, val cost: Int)
 
+/** Map a backend gift onto the picker model. [id] is the server uuid used to send. */
+private fun com.example.syntra.net.NetGift.toLiveGift() =
+    LiveGift(id = id, emoji = emoji, name = name, cost = cost)
+
+/** Fallback catalog shown only if GET /gifts fails; ids are codes so sending would fail. */
 private val liveGifts = listOf(
     LiveGift("rose", "🌹", "Mawar", 1),
     LiveGift("heart", "💖", "Hati", 5),
@@ -741,6 +753,7 @@ fun LiveBroadcastScreen(liveId: String, title: String, onEnd: () -> Unit) {
     var giftAlert by remember { mutableStateOf<GiftAlert?>(null) }
     var nextId by remember { mutableStateOf(0L) }
     val commentIds = remember { AtomicLong(1_000_000L) }
+    val giftIds = remember { AtomicLong(500_000L) }
     var draft by remember { mutableStateOf("") }
     var actionFor by remember { mutableStateOf<LiveComment?>(null) }
     var pinned by remember { mutableStateOf<LiveComment?>(null) }
@@ -806,21 +819,15 @@ fun LiveBroadcastScreen(liveId: String, title: String, onEnd: () -> Unit) {
                 comments.add(LiveComment(commentIds.incrementAndGet(), message.senderUsername.ifBlank { "penonton" }, message.body))
                 if (comments.size > 40) comments.removeAt(0)
             }
+            // A viewer sent a real GIF gift: float it and show the banner above comments.
+            override fun onLiveGift(gift: NetLiveGift) {
+                if (gift.liveId != liveId) return
+                floatingGifts.add(FloatingGift(giftIds.incrementAndGet(), gift.emoji))
+                giftAlert = GiftAlert(giftIds.incrementAndGet(), gift.senderUsername.ifBlank { "penonton" }, gift.emoji, gift.name)
+            }
         }
         SyntraClient.addListener(listener)
         onDispose { SyntraClient.removeListener(listener) }
-    }
-    // Viewers occasionally send GIF gifts (bought with coins on their side) — the host
-    // sees them float up plus a top banner. Local scaffold. Frozen while paused.
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay((5000..11000).random().toLong())
-            if (paused) continue
-            val (u, _) = sampleChatter.random()
-            val gift = liveGifts.random()
-            floatingGifts.add(FloatingGift(nextId++, gift.emoji))
-            giftAlert = GiftAlert(nextId++, u, gift.emoji, gift.name)
-        }
     }
 
     fun spawnHeart() {
@@ -1273,6 +1280,7 @@ private fun FloatingGiftView(emoji: String, onDone: () -> Unit) {
 @Composable
 private fun GiftPickerSheet(
     balance: Int,
+    gifts: List<LiveGift>,
     onSend: (LiveGift) -> Unit,
     onTopUp: () -> Unit,
     onDismiss: () -> Unit,
@@ -1320,7 +1328,7 @@ private fun GiftPickerSheet(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                items(liveGifts, key = { it.id }) { gift ->
+                items(gifts, key = { it.id }) { gift ->
                     val affordable = balance >= gift.cost
                     Column(
                         modifier = Modifier

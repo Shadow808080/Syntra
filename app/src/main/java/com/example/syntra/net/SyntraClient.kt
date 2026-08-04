@@ -73,6 +73,9 @@ interface SocketListener {
 
     /** Ephemeral live comment (never stored). */
     fun onLiveMessage(message: NetLiveMessage) {}
+
+    /** Someone sent a GIF gift in a live. */
+    fun onLiveGift(gift: NetLiveGift) {}
     /** Authoritative participant list — replace whatever is held locally. */
     fun onRoomParticipants(roomId: String, participants: List<NetRoomParticipant>) {}
     /** Someone asked to speak. Only delivered to hosts/moderators. */
@@ -1240,6 +1243,43 @@ object SyntraClient {
         postData("/api/v1/lives/$liveId/end", JSONObject())
     }
 
+    // --- Coins & GIF gifts (migration 67) ---
+
+    /** Current coin balance (creates the wallet with a welcome bonus if missing). */
+    suspend fun getWallet(): Int =
+        (getData("/api/v1/wallet") as JSONObject).optInt("balance", 0)
+
+    /** Top up coins (placeholder — no real payment yet). Returns the new balance. */
+    suspend fun topUpWallet(amount: Int): Int =
+        (postData("/api/v1/wallet/topup", JSONObject().put("amount", amount)) as JSONObject).optInt("balance", 0)
+
+    /** The gift catalog. */
+    suspend fun getGifts(): List<NetGift> =
+        (getData("/api/v1/gifts") as JSONArray).mapObjects {
+            NetGift(
+                id = it.optString("id"),
+                code = it.optString("code"),
+                emoji = it.optString("emoji"),
+                name = it.optString("name"),
+                cost = it.optInt("cost"),
+            )
+        }
+
+    /**
+     * Send a gift to a live: the server deducts coins atomically and broadcasts a
+     * `live.gift` to everyone watching. Returns the new balance. Throws ApiException
+     * with code "insufficient_coins" when the wallet can't cover it.
+     */
+    suspend fun sendGift(liveId: String, giftId: String): NetSendGiftResult {
+        val d = postData("/api/v1/lives/$liveId/gifts", JSONObject().put("gift_id", giftId)) as JSONObject
+        return NetSendGiftResult(
+            balance = d.optInt("balance", 0),
+            emoji = d.optString("emoji"),
+            name = d.optString("name"),
+            cost = d.optInt("cost"),
+        )
+    }
+
     suspend fun getRoomParticipants(roomId: String): List<NetRoomParticipant> =
         (getData("/api/v1/rooms/$roomId/participants") as JSONArray).mapObjects { it.toParticipant() }
 
@@ -1675,6 +1715,17 @@ object SyntraClient {
                         createdAt = d.optString("created_at"),
                     )
                     dispatch { it.onLiveMessage(m) }
+                }
+                "live.gift" -> (data as? JSONObject)?.let { d ->
+                    val g = NetLiveGift(
+                        liveId = d.optString("live_id"),
+                        senderId = d.optString("sender_id"),
+                        senderUsername = d.optString("sender_username"),
+                        emoji = d.optString("emoji"),
+                        name = d.optString("name"),
+                        cost = d.optInt("cost"),
+                    )
+                    dispatch { it.onLiveGift(g) }
                 }
                 "ack" -> {
                     // The presence.query reply comes back as an ack whose data is an

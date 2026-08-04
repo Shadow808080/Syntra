@@ -205,6 +205,33 @@ data class NetLiveJoin(
     val sfuUrl: String,
 )
 
+/** One GIF/gift in the catalog (GET /gifts). `id` is the server uuid used to send. */
+data class NetGift(
+    val id: String,
+    val code: String = "",
+    val emoji: String,
+    val name: String,
+    val cost: Int,
+)
+
+/** Result of POST /lives/{id}/gifts — new wallet balance + the gift that was sent. */
+data class NetSendGiftResult(
+    val balance: Int,
+    val emoji: String,
+    val name: String,
+    val cost: Int,
+)
+
+/** Realtime gift event on live:<id> (someone sent a GIF gift). */
+data class NetLiveGift(
+    val liveId: String,
+    val senderId: String,
+    val senderUsername: String = "",
+    val emoji: String,
+    val name: String,
+    val cost: Int,
+)
+
 /** Ephemeral live comment (never stored server-side). Username is resolved server-side. */
 data class NetLiveMessage(
     val liveId: String,
