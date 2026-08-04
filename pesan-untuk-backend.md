@@ -6,6 +6,28 @@ menguji ulang. Semua yang bisa dikerjakan dari sisi app **sudah dikerjakan**.
 
 ---
 
+## ⚠️ Bentrok nomor migrasi — sudah saya geser (5 Agustus 2026)
+
+Fitur **Live** menambah 2 migrasi di `server/migrations/`. Semula saya beri nomor
+**66** (`lives`) dan **67** (`coins_gifts`) karena di remote `origin/syntra` migrasi
+terakhir yang ter-*push* baru nomor **65** (`fix_edit_comment_limit`).
+
+Ternyata di lokalmu kamu **sudah pakai 66 (`group_info_open_to...`) dan 67
+(`list_conversations_av...`)** — belum ter-*push*, jadi tak terlihat dari sisiku.
+
+Supaya tidak bentrok, migrasi Live **sudah saya ganti nomornya jadi 68 & 69**:
+
+| Semula | Jadi |
+|---|---|
+| `20260804000066_lives.sql` | **`20260804000068_lives.sql`** |
+| `20260804000067_coins_gifts.sql` | **`20260804000069_coins_gifts.sql`** |
+
+Isi SQL tak diubah (tabel/fungsi tidak bentrok dengan punyamu — objeknya beda).
+**Tolong push dulu 66 & 67 milikmu**, lalu urutan jadi 65→66→67→68→69 rapi. Kalau
+ternyata kamu juga sudah pakai 68/69 secara lokal, bilang — nanti aku geser lagi.
+
+---
+
 ## ✅ Sudah beres (terima kasih — sudah disesuaikan di app)
 
 - **Auth** `POST /auth/login | /register | /refresh | /logout` — berjalan.
